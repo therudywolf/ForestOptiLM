@@ -1,0 +1,1765 @@
+"""
+Nocturne Data Forge — GUI (CustomTkinter), тёмная тема.
+Всегда: batch Map-Reduce по всем файлам / папке.
+"""
+from __future__ import annotations
+
+import asyncio
+import datetime as dt
+import logging
+import os
+import queue
+import re
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+from typing import Any, Literal
+
+import customtkinter as ctk
+import httpx
+import pandas as pd
+
+from lmstudio_config import (
+    get_default_model_optional,
+    load_ui_runtime_state,
+    sanitize_for_log,
+    save_ui_runtime_state,
+)
+from parser import ParseError, compute_dynamic_chunk_size, parse_file
+from processor import (
+    API_BASE,
+    API_KEY,
+    CONTEXT_FALLBACK,
+    SYSTEM_PROMPT_MAP,
+    check_vision_capability,
+    compute_job_id,
+    fetch_models_info,
+    answer_with_context,
+    set_runtime_modes,
+    set_runtime_limits,
+    summarize_model_tokens_by_category,
+    resolve_runtime_model_context,
+    run_batching,
+    run_map_reduce,
+    test_lmstudio_connection,
+)
+from pipeline import build_index, query_index
+
+logger = logging.getLogger("nocturne")
+
+MSG_PROGRESS  = "progress"
+MSG_RESULT    = "result"
+MSG_RESULT_DF = "result_df"
+MSG_ERROR     = "error"
+MSG_TRACE     = "trace"
+MAX_UI_WORKERS = 4
+
+FILE_TYPES = [
+    ("Документы / Код",
+     "*.txt *.md *.log *.ini *.rtf *.pdf *.docx *.odt *.epub "
+     "*.html *.htm *.py *.js *.ts *.tsx *.c *.cpp *.h *.java "
+     "*.go *.rs *.kt *.sql *.sh *.bat *.ps1 *.toml *.cfg *.properties"),
+    ("Изображения (vision)", "*.png *.jpg *.jpeg *.webp *.gif *.bmp *.tif *.tiff"),
+    ("Таблицы",  "*.csv *.xlsx *.xls *.json *.yaml *.yml"),
+    ("Архивы",   "*.zip *.tar *.tar.gz *.tgz *.gz"),
+    ("Все файлы", "*.*"),
+]
+
+
+class NocturneApp(ctk.CTk):
+    def __init__(self) -> None:
+        super().__init__()
+        self.title("Nocturne Data Forge")
+        self.geometry("1060x720")
+        ctk.set_appearance_mode("dark")
+        ctk.set_default_color_theme("blue")
+
+        self._file_path: Path | None = None
+        self._folder_path: Path | None = None
+        self._last_result_text: str = ""
+        self._last_result_df: pd.DataFrame | None = None
+        self._result_type: Literal["text", "table"] = "text"
+        self._queue: queue.Queue[dict[str, Any]] = queue.Queue()
+        self._running = False
+        self._stop_requested = False
+        self._log_entries: list[tuple[str, str]] = []  # (phase, formatted_line)
+        self._pending_log_lines: list[str] = []
+        self._log_flush_scheduled = False
+        self._log_filter_var = ctk.StringVar(value="all")
+        # context_length per model, populated after "Обновить модели"
+        self._model_ctx: dict[str, int] = {}
+        self._model_ctx_source: dict[str, str] = {}
+        self._cfg_default_model = get_default_model_optional()
+        self._runtime_state = load_ui_runtime_state()
+        self._runtime_state_ready = False
+        self._model_poll_after_id: str | None = None
+
+        self._build_ui()
+        self._apply_runtime_state_to_widgets()
+        self._runtime_state_ready = True
+        self._bind_runtime_state_watchers()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    # ------------------------------------------------------------------ #
+    #  Layout
+    # ------------------------------------------------------------------ #
+
+    def _build_ui(self) -> None:
+        # ---- sidebar ----
+        sidebar_container = ctk.CTkFrame(self, width=300, corner_radius=0,
+                                         fg_color=("#dcdcdc", "#2b2b2b"))
+        sidebar_container.pack(side="left", fill="y")
+        sidebar_container.pack_propagate(False)
+        sidebar = ctk.CTkScrollableFrame(
+            sidebar_container,
+            corner_radius=0,
+            fg_color="transparent",
+            width=290,
+        )
+        sidebar.pack(fill="both", expand=True)
+        self._build_sidebar(sidebar)
+
+        # ---- main panel ----
+        main = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
+        main.pack(side="left", fill="both", expand=True, padx=18, pady=18)
+        self._build_main(main)
+
+    def _build_sidebar(self, sb: ctk.CTkFrame) -> None:
+        pad = {"padx": 14}
+
+        ctk.CTkLabel(sb, text="Nocturne Data Forge",
+                     font=ctk.CTkFont(size=15, weight="bold")
+                     ).pack(anchor="w", pady=(14, 0), **pad)
+        ctk.CTkLabel(sb, text="Массовая обработка файлов через LLM",
+                     text_color="gray", font=ctk.CTkFont(size=11)
+                     ).pack(anchor="w", pady=(0, 10), **pad)
+
+        # API Base URL
+        ctk.CTkLabel(sb, text="API Base URL").pack(anchor="w", pady=(8, 0), **pad)
+        self._url_var = ctk.StringVar(value=API_BASE)
+        ctk.CTkEntry(sb, textvariable=self._url_var).pack(fill="x", pady=3, **pad)
+
+        # API Key
+        ctk.CTkLabel(sb, text="API Key").pack(anchor="w", pady=(6, 0), **pad)
+        self._api_key_var = ctk.StringVar(value=API_KEY)
+        ctk.CTkEntry(sb, textvariable=self._api_key_var, show="*"
+                     ).pack(fill="x", pady=3, **pad)
+
+        # Buttons row
+        ctk.CTkButton(sb, text="Обновить модели", height=30,
+                      command=self._on_fetch_models
+                      ).pack(fill="x", pady=(10, 3), **pad)
+        ctk.CTkButton(sb, text="Проверить LM Studio", height=28,
+                      fg_color="transparent", border_width=1,
+                      command=self._on_test_connection
+                      ).pack(fill="x", pady=(0, 8), **pad)
+
+        # LLM model
+        ctk.CTkLabel(sb, text="LLM модель (для ответов)").pack(anchor="w", pady=(6, 0), **pad)
+        self._model_var = ctk.StringVar(value="")
+        self._model_menu = ctk.CTkOptionMenu(
+            sb, variable=self._model_var,
+            values=["(нажмите Обновить модели)"],
+            dynamic_resizing=False, width=250,
+        )
+        self._model_menu.pack(fill="x", pady=3, **pad)
+        ctk.CTkLabel(sb, text="Чат-модель для генерации ответов.",
+                     text_color="gray", font=ctk.CTkFont(size=11),
+                     wraplength=250, justify="left",
+                     ).pack(anchor="w", pady=(0, 4), **pad)
+        ctk.CTkButton(
+            sb,
+            text="Пересчитать контекст модели",
+            height=28,
+            fg_color="transparent",
+            border_width=1,
+            command=self._on_recalc_selected_model_context,
+        ).pack(fill="x", pady=(0, 8), **pad)
+
+        # Separator
+        # Context length — auto-detected label
+        self._ctx_label = ctk.CTkLabel(
+            sb, text="Контекст модели: не определён",
+            text_color="gray", font=ctk.CTkFont(size=11),
+            wraplength=250, justify="left",
+        )
+        self._ctx_label.pack(anchor="w", pady=(8, 4), **pad)
+
+        ctk.CTkLabel(
+            sb,
+            text="Контекст берётся автоматически из LM Studio "
+                 "(loaded_context_length/context_length).",
+            text_color="gray",
+            font=ctk.CTkFont(size=11),
+            wraplength=250,
+            justify="left",
+        ).pack(anchor="w", pady=(0, 8), **pad)
+
+        # Workers
+        ctk.CTkLabel(sb, text="Параллельных воркеров (1–4)",
+                     font=ctk.CTkFont(size=12, weight="bold")
+                     ).pack(anchor="w", pady=(8, 0), **pad)
+        ctk.CTkLabel(
+            sb, text="Сколько чанков обрабатывать одновременно.",
+            text_color="gray", font=ctk.CTkFont(size=11),
+            wraplength=250, justify="left",
+        ).pack(anchor="w", pady=(0, 2), **pad)
+        self._workers_var = ctk.StringVar(value="3")
+        self._workers_seg = ctk.CTkSegmentedButton(
+            sb,
+            values=["1", "2", "3", "4"],
+            variable=self._workers_var,
+            dynamic_resizing=False,
+        )
+        self._workers_seg.pack(fill="x", pady=(0, 8), **pad)
+
+        ctk.CTkLabel(sb, text="Vision-модель (изображения)", font=ctk.CTkFont(size=12, weight="bold")
+                     ).pack(anchor="w", pady=(10, 0), **pad)
+        self._vision_model_var = ctk.StringVar(value="")
+        self._vision_menu = ctk.CTkOptionMenu(
+            sb, variable=self._vision_model_var,
+            values=["(нажмите Обновить модели)"],
+            dynamic_resizing=False, width=250,
+        )
+        self._vision_menu.pack(fill="x", pady=3, **pad)
+        ctk.CTkButton(
+            sb, text="Проверить Vision",
+            height=28,
+            fg_color="transparent",
+            border_width=1,
+            command=self._on_test_vision,
+        ).pack(fill="x", pady=(0, 8), **pad)
+
+        self._composer_use_var = ctk.BooleanVar(value=False)
+        self._composer_check = ctk.CTkCheckBox(
+            sb,
+            text="Отдельная composer-модель (merge/reduce)",
+            variable=self._composer_use_var,
+            command=self._on_composer_toggle,
+        )
+        self._composer_check.pack(anchor="w", pady=(4, 2), **pad)
+        self._composer_model_var = ctk.StringVar(value="")
+        self._composer_menu = ctk.CTkOptionMenu(
+            sb, variable=self._composer_model_var,
+            values=["(нажмите Обновить модели)"],
+            dynamic_resizing=False, width=250,
+        )
+        self._composer_menu.pack(fill="x", pady=(0, 8), **pad)
+        self._composer_menu.configure(state="disabled")
+
+        ctk.CTkLabel(sb, text="Embedding-модель (RAG)", font=ctk.CTkFont(size=12, weight="bold")
+                     ).pack(anchor="w", pady=(8, 0), **pad)
+        self._embedding_model_var = ctk.StringVar(value="")
+        self._embedding_menu = ctk.CTkOptionMenu(
+            sb,
+            variable=self._embedding_model_var,
+            values=["(нажмите Обновить модели)"],
+            dynamic_resizing=False,
+            width=250,
+        )
+        self._embedding_menu.pack(fill="x", pady=(3, 8), **pad)
+
+        ctk.CTkLabel(sb, text="Режимы выполнения", font=ctk.CTkFont(size=12, weight="bold")
+                     ).pack(anchor="w", pady=(10, 0), **pad)
+        self._api_mode_var = ctk.StringVar(value="native")
+        self._api_mode_menu = ctk.CTkOptionMenu(
+            sb, variable=self._api_mode_var,
+            values=["native", "openai"],
+            dynamic_resizing=False, width=250,
+            command=lambda _v: self._on_runtime_mode_changed(),
+        )
+        self._api_mode_menu.pack(fill="x", pady=(3, 3), **pad)
+        self._low_vram_var = ctk.BooleanVar(value=True)
+        self._low_vram_check = ctk.CTkCheckBox(
+            sb,
+            text="Low VRAM Sequential",
+            variable=self._low_vram_var,
+            command=self._on_runtime_mode_changed,
+        )
+        self._low_vram_check.pack(anchor="w", pady=(2, 2), **pad)
+        self._dual_instance_var = ctk.BooleanVar(value=False)
+        self._dual_instance_check = ctk.CTkCheckBox(
+            sb,
+            text="Dual instance для 5+ воркеров",
+            variable=self._dual_instance_var,
+            command=self._on_runtime_mode_changed,
+        )
+        # Принудительно отключено: в текущем режиме используем только 1 инстанс модели.
+        self._dual_instance_check.pack_forget()
+
+        ctk.CTkLabel(sb, text="Лимиты токенов", font=ctk.CTkFont(size=12, weight="bold")
+                     ).pack(anchor="w", pady=(10, 0), **pad)
+        ctk.CTkLabel(sb, text="MAX_REDUCE_INPUT_TOKENS").pack(anchor="w", pady=(4, 0), **pad)
+        self._max_reduce_tokens_var = ctk.StringVar(value=str(self._runtime_state.get("max_reduce_input_tokens", 24000)))
+        ctk.CTkEntry(sb, textvariable=self._max_reduce_tokens_var).pack(fill="x", pady=(2, 4), **pad)
+        ctk.CTkLabel(sb, text="NOCTURNE_MAX_CHUNK_TOKENS").pack(anchor="w", pady=(2, 0), **pad)
+        self._max_chunk_tokens_var = ctk.StringVar(value=str(self._runtime_state.get("max_chunk_tokens", 6000)))
+        ctk.CTkEntry(sb, textvariable=self._max_chunk_tokens_var).pack(fill="x", pady=(2, 8), **pad)
+
+    def _build_main(self, main: ctk.CTkFrame) -> None:
+        # File / folder row
+        btn_row = ctk.CTkFrame(main, fg_color="transparent")
+        btn_row.pack(anchor="w", fill="x", pady=(0, 4))
+        ctk.CTkButton(btn_row, text="Выбрать файл", width=140,
+                      command=self._on_select_file).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(btn_row, text="Выбрать папку", width=140,
+                      command=self._on_select_folder).pack(side="left")
+
+        self._file_label = ctk.CTkLabel(
+            main, text="Файл или папка не выбраны",
+            text_color="gray", anchor="w",
+        )
+        self._file_label.pack(anchor="w", pady=(2, 10), fill="x")
+
+        # Query
+        ctk.CTkLabel(main, text="Запрос — что сделать с файлами?"
+                     ).pack(anchor="w", pady=(0, 2))
+        self._query_text = ctk.CTkTextbox(main, height=88, wrap="word")
+        self._query_text.pack(fill="x", pady=(0, 10))
+
+        # Action buttons
+        act_row = ctk.CTkFrame(main, fg_color="transparent")
+        act_row.pack(anchor="w", fill="x", pady=(0, 8))
+        self._start_btn = ctk.CTkButton(
+            act_row, text="▶  СТАРТ", width=120,
+            fg_color="#1d4ed8", hover_color="#1e40af",
+            command=self._on_start,
+        )
+        self._start_btn.pack(side="left", padx=(0, 8))
+        self._stop_btn = ctk.CTkButton(
+            act_row, text="■  Стоп", width=90,
+            fg_color="#7f1d1d", hover_color="#991b1b",
+            state="disabled", command=self._on_stop,
+        )
+        self._stop_btn.pack(side="left")
+
+        # Progress
+        self._progress_bar = ctk.CTkProgressBar(main)
+        self._progress_bar.pack(fill="x", pady=(0, 2))
+        self._progress_bar.set(0)
+        self._status_label = ctk.CTkLabel(
+            main, text="Готов к работе", anchor="w", text_color="gray",
+        )
+        self._status_label.pack(anchor="w", pady=(0, 8))
+        self._loaded_model_label = ctk.CTkLabel(
+            main,
+            text="Активная модель в LM Studio: неизвестно",
+            anchor="w",
+            text_color="gray",
+        )
+        self._loaded_model_label.pack(anchor="w", pady=(0, 8))
+
+        # Meta-prompt preview label (shown when composer generates a directive)
+        self._meta_prompt_label = ctk.CTkLabel(
+            main,
+            text="",
+            anchor="w",
+            text_color="#6ee7b7",
+            wraplength=820,
+            justify="left",
+        )
+        self._meta_prompt_label.pack(anchor="w", pady=(0, 4))
+        self._meta_prompt_label.pack_forget()  # hidden until first meta_plan_done
+
+        # Tabs: Result / Logs
+        self._tabs = ctk.CTkTabview(main)
+        self._tabs.pack(fill="both", expand=True, pady=(0, 6))
+        self._result_tab = self._tabs.add("Результат")
+        self._logs_tab = self._tabs.add("Логи")
+        self._rag_tab = self._tabs.add("RAG")
+        self._tabs.set("Результат")
+
+        self._result_text = ctk.CTkTextbox(self._result_tab, wrap="word")
+        self._result_text.pack(fill="both", expand=True)
+        self._result_text.bind("<Key>", self._on_result_keypress)
+
+        log_toolbar = ctk.CTkFrame(self._logs_tab, fg_color="transparent")
+        log_toolbar.pack(fill="x", pady=(0, 6))
+        ctk.CTkButton(log_toolbar, text="Очистить", width=90,
+                      command=self._on_clear_logs).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(log_toolbar, text="Копировать", width=90,
+                      command=self._on_copy_logs).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(log_toolbar, text="Сохранить…", width=100,
+                      command=self._on_save_logs).pack(side="left")
+        ctk.CTkLabel(log_toolbar, text="Фильтр:").pack(side="right", padx=(8, 4))
+        self._log_filter_combo = ctk.CTkComboBox(
+            log_toolbar,
+            values=[
+                "all", "trace", "preflight", "extract", "map", "map_metrics", "vision_map",
+                "reduce", "reduce_merge", "retry", "summary", "quality_metrics", "batch",
+                "error", "general", "section_reduce", "synthesize",
+            ],
+            variable=self._log_filter_var,
+            width=160,
+            command=self._on_log_filter_change,
+        )
+        self._log_filter_combo.pack(side="right")
+        self._log_text = ctk.CTkTextbox(self._logs_tab, wrap="word")
+        self._log_text.pack(fill="both", expand=True)
+        self._build_rag_tab(self._rag_tab)
+
+        # Save row
+        save_row = ctk.CTkFrame(main, fg_color="transparent")
+        save_row.pack(anchor="w", fill="x")
+        ctk.CTkButton(save_row, text="Копировать", width=110,
+                      command=self._on_copy_result).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(save_row, text="Сохранить…", width=110,
+                      command=self._on_save_result).pack(side="left")
+
+    def _build_rag_tab(self, parent: ctk.CTkFrame) -> None:
+        row1 = ctk.CTkFrame(parent, fg_color="transparent")
+        row1.pack(fill="x", pady=(0, 8))
+        ctk.CTkLabel(row1, text="Директория индекса").pack(side="left", padx=(0, 8))
+        self._rag_index_dir_var = ctk.StringVar(value=str(self._runtime_state.get("rag_index_dir", ".nocturne_index")))
+        ctk.CTkEntry(row1, textvariable=self._rag_index_dir_var).pack(side="left", fill="x", expand=True)
+
+        row2 = ctk.CTkFrame(parent, fg_color="transparent")
+        row2.pack(fill="x", pady=(0, 8))
+        ctk.CTkLabel(row2, text="top_k").pack(side="left", padx=(0, 8))
+        self._rag_top_k_var = ctk.StringVar(value=str(self._runtime_state.get("rag_top_k", 8)))
+        ctk.CTkEntry(row2, textvariable=self._rag_top_k_var, width=80).pack(side="left")
+        ctk.CTkButton(row2, text="Построить индекс", width=140, command=self._on_build_index).pack(side="left", padx=(12, 8))
+        ctk.CTkButton(row2, text="Задать вопрос", width=120, command=self._on_rag_ask).pack(side="left")
+
+        ctk.CTkLabel(parent, text="Вопрос к индексу").pack(anchor="w", pady=(4, 2))
+        self._rag_question_text = ctk.CTkTextbox(parent, height=100, wrap="word")
+        self._rag_question_text.pack(fill="x", pady=(0, 8))
+
+        ctk.CTkLabel(parent, text="Ответ RAG").pack(anchor="w", pady=(2, 2))
+        self._rag_answer_text = ctk.CTkTextbox(parent, wrap="word")
+        self._rag_answer_text.pack(fill="both", expand=True)
+
+    # ------------------------------------------------------------------ #
+    #  Event handlers
+    # ------------------------------------------------------------------ #
+
+    def _on_result_keypress(self, event: Any) -> str | None:
+        ctrl = bool((event.state or 0) & 0x4)
+        if ctrl and event.keysym.lower() in {"c", "a"}:
+            return None
+        if event.keysym in {"Left", "Right", "Up", "Down",
+                             "Home", "End", "Prior", "Next"}:
+            return None
+        return "break"
+
+    def _on_copy_result(self) -> None:
+        text = self._result_text.get("1.0", "end-1c")
+        self.clipboard_clear()
+        self.clipboard_append(text)
+        self._set_status("Скопировано в буфер обмена")
+
+    def _append_log_line(self, line: str, phase: str = "general") -> None:
+        if not line:
+            return
+        line = sanitize_for_log(line)
+        stamp = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        formatted = f"{stamp} | {phase:14} | {line}"
+        self._log_entries.append((phase, formatted))
+        if len(self._log_entries) > 8000:
+            self._log_entries = self._log_entries[-6000:]
+        flt = self._log_filter_var.get()
+        show = (
+            flt == "all"
+            or flt == phase
+            or (flt == "error" and ("ERROR" in line or "[ERROR]" in line))
+        )
+        if show:
+            self._pending_log_lines.append(formatted)
+            if not self._log_flush_scheduled:
+                self._log_flush_scheduled = True
+                self.after(150, self._flush_logs_to_ui)
+
+    def _flush_logs_to_ui(self) -> None:
+        self._log_flush_scheduled = False
+        if not self._pending_log_lines:
+            return
+        chunk = "\n".join(self._pending_log_lines) + "\n"
+        self._pending_log_lines.clear()
+        self._log_text.insert("end", chunk)
+        self._log_text.see("end")
+
+    def _on_log_filter_change(self, _choice: str | None = None) -> None:
+        flt = self._log_filter_var.get()
+        self._log_text.delete("1.0", "end")
+        for phase, formatted in self._log_entries:
+            if (
+                flt == "all"
+                or flt == phase
+                or (flt == "error" and "ERROR" in formatted)
+            ):
+                self._log_text.insert("end", formatted + "\n")
+        self._log_text.see("end")
+
+    def _on_clear_logs(self) -> None:
+        self._log_entries.clear()
+        self._pending_log_lines.clear()
+        self._log_text.delete("1.0", "end")
+
+    def _on_copy_logs(self) -> None:
+        text = self._log_text.get("1.0", "end-1c")
+        self.clipboard_clear()
+        self.clipboard_append(text)
+        self._set_status("Логи скопированы в буфер")
+
+    def _on_save_logs(self) -> None:
+        p = ctk.filedialog.asksaveasfilename(
+            defaultextension=".log",
+            filetypes=[("Log", "*.log"), ("Text", "*.txt"), ("Все", "*.*")],
+        )
+        if p:
+            all_lines = [ln for _, ln in self._log_entries]
+            Path(p).write_text("\n".join(all_lines), encoding="utf-8")
+            self._set_status(f"Логи сохранены: {p}")
+
+    def _pick_embedding_model(self) -> str:
+        selected = self._embedding_model_var.get().strip()
+        if selected and not selected.startswith("("):
+            return selected
+        candidates = [m for m in (self._model_menu.cget("values") or []) if isinstance(m, str)]
+        embed = next((m for m in candidates if "embed" in m.lower()), "")
+        if embed:
+            self._embedding_model_var.set(embed)
+            return embed
+        return ""
+
+    def _on_close(self) -> None:
+        if self._model_poll_after_id is not None:
+            self.after_cancel(self._model_poll_after_id)
+            self._model_poll_after_id = None
+        self.destroy()
+
+    def _poll_loaded_model(self) -> None:
+        base_url = self._url_var.get().strip() or API_BASE
+        api_key = self._api_key_var.get().strip() or API_KEY
+        root = base_url[:-3] if base_url.endswith("/v1") else base_url
+        headers: dict[str, str] = {}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        try:
+            r = httpx.get(f"{root}/api/v1/models", headers=headers, timeout=5.0)
+            if r.status_code < 400:
+                data = r.json()
+                loaded_names: list[str] = []
+                for m in data.get("models", []):
+                    key = str(m.get("key") or m.get("id") or "")
+                    loaded = m.get("loaded_instances") or []
+                    if isinstance(loaded, list) and loaded:
+                        loaded_names.append(key)
+                text = ", ".join(loaded_names) if loaded_names else "нет загруженных моделей"
+                self._loaded_model_label.configure(text=f"Активная модель в LM Studio: {text}")
+        except Exception:
+            self._loaded_model_label.configure(text="Активная модель в LM Studio: недоступно")
+        self._model_poll_after_id = self.after(4000, self._poll_loaded_model)
+
+    def _on_build_index(self) -> None:
+        if self._running:
+            self._set_status("Дождитесь завершения текущей задачи", "#f59e0b")
+            return
+        if self._folder_path is None and self._file_path is None:
+            self._set_status("Выберите файл или папку для индекса", "#f59e0b")
+            return
+        emb = self._pick_embedding_model()
+        if not emb:
+            self._set_status("Не выбрана embedding-модель", "#f59e0b")
+            return
+        index_dir = Path(self._rag_index_dir_var.get().strip() or ".nocturne_index")
+        base_url = self._url_var.get().strip() or API_BASE
+        api_key = self._api_key_var.get().strip() or API_KEY
+        context_budget = self._get_context_budget()
+        reserve = self._get_response_reserve(context_budget)
+        chunk_size = compute_dynamic_chunk_size(context_budget, SYSTEM_PROMPT_MAP, "index build", response_reserve=reserve)
+        input_paths = [self._folder_path] if self._folder_path else [self._file_path]  # type: ignore[list-item]
+
+        self._set_status("RAG: строю индекс…")
+        self._append_log_line(f"[RAG] build_index dir={index_dir} embedding={emb}", "general")
+
+        def do_build() -> None:
+            try:
+                stats = build_index(
+                    input_paths=input_paths,  # type: ignore[arg-type]
+                    index_dir=index_dir,
+                    base_url=base_url,
+                    api_key=api_key,
+                    embedding_model=emb,
+                    chunk_size_tokens=chunk_size,
+                )
+                self.after(0, lambda: self._set_status(
+                    f"Индекс готов: chunks={stats.chunks_total}, files={stats.files_total}", "lightgreen"
+                ))
+                self.after(0, lambda: self._append_log_line(
+                    f"[RAG] index built dir={stats.index_dir} chunks={stats.chunks_total} files={stats.files_total}",
+                    "summary",
+                ))
+            except Exception as exc:
+                safe = sanitize_for_log(str(exc))
+                self.after(0, lambda: self._set_status(f"Ошибка индекса: {safe}", "#f87171"))
+
+        threading.Thread(target=do_build, daemon=True).start()
+
+    def _on_rag_ask(self) -> None:
+        question = self._rag_question_text.get("1.0", "end-1c").strip()
+        if not question:
+            self._set_status("Введите вопрос для RAG", "#f59e0b")
+            return
+        emb = self._pick_embedding_model()
+        if not emb:
+            self._set_status("Не выбрана embedding-модель", "#f59e0b")
+            return
+        model = self._model_var.get().strip()
+        if not model or model.startswith("("):
+            self._set_status("Выберите LLM модель", "#f59e0b")
+            return
+        try:
+            top_k = max(1, int(self._rag_top_k_var.get().strip() or "8"))
+        except Exception:
+            top_k = 8
+        index_dir = Path(self._rag_index_dir_var.get().strip() or ".nocturne_index")
+        base_url = self._url_var.get().strip() or API_BASE
+        api_key = self._api_key_var.get().strip() or API_KEY
+
+        self._set_status("RAG: ищу контекст и формирую ответ…")
+        self._append_log_line(f"[RAG] query top_k={top_k} model={model} embedding={emb}", "general")
+
+        def do_ask() -> None:
+            try:
+                hits = query_index(
+                    question=question,
+                    index_dir=index_dir,
+                    base_url=base_url,
+                    api_key=api_key,
+                    embedding_model=emb,
+                    top_k=top_k,
+                )
+                contexts = [h.text for h in hits]
+                if not contexts:
+                    self.after(0, lambda: self._rag_answer_text.delete("1.0", "end"))
+                    self.after(0, lambda: self._rag_answer_text.insert("1.0", "Контексты не найдены в индексе."))
+                    self.after(0, lambda: self._set_status("RAG: контексты не найдены", "#f59e0b"))
+                    return
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    answer = loop.run_until_complete(
+                        answer_with_context(
+                            question=question,
+                            contexts=contexts,
+                            base_url=base_url,
+                            api_key=api_key,
+                            model=model,
+                            workers=max(1, int(self._workers_var.get() or "1")),
+                            api_mode=self._api_mode_var.get().strip().lower(),
+                        )
+                    )
+                finally:
+                    loop.close()
+                self.after(0, lambda: self._rag_answer_text.delete("1.0", "end"))
+                self.after(0, lambda a=answer: self._rag_answer_text.insert("1.0", a))
+                self.after(0, lambda: self._set_status("RAG: ответ готов", "lightgreen"))
+            except Exception as exc:
+                safe = sanitize_for_log(str(exc))
+                self.after(0, lambda: self._set_status(f"RAG ошибка: {safe}", "#f87171"))
+
+        threading.Thread(target=do_ask, daemon=True).start()
+
+    def _on_recalc_selected_model_context(self) -> None:
+        model = self._model_var.get().strip()
+        if not model or model.startswith("("):
+            self._set_status("Сначала выберите модель", "#f59e0b")
+            return
+        base_url = self._url_var.get().strip() or API_BASE
+        api_key = self._api_key_var.get().strip() or API_KEY
+
+        def recalc() -> None:
+            self.after(0, lambda: self._set_status(f"Пересчитываю runtime-контекст: {model}…"))
+            ctx, source, state = resolve_runtime_model_context(
+                base_url=base_url,
+                api_key=api_key,
+                model=model,
+                wait_for_loaded=True,
+                max_wait_seconds=180.0,
+                poll_interval_seconds=1.0,
+            )
+            if ctx:
+                self._model_ctx[model] = ctx
+                self._model_ctx_source[model] = source
+                self.after(0, lambda: self._update_ctx_label(model))
+                self.after(
+                    0,
+                    lambda: self._set_status(
+                        f"Контекст {model}: {ctx:,} (source={source}, state={state})".replace(",", " "),
+                        "lightgreen",
+                    ),
+                )
+                self.after(
+                    0,
+                    lambda: self._append_log_line(
+                        f"[RECALC] model={model} context={ctx} source={source} state={state}",
+                        "general",
+                    ),
+                )
+            else:
+                self.after(
+                    0,
+                    lambda: self._set_status(
+                        f"Не удалось пересчитать контекст {model} (state={state})",
+                        "#f59e0b",
+                    ),
+                )
+
+        threading.Thread(target=recalc, daemon=True).start()
+
+    def _apply_runtime_state_to_widgets(self) -> None:
+        state = self._runtime_state
+        try:
+            w = int(state.get("workers", 3))
+        except Exception:
+            w = 3
+        self._workers_var.set(str(max(1, min(MAX_UI_WORKERS, w))))
+        if str(state.get("base_url") or "").strip():
+            self._url_var.set(str(state.get("base_url") or "").strip())
+        self._composer_use_var.set(bool(state.get("composer_enabled", False)))
+        self._api_mode_var.set("openai" if state.get("api_mode") == "openai" else "native")
+        self._low_vram_var.set(bool(state.get("low_vram_mode", True)))
+        self._dual_instance_var.set(False)
+        self._max_reduce_tokens_var.set(str(state.get("max_reduce_input_tokens", 24000)))
+        self._max_chunk_tokens_var.set(str(state.get("max_chunk_tokens", 6000)))
+        self._rag_index_dir_var.set(str(state.get("rag_index_dir") or ".nocturne_index"))
+        self._rag_top_k_var.set(str(state.get("rag_top_k", 8)))
+        em = str(state.get("selected_embedding_model") or "").strip()
+        if em:
+            self._embedding_model_var.set(em)
+        try:
+            set_runtime_limits(
+                max_reduce_input_tokens=int(self._max_reduce_tokens_var.get() or "24000"),
+                max_chunk_tokens=int(self._max_chunk_tokens_var.get() or "6000"),
+            )
+        except Exception:
+            pass
+        self._on_composer_toggle()
+
+    def _collect_runtime_state(self) -> dict[str, object]:
+        try:
+            workers_val = int(self._workers_var.get() or "3")
+        except ValueError:
+            workers_val = 3
+        try:
+            max_reduce_tokens = int(self._max_reduce_tokens_var.get() or "24000")
+        except ValueError:
+            max_reduce_tokens = 24000
+        try:
+            max_chunk_tokens = int(self._max_chunk_tokens_var.get() or "6000")
+        except ValueError:
+            max_chunk_tokens = 6000
+        try:
+            rag_top_k = int(self._rag_top_k_var.get() or "8")
+        except ValueError:
+            rag_top_k = 8
+        return {
+            "selected_model": self._model_var.get().strip(),
+            "selected_vision_model": self._vision_model_var.get().strip(),
+            "selected_composer_model": self._composer_model_var.get().strip(),
+            "selected_embedding_model": self._embedding_model_var.get().strip(),
+            "composer_enabled": bool(self._composer_use_var.get()),
+            "workers": max(1, min(MAX_UI_WORKERS, workers_val)),
+            "api_mode": self._api_mode_var.get().strip().lower(),
+            "low_vram_mode": bool(self._low_vram_var.get()),
+            "dual_instance_mode": False,
+            "base_url": self._url_var.get().strip(),
+            "max_reduce_input_tokens": max_reduce_tokens,
+            "max_chunk_tokens": max_chunk_tokens,
+            "rag_index_dir": self._rag_index_dir_var.get().strip() or ".nocturne_index",
+            "rag_top_k": rag_top_k,
+        }
+
+    def _persist_runtime_state(self) -> None:
+        if not self._runtime_state_ready:
+            return
+        try:
+            try:
+                set_runtime_limits(
+                    max_reduce_input_tokens=int(self._max_reduce_tokens_var.get() or "24000"),
+                    max_chunk_tokens=int(self._max_chunk_tokens_var.get() or "6000"),
+                )
+            except Exception:
+                pass
+            state = self._collect_runtime_state()
+            self._runtime_state = dict(state)
+            save_ui_runtime_state(state)
+        except Exception as exc:
+            logger.warning("Cannot persist runtime ui state: %s", sanitize_for_log(str(exc)))
+
+    def _on_runtime_mode_changed(self) -> None:
+        set_runtime_modes(
+            api_mode=self._api_mode_var.get().strip().lower(),
+            low_vram_mode=bool(self._low_vram_var.get()),
+            dual_instance_mode=False,
+        )
+        self._persist_runtime_state()
+
+    def _on_model_changed(self, *_args: Any) -> None:
+        self._update_ctx_label(self._model_var.get())
+        self._persist_runtime_state()
+
+    def _on_composer_toggle(self) -> None:
+        enabled = bool(self._composer_use_var.get())
+        self._composer_menu.configure(state="normal" if enabled else "disabled")
+        self._persist_runtime_state()
+
+    def _bind_runtime_state_watchers(self) -> None:
+        self._model_var.trace_add("write", self._on_model_changed)
+        self._vision_model_var.trace_add("write", lambda *_: self._persist_runtime_state())
+        self._composer_model_var.trace_add("write", lambda *_: self._persist_runtime_state())
+        self._embedding_model_var.trace_add("write", lambda *_: self._persist_runtime_state())
+        self._composer_use_var.trace_add("write", lambda *_: self._persist_runtime_state())
+        self._workers_var.trace_add("write", lambda *_: self._persist_runtime_state())
+        self._low_vram_var.trace_add("write", lambda *_: self._persist_runtime_state())
+        self._url_var.trace_add("write", lambda *_: self._persist_runtime_state())
+        self._max_reduce_tokens_var.trace_add("write", lambda *_: self._persist_runtime_state())
+        self._max_chunk_tokens_var.trace_add("write", lambda *_: self._persist_runtime_state())
+        self._rag_index_dir_var.trace_add("write", lambda *_: self._persist_runtime_state())
+        self._rag_top_k_var.trace_add("write", lambda *_: self._persist_runtime_state())
+
+    def _validate_lm_connection_fields(self) -> tuple[bool, str]:
+        """Проверка полей подключения до сетевых запросов."""
+        url = self._url_var.get().strip()
+        if not url:
+            return (
+                False,
+                "Укажите API Base URL в боковой панели или создайте .local/lmstudio.json (см. README).",
+            )
+        if not re.match(r"^https?://", url, re.I):
+            return False, "API Base URL должен начинаться с http:// или https://"
+        return True, ""
+
+    def _on_fetch_models(self) -> None:
+        url = self._url_var.get().strip()
+        key = self._api_key_var.get().strip()
+        mode_state = set_runtime_modes(
+            api_mode=self._api_mode_var.get().strip().lower(),
+            low_vram_mode=bool(self._low_vram_var.get()),
+            dual_instance_mode=False,
+        )
+        ok, err = self._validate_lm_connection_fields()
+        if not ok:
+            self._set_status(err, "#f59e0b")
+            return
+
+        def do_fetch() -> None:
+            try:
+                models, ctx, sources = fetch_models_info(url, key)
+                cat_tokens = summarize_model_tokens_by_category(url, key)
+                self.after(0, lambda m=models, c=ctx, s=sources: self._set_models(m, c, s))
+                self.after(
+                    0,
+                    lambda t=cat_tokens: self._append_log_line(
+                        f"[MODELS tokens] llm={t.get('llm', 0)} embedding={t.get('embedding', 0)} vision={t.get('vision', 0)} tool={t.get('tool', 0)}",
+                        "general",
+                    ),
+                )
+            except Exception as exc:
+                safe = sanitize_for_log(str(exc))
+                self.after(0, lambda s=safe: self._set_status(f"Ошибка: {s}", "#f87171"))
+
+        self._set_status(f"Загружаю список моделей… ({mode_state.get('api_mode', 'native')})")
+        threading.Thread(target=do_fetch, daemon=True).start()
+
+    def _set_models(
+        self,
+        models: list[str],
+        ctx: dict[str, int],
+        sources: dict[str, str],
+    ) -> None:
+        self._model_ctx = ctx
+        self._model_ctx_source = sources
+        vals = models if models else ["(модели не найдены)"]
+        self._model_menu.configure(values=vals)
+        self._vision_menu.configure(values=vals)
+        self._composer_menu.configure(values=vals)
+        self._embedding_menu.configure(values=vals)
+        if models:
+            persisted_main = str(self._runtime_state.get("selected_model") or "").strip()
+            persisted_vision = str(self._runtime_state.get("selected_vision_model") or "").strip()
+            persisted_composer = str(self._runtime_state.get("selected_composer_model") or "").strip()
+            persisted_embedding = str(self._runtime_state.get("selected_embedding_model") or "").strip()
+            dm = self._cfg_default_model
+            if persisted_main and persisted_main in models:
+                chat = persisted_main
+            elif dm and dm in models:
+                chat = dm
+            else:
+                chat = next((m for m in models if "embed" not in m.lower()), models[0])
+            vision_sel = persisted_vision if persisted_vision in models else chat
+            composer_sel = persisted_composer if persisted_composer in models else chat
+            embedding_sel = (
+                persisted_embedding
+                if persisted_embedding in models
+                else next((m for m in models if "embed" in m.lower()), chat)
+            )
+            self._model_var.set(chat)
+            self._vision_model_var.set(vision_sel)
+            self._composer_model_var.set(composer_sel)
+            self._embedding_model_var.set(embedding_sel)
+            self._update_ctx_label(chat)
+        self._set_status(f"Загружено моделей: {len(models)}")
+        self._persist_runtime_state()
+        if self._model_poll_after_id is None:
+            self._poll_loaded_model()
+
+    def _update_ctx_label(self, model: str) -> None:
+        ctx = self._model_ctx.get(model)
+        source = self._model_ctx_source.get(model, "fallback")
+        if ctx:
+            source_hint = (
+                "runtime loaded" if source == "runtime_loaded"
+                else "metadata (not loaded)" if source == "metadata_not_loaded"
+                else "из /models" if source == "metadata"
+                else "через probe" if source == "probe"
+                else f"fallback {CONTEXT_FALLBACK:,}".replace(",", " ")
+            )
+            self._ctx_label.configure(
+                text=f"Контекст модели: {ctx:,} токенов ({source_hint})".replace(",", " "),
+                text_color="lightgreen",
+            )
+        else:
+            self._ctx_label.configure(
+                text=(
+                    "Контекст модели: не определён, используется fallback "
+                    f"{CONTEXT_FALLBACK:,}".replace(",", " ")
+                ),
+                text_color="#f59e0b",
+            )
+
+    def _get_context_budget(self) -> int:
+        """Бюджет контекста только из LM Studio metadata."""
+        model = self._model_var.get().strip()
+        return max(500, self._model_ctx.get(model, CONTEXT_FALLBACK))
+
+    def _get_response_reserve(self, context_budget: int) -> int:
+        # Автоматический резерв без ручной настройки: ~20% контекста, но в разумных рамках.
+        reserve = max(1024, min(4096, int(context_budget * 0.2)))
+        return max(256, min(reserve, max(256, context_budget - 500)))
+
+    def _on_test_connection(self) -> None:
+        set_runtime_modes(
+            api_mode=self._api_mode_var.get().strip().lower(),
+            low_vram_mode=bool(self._low_vram_var.get()),
+            dual_instance_mode=False,
+        )
+        ok, err = self._validate_lm_connection_fields()
+        if not ok:
+            self._set_status(err, "#f59e0b")
+            return
+        base_url = self._url_var.get().strip() or API_BASE
+        api_key  = self._api_key_var.get().strip() or API_KEY
+
+        def do_test() -> None:
+            ok, msg = test_lmstudio_connection(base_url, api_key)
+            msg = sanitize_for_log(msg)
+            color = "lightgreen" if ok else "#f87171"
+            self.after(0, lambda: self._status_label.configure(
+                text=f"LM Studio: {msg}", text_color=color,
+            ))
+
+        self._set_status("Проверка LM Studio…")
+        threading.Thread(target=do_test, daemon=True).start()
+
+    def _on_test_vision(self) -> None:
+        set_runtime_modes(
+            api_mode=self._api_mode_var.get().strip().lower(),
+            low_vram_mode=bool(self._low_vram_var.get()),
+            dual_instance_mode=False,
+        )
+        ok, err = self._validate_lm_connection_fields()
+        if not ok:
+            self._set_status(err, "#f59e0b")
+            return
+        base_url = self._url_var.get().strip() or API_BASE
+        api_key = self._api_key_var.get().strip() or API_KEY
+        vm = self._vision_model_var.get().strip() or self._model_var.get().strip()
+        if not vm or vm.startswith("("):
+            self._set_status("Выберите Vision-модель или основную LLM", "#f59e0b")
+            return
+
+        def do_test() -> None:
+            ok, msg = check_vision_capability(base_url, api_key, vm)
+            msg = sanitize_for_log(msg)
+            color = "lightgreen" if ok else "#f87171"
+            self.after(0, lambda: self._append_log_line(f"[VISION check] {msg}", "vision_map"))
+            self.after(0, lambda: self._status_label.configure(text=f"Vision: {msg}", text_color=color))
+
+        self._set_status(f"Проверка Vision: {vm}…")
+        threading.Thread(target=do_test, daemon=True).start()
+
+    def _on_select_file(self) -> None:
+        path = ctk.filedialog.askopenfilename(filetypes=FILE_TYPES)
+        if path:
+            self._file_path = Path(path)
+            self._folder_path = None
+            self._file_label.configure(text=str(self._file_path))
+
+    def _on_select_folder(self) -> None:
+        path = ctk.filedialog.askdirectory()
+        if path:
+            self._folder_path = Path(path)
+            self._file_path = None
+            self._file_label.configure(text=f"[Папка]  {self._folder_path}")
+
+    def _on_stop(self) -> None:
+        self._stop_requested = True
+        self._set_status("Остановка после текущего чанка…")
+
+    def _on_start(self) -> None:
+        if self._running:
+            return
+
+        selected = self._file_path or self._folder_path
+        if not selected or not selected.exists():
+            self._set_status("Выберите файл или папку")
+            return
+
+        query = self._query_text.get("1.0", "end").strip()
+        if not query:
+            self._set_status("Введите запрос")
+            return
+
+        ok_lm, err_lm = self._validate_lm_connection_fields()
+        if not ok_lm:
+            self._set_status(err_lm, "#f59e0b")
+            return
+
+        model = self._model_var.get().strip()
+        if not model or model.startswith("("):
+            self._set_status("Выберите модель (нажмите «Обновить модели»)")
+            return
+
+        context_budget = self._get_context_budget()
+        response_reserve = self._get_response_reserve(context_budget)
+        try:
+            workers = max(1, min(MAX_UI_WORKERS, int(self._workers_var.get())))
+        except ValueError:
+            workers = 3
+
+        base_url = self._url_var.get().strip() or API_BASE
+        api_key  = self._api_key_var.get().strip() or API_KEY
+
+        # Reset state
+        self._last_result_text = ""
+        self._last_result_df   = None
+        self._stop_requested   = False
+        self._result_text.delete("1.0", "end")
+        self._progress_bar.set(0)
+        self._running = True
+        self._start_btn.configure(state="disabled")
+        self._stop_btn.configure(state="normal")
+        # Hide meta-prompt preview from previous run
+        self._meta_prompt_label.configure(text="")
+        self._meta_prompt_label.pack_forget()
+        self._set_status(
+            (
+                f"Старт: контекст={context_budget:,}, резерв={response_reserve:,}, "
+                f"воркеров={workers}, chunk≈контекст-system-query-резерв"
+            ).replace(",", " ")
+        )
+        vm = self._vision_model_var.get().strip() or None
+        cm = (
+            self._composer_model_var.get().strip()
+            if bool(self._composer_use_var.get())
+            else None
+        )
+        api_mode = self._api_mode_var.get().strip().lower()
+        low_vram_mode = bool(self._low_vram_var.get())
+        dual_instance_mode = False
+        set_runtime_modes(
+            api_mode=api_mode,
+            low_vram_mode=low_vram_mode,
+            dual_instance_mode=dual_instance_mode,
+        )
+        try:
+            set_runtime_limits(
+                max_reduce_input_tokens=int(self._max_reduce_tokens_var.get() or "24000"),
+                max_chunk_tokens=int(self._max_chunk_tokens_var.get() or "6000"),
+            )
+        except Exception:
+            pass
+        self._persist_runtime_state()
+        self._append_log_line(
+            (
+                f"[START] model={model} vision={vm or model} composer={cm or model} "
+                f"context={context_budget} reserve={response_reserve} "
+                f"workers={workers} source={self._model_ctx_source.get(model, 'unknown')} "
+                f"api_mode={api_mode} low_vram={low_vram_mode} dual_instance={dual_instance_mode}"
+            ),
+            "general",
+        )
+
+        def run() -> None:
+            try:
+                # Runtime preflight: ждём фактическую загрузку выбранной модели и
+                # берём реальный контекст из LM Studio (loaded_context_length).
+                self._queue.put({
+                    "type": MSG_PROGRESS,
+                    "current": 0,
+                    "total": 1,
+                    "phase": "preflight",
+                    "message": f"Проверяю runtime контекст модели: {model}",
+                })
+                runtime_ctx, runtime_source, runtime_state = resolve_runtime_model_context(
+                    base_url=base_url,
+                    api_key=api_key,
+                    model=model,
+                    wait_for_loaded=True,
+                    max_wait_seconds=180.0,
+                    poll_interval_seconds=1.0,
+                )
+                effective_context = runtime_ctx or context_budget
+                effective_reserve = self._get_response_reserve(effective_context)
+                self._queue.put({
+                    "type": MSG_PROGRESS,
+                    "current": 0,
+                    "total": 1,
+                    "phase": "preflight",
+                    "message": (
+                        f"Контекст модели: {effective_context:,}, резерв: {effective_reserve:,} "
+                        f"(source={runtime_source}, state={runtime_state or 'unknown'})"
+                    ).replace(",", " "),
+                })
+                self._queue.put({
+                    "type": MSG_TRACE,
+                    "line": (
+                        f"[PREFLIGHT] model={model} context={effective_context} reserve={effective_reserve} "
+                        f"source={runtime_source} state={runtime_state or 'unknown'}"
+                    ),
+                })
+                _run_processing(
+                    file_path=self._file_path,
+                    folder_path=self._folder_path,
+                    query=query,
+                    model=model,
+                    base_url=base_url,
+                    api_key=api_key,
+                    context_budget=effective_context,
+                    response_reserve=effective_reserve,
+                    workers=workers,
+                    out_queue=self._queue,
+                    stop_flag=lambda: self._stop_requested,
+                    vision_model=vm,
+                    composer_model=cm,
+                    api_mode=api_mode,
+                    low_vram_mode=low_vram_mode,
+                    dual_instance_mode=dual_instance_mode,
+                )
+            except Exception as exc:
+                logger.exception("Worker thread error: %s", sanitize_for_log(str(exc)))
+                self._queue.put({"type": MSG_ERROR, "message": sanitize_for_log(str(exc))})
+            self._queue.put({"type": "done"})
+
+        threading.Thread(target=run, daemon=True).start()
+        self._poll_queue()
+
+    # ------------------------------------------------------------------ #
+    #  Queue polling
+    # ------------------------------------------------------------------ #
+
+    def _poll_queue(self) -> None:
+        try:
+            while True:
+                msg = self._queue.get_nowait()
+                t = msg.get("type")
+
+                if t == MSG_PROGRESS:
+                    cur   = msg.get("current", 0)
+                    total = max(1, msg.get("total", 1))
+                    phase = msg.get("phase", "")
+                    cache = msg.get("from_cache", 0)
+                    active = msg.get("active", 0)
+                    in_flight = msg.get("in_flight", 0)
+                    retrying = msg.get("retrying", 0)
+                    effective_workers = msg.get("effective_workers", 0)
+                    chunk_idx = msg.get("chunk_idx", 0)
+                    file_name = msg.get("file", "")
+                    preview = msg.get("preview", "")
+                    route = msg.get("route", "single")
+                    instance_id = msg.get("instance_id", "")
+                    if phase != "map_started":
+                        self._progress_bar.set(cur / total)
+                    if phase == "extract":
+                        suffix = f" | файл: {file_name}" if file_name else ""
+                        self._set_status(f"Читаю файлы: {cur} / {total}…{suffix}")
+                        self._append_log_line(f"[EXTRACT] {cur}/{total}{suffix}", "extract")
+                    elif phase == "preflight":
+                        self._set_status(msg.get("message", "Проверяю модель и контекст…"))
+                    elif phase == "map_started":
+                        suffix = f" | файл: {file_name}" if file_name else ""
+                        self._set_status(
+                            f"MAP: запущено {cur}/{total}, active={active}, in_flight={in_flight}, backoff={retrying}, eff={effective_workers}{suffix}"
+                        )
+                        if preview and chunk_idx:
+                            self._append_log_line(
+                                f"[MAP start #{chunk_idx}] route={route} instance={instance_id or '-'} active={active} in_flight={in_flight} retrying={retrying} eff={effective_workers} file={file_name or 'n/a'} | {preview}",
+                                "map",
+                            )
+                    elif phase == "map":
+                        extra = f" ({cache} из кэша)" if cache else ""
+                        suffix = f" | файл: {file_name}" if file_name else ""
+                        self._set_status(
+                            f"MAP: {cur}/{total}, active={active}, in_flight={in_flight}, backoff={retrying}, eff={effective_workers}{extra}{suffix}"
+                        )
+                        if chunk_idx:
+                            self._append_log_line(
+                                f"[MAP done #{chunk_idx}] route={route} instance={instance_id or '-'} done={cur}/{total} active={active} in_flight={in_flight} retrying={retrying} eff={effective_workers} cache={cache} file={file_name or 'n/a'}",
+                                "map",
+                            )
+                    elif phase == "model_switch":
+                        stage = msg.get("stage", "")
+                        from_model = msg.get("from_model", "") or "none"
+                        to_model = msg.get("to_model", "")
+                        self._set_status(
+                            f"Переключаю модель ({stage}): {from_model} -> {to_model}…"
+                        )
+                        self._append_log_line(
+                            f"[MODEL switch] stage={stage} from={from_model} to={to_model}",
+                            "preflight",
+                        )
+                    elif phase == "model_phase":
+                        phase_name = msg.get("phase_name", "")
+                        phase_model = msg.get("model", "")
+                        chunks_count = msg.get("chunks_count", 0)
+                        self._set_status(
+                            f"Фаза {phase_name}: модель={phase_model}, чанков={chunks_count}"
+                        )
+                        self._append_log_line(
+                            f"[MODEL phase] phase={phase_name} model={phase_model} chunks={chunks_count} active={active} in_flight={in_flight} retrying={retrying} eff={effective_workers}",
+                            "preflight",
+                        )
+                    elif phase == "instance_pool":
+                        model_name = msg.get("model", "")
+                        ids = msg.get("instance_ids") or []
+                        self._append_log_line(
+                            f"[INSTANCE pool] model={model_name} count={msg.get('instances_loaded', 0)} ids={ids}",
+                            "preflight",
+                        )
+                    elif phase == "vision_map":
+                        vm = msg.get("vision_model", "")
+                        self._append_log_line(
+                            f"[VISION MAP #{chunk_idx}] model={vm} file={file_name or 'n/a'}",
+                            "vision_map",
+                        )
+                    elif phase == "retry_scheduled":
+                        attempt = msg.get("attempt", 0)
+                        max_attempts = msg.get("max_attempts", 0)
+                        error_kind = msg.get("error_kind", "unknown")
+                        retry_delay = msg.get("retry_delay", 0.0)
+                        self._append_log_line(
+                            f"[RETRY] chunk={chunk_idx} route={route} instance={instance_id or '-'} {attempt}/{max_attempts} kind={error_kind} delay={retry_delay:.1f}s file={file_name or 'n/a'} active={active} in_flight={in_flight} retrying={retrying} eff={effective_workers} backoff_freed={msg.get('backoff_slot_freed', False)}",
+                            "retry",
+                        )
+                    elif phase == "map_failed":
+                        error_kind = msg.get("error_kind", "unknown")
+                        err = str(msg.get("error", ""))[:220]
+                        self._append_log_line(
+                            f"[MAP failed #{chunk_idx}] route={route} instance={instance_id or '-'} kind={error_kind} classifier={msg.get('error_classifier', 'n/a')} file={file_name or 'n/a'} err={err}",
+                            "error",
+                        )
+                    elif phase == "circuit_breaker":
+                        pause_s = msg.get("pause_seconds", 0.0)
+                        self._append_log_line(
+                            f"[CIRCUIT BREAKER] pausing requests for {pause_s:.1f}s",
+                            "retry",
+                        )
+                    elif phase == "summary":
+                        retries = msg.get("retries", 0)
+                        failed = msg.get("failed", 0)
+                        ok = msg.get("ok", 0)
+                        elapsed_s = float(msg.get("elapsed_s", 0.0) or 0.0)
+                        cpm = float(msg.get("chunks_per_min", 0.0) or 0.0)
+                        wk = msg.get("workers", "")
+                        mm = msg.get("map_model", "")
+                        vm = msg.get("vision_model", "")
+                        rm = msg.get("reduce_model", "")
+                        self._append_log_line(
+                            f"[SUMMARY] ok={ok} failed={failed} retries={retries} elapsed={elapsed_s:.1f}s "
+                            f"throughput={cpm:.1f} chunks/min workers={wk} map={mm} vision={vm} reduce={rm} "
+                            f"text_chunks={msg.get('text_chunks', 0)} vision_chunks={msg.get('vision_chunks', 0)} "
+                            f"low_vram_sequential={msg.get('low_vram_sequential', True)} "
+                            f"api_mode={msg.get('api_mode', 'native')} instances={msg.get('instances_loaded', 1)} "
+                            f"dual_instance_active={msg.get('dual_instance_active', False)}",
+                            "summary",
+                        )
+                    elif phase == "map_metrics":
+                        rc = msg.get("relevant_chunks", 0)
+                        fc = msg.get("findings_count", 0)
+                        ev = msg.get("evidence_refs_count", 0)
+                        self._append_log_line(
+                            f"[MAP metrics] relevant_chunks={rc} findings={fc} evidence_refs={ev}",
+                            "map_metrics",
+                        )
+                        self._set_status(
+                            f"MAP: релевантных чанков {rc}, находок {fc}, evidence {ev}"
+                        )
+                    elif phase == "map_relevant":
+                        rf = msg.get("relevant_files", cur)
+                        self._append_log_line(
+                            f"[MAP relevant] {rf} файловых групп с находками из {total} чанков",
+                            "map_metrics",
+                        )
+                        self._set_status(f"MAP завершён: {rf} релевантных файловых групп")
+                    elif phase == "section_reduce":
+                        sf = msg.get("section_file", "")
+                        self._set_status(f"REDUCE секции {cur}/{total}: {sf[:60]}")
+                        self._append_log_line(
+                            f"[SECTION REDUCE] {cur}/{total} file={sf}", "reduce"
+                        )
+                    elif phase == "synthesize":
+                        self._set_status("Синтез финального отчёта…", "lightgreen")
+                        self._append_log_line("[SYNTHESIZE] финальный синтез секций", "reduce")
+                    elif phase == "reduce_merge":
+                        ml = msg.get("merge_level", 0)
+                        self._append_log_line(f"[REDUCE merge] {cur}/{total} level={ml}", "reduce_merge")
+                    elif phase == "reduce_refine":
+                        self._append_log_line("[REDUCE] второй проход refine (полнота отчёта)", "reduce")
+                        self._set_status("REDUCE: refine — расширение отчёта…")
+                    elif phase == "quality_metrics":
+                        cc = msg.get("covered_chunks", 0)
+                        ec = msg.get("evidence_count", 0)
+                        sc = msg.get("final_sections_count", 0)
+                        ru = msg.get("refine_used", False)
+                        vw = msg.get("validation_warnings") or []
+                        self._append_log_line(
+                            f"[QUALITY] covered_chunks={cc} evidence_count={ec} "
+                            f"sections={sc} refine={ru} warnings={vw}",
+                            "quality_metrics",
+                        )
+                    elif phase == "meta_plan":
+                        self._set_status("Composer: генерирую оптимальный промт для анализа…")
+                        self._append_log_line("[META PLAN] composer generating analysis directive", "preflight")
+                    elif phase == "meta_plan_done":
+                        preview = str(msg.get("preview", ""))[:200]
+                        self._append_log_line(f"[META PLAN done] directive={preview}…", "preflight")
+                        self._set_status("Оптимальный промт готов, запускаю MAP…", "lightgreen")
+                        # Show meta-prompt preview label
+                        short = preview[:120] + ("…" if len(preview) >= 120 else "")
+                        self._meta_prompt_label.configure(
+                            text=f"Composer-промт: {short}"
+                        )
+                        self._meta_prompt_label.pack(anchor="w", pady=(0, 4))
+                    elif phase in ("index_extract", "index_embed"):
+                        label = "Индексирую файлы" if phase == "index_extract" else "Генерирую эмбеддинги"
+                        self._set_status(f"RAG: {label}: {cur}/{total}…")
+                        self._append_log_line(f"[RAG {phase}] {cur}/{total}", "general")
+                    elif phase == "reduce":
+                        self._set_status(f"REDUCE: группа {cur} / {total}…")
+                        self._append_log_line(f"[REDUCE] {cur}/{total}", "reduce")
+                    elif phase == "batch":
+                        self._set_status(f"Батч: {cur} / {total}…")
+                        self._append_log_line(f"[BATCH] {cur}/{total}", "batch")
+
+                elif t == MSG_RESULT:
+                    text = msg.get("text", "")
+                    self._last_result_text = text
+                    self._result_type = "text"
+                    self._result_text.delete("1.0", "end")
+                    self._result_text.insert("1.0", text)
+                    self._progress_bar.set(1.0)
+                    self._set_status("Готово ✓", "lightgreen")
+
+                elif t == MSG_RESULT_DF:
+                    df    = msg.get("df")
+                    saved = msg.get("saved_path", "")
+                    if isinstance(df, pd.DataFrame) and not df.empty:
+                        self._last_result_df   = df
+                        self._last_result_text = df.to_string()
+                        self._result_type = "table"
+                        self._result_text.delete("1.0", "end")
+                        if saved:
+                            self._result_text.insert("1.0", f"Сохранено: {saved}\n\n")
+                        self._result_text.insert("end", self._last_result_text)
+                    self._progress_bar.set(1.0)
+                    self._set_status(
+                        f"Готово ✓  →  {saved}" if saved else "Готово ✓",
+                        "lightgreen",
+                    )
+
+                elif t == MSG_ERROR:
+                    err = sanitize_for_log(str(msg.get("message", "")))
+                    self._result_text.delete("1.0", "end")
+                    self._result_text.insert("1.0", f"ОШИБКА:\n{err}")
+                    self._set_status(f"Ошибка: {err[:100]}", "#f87171")
+                    self._append_log_line(f"[ERROR] {err}", "error")
+
+                elif t == MSG_TRACE:
+                    self._append_log_line(str(msg.get("line", "")), "trace")
+
+                elif t == "done":
+                    self._running = False
+                    self._start_btn.configure(state="normal")
+                    self._stop_btn.configure(state="disabled")
+                    return
+
+        except queue.Empty:
+            pass
+        self.after(80, self._poll_queue)
+
+    # ------------------------------------------------------------------ #
+    #  Save result
+    # ------------------------------------------------------------------ #
+
+    def _on_save_result(self) -> None:
+        if self._result_type == "table" and self._last_result_df is not None:
+            p = ctk.filedialog.asksaveasfilename(
+                defaultextension=".csv",
+                filetypes=[("CSV", "*.csv"), ("Excel", "*.xlsx"), ("Все", "*.*")],
+            )
+            if p:
+                path = Path(p)
+                if path.suffix.lower() == ".xlsx":
+                    self._last_result_df.to_excel(path, index=False)
+                else:
+                    self._last_result_df.to_csv(path, index=False)
+                self._set_status(f"Сохранено: {path}")
+        else:
+            p = ctk.filedialog.asksaveasfilename(
+                defaultextension=".txt",
+                filetypes=[
+                    ("Text", "*.txt"),
+                    ("Markdown", "*.md"),
+                    ("DOCX", "*.docx"),
+                    ("PDF", "*.pdf"),
+                    ("Все", "*.*"),
+                ],
+            )
+            if p:
+                out_path = Path(p)
+                ext = out_path.suffix.lower()
+                text = self._last_result_text or ""
+                if ext == ".docx":
+                    try:
+                        self._export_to_docx(out_path, text)
+                    except Exception as exc:
+                        self._set_status(f"DOCX экспорт недоступен: {sanitize_for_log(str(exc))}", "#f87171")
+                        return
+                elif ext == ".pdf":
+                    try:
+                        self._export_to_pdf(out_path, text)
+                    except Exception as exc:
+                        self._set_status(f"PDF экспорт недоступен: {sanitize_for_log(str(exc))}", "#f87171")
+                        return
+                else:
+                    out_path.write_text(text, encoding="utf-8")
+                self._set_status(f"Сохранено: {out_path}")
+
+    def _export_to_docx(self, path: Path, text: str) -> None:
+        from docx import Document  # type: ignore[import-not-found]
+
+        doc = Document()
+        for line in text.splitlines():
+            if line.startswith("## "):
+                doc.add_heading(line[3:].strip(), level=2)
+            elif line.startswith("# "):
+                doc.add_heading(line[2:].strip(), level=1)
+            else:
+                doc.add_paragraph(line)
+        doc.save(path)
+
+    def _export_to_pdf(self, path: Path, text: str) -> None:
+        from weasyprint import HTML  # type: ignore[import-not-found]
+
+        body = (
+            text.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace("\n", "<br>")
+        )
+        html = f"<html><meta charset='utf-8'><body style='font-family: DejaVu Sans, Arial, sans-serif;'>{body}</body></html>"
+        HTML(string=html).write_pdf(str(path))
+
+    def _set_status(self, text: str, color: str = "gray") -> None:
+        self._status_label.configure(text=text, text_color=color)
+
+
+# ------------------------------------------------------------------ #
+#  Worker functions (run in daemon threads)
+# ------------------------------------------------------------------ #
+
+def _run_processing(
+    file_path: Path | None,
+    folder_path: Path | None,
+    query: str,
+    model: str,
+    base_url: str,
+    api_key: str,
+    context_budget: int,
+    response_reserve: int,
+    workers: int,
+    out_queue: queue.Queue[dict[str, Any]],
+    stop_flag: Any = None,
+    vision_model: str | None = None,
+    composer_model: str | None = None,
+    api_mode: str = "native",
+    low_vram_mode: bool = True,
+    dual_instance_mode: bool = False,
+) -> None:
+    dynamic_chunk_size = compute_dynamic_chunk_size(
+        context_budget, SYSTEM_PROMPT_MAP, query, response_reserve=response_reserve,
+    )
+    out_queue.put({
+        "type": MSG_TRACE,
+        "line": (
+            f"[PIPELINE] context_budget={context_budget} response_reserve={response_reserve} "
+            f"dynamic_chunk_size={dynamic_chunk_size} workers={workers} "
+            f"vision_model={vision_model or model} composer_model={composer_model or model} "
+            f"api_mode={api_mode} low_vram={low_vram_mode} dual_instance={dual_instance_mode}"
+        ),
+    })
+    q_preview = " ".join(query.strip().split())
+    if len(q_preview) > 240:
+        q_preview = q_preview[:240] + "..."
+    out_queue.put({"type": MSG_TRACE, "line": f"[QUERY] {q_preview}"})
+
+    def put_progress(
+        current: int,
+        total: int,
+        phase: str = "map",
+        from_cache: int = 0,
+        **extra: Any,
+    ) -> None:
+        payload = {
+            "type": MSG_PROGRESS, "current": current, "total": total,
+            "phase": phase, "from_cache": from_cache,
+        }
+        payload.update(extra)
+        out_queue.put(payload)
+
+    # ---- folder → Map-Reduce over ALL files ----
+    if folder_path is not None:
+        _run_folder_batch(
+            folder_path=folder_path,
+            query=query,
+            model=model,
+            base_url=base_url,
+            api_key=api_key,
+            context_budget=context_budget,
+            dynamic_chunk_size=dynamic_chunk_size,
+            workers=workers,
+            out_queue=out_queue,
+            put_progress=put_progress,
+            stop_flag=stop_flag,
+            vision_model=vision_model,
+            composer_model=composer_model,
+            api_mode=api_mode,
+            low_vram_mode=low_vram_mode,
+            dual_instance_mode=dual_instance_mode,
+        )
+        return
+
+    # ---- single file ----
+    assert file_path is not None
+    try:
+        kind, payload, _ = parse_file(file_path, dynamic_chunk_size, overlap_tokens=200, root_dir=file_path.parent)
+    except ParseError as exc:
+        out_queue.put({"type": MSG_ERROR, "message": sanitize_for_log(str(exc))})
+        return
+    except Exception as exc:
+        logger.exception("parse_file failed")
+        out_queue.put({"type": MSG_ERROR, "message": sanitize_for_log(str(exc))})
+        return
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        if kind == "text":
+            chunks: list[str] = payload  # type: ignore[assignment]
+            job_id = compute_job_id(file_path, query)
+            result = loop.run_until_complete(
+                run_map_reduce(
+                    chunks=chunks,
+                    user_query=query,
+                    base_url=base_url,
+                    api_key=api_key,
+                    model=model,
+                    workers=workers,
+                    dynamic_chunk_size=dynamic_chunk_size,
+                    on_progress=put_progress,
+                    job_id=job_id,
+                    max_context_tokens=context_budget,
+                    composer_model=composer_model,
+                    vision_model=vision_model,
+                    api_mode=api_mode,
+                    low_vram_mode=low_vram_mode,
+                    dual_instance_mode=dual_instance_mode,
+                )
+            )
+            out_queue.put({"type": MSG_RESULT, "text": result})
+        elif kind == "vision":
+            vchunks: list[str] = payload  # type: ignore[assignment]
+            job_id = compute_job_id(file_path, query)
+            result = loop.run_until_complete(
+                run_map_reduce(
+                    chunks=vchunks,
+                    user_query=query,
+                    base_url=base_url,
+                    api_key=api_key,
+                    model=model,
+                    workers=workers,
+                    dynamic_chunk_size=dynamic_chunk_size,
+                    on_progress=put_progress,
+                    job_id=job_id,
+                    max_context_tokens=context_budget,
+                    composer_model=composer_model,
+                    vision_model=vision_model,
+                    api_mode=api_mode,
+                    low_vram_mode=low_vram_mode,
+                    dual_instance_mode=dual_instance_mode,
+                )
+            )
+            out_queue.put({"type": MSG_RESULT, "text": result})
+        else:
+            batches = payload
+            result_df = loop.run_until_complete(
+                run_batching(
+                    batches=batches,
+                    user_query=query,
+                    base_url=base_url,
+                    api_key=api_key,
+                    model=model,
+                    workers=workers,
+                    on_progress=lambda c, t: put_progress(c, t, "batch"),
+                    api_mode=api_mode,
+                )
+            )
+            saved = None
+            if not result_df.empty:
+                try:
+                    out_path = file_path.parent / f"{file_path.stem}_result.csv"
+                    result_df.to_csv(out_path, index=False, encoding="utf-8")
+                    saved = str(out_path)
+                except Exception as exc:
+                    logger.warning("Cannot save result table: %s", exc)
+            out_queue.put({"type": MSG_RESULT_DF, "df": result_df, "saved_path": saved})
+    finally:
+        loop.close()
+
+
+def _run_folder_batch(
+    folder_path: Path,
+    query: str,
+    model: str,
+    base_url: str,
+    api_key: str,
+    context_budget: int,
+    dynamic_chunk_size: int,
+    workers: int,
+    out_queue: queue.Queue[dict[str, Any]],
+    put_progress: Any,
+    stop_flag: Any,
+    vision_model: str | None = None,
+    composer_model: str | None = None,
+    api_mode: str = "native",
+    low_vram_mode: bool = True,
+    dual_instance_mode: bool = True,
+) -> None:
+    from pipeline import _iter_files, _to_chunks
+
+    all_files = _iter_files([folder_path])
+    if not all_files:
+        out_queue.put({"type": MSG_ERROR,
+                       "message": "Нет поддерживаемых файлов в папке"})
+        return
+
+    # Phase 1 — parallel text extraction using ThreadPoolExecutor
+    all_chunks: list[str] = []
+    extract_workers = min(8, os.cpu_count() or 4)
+    completed_files = 0
+    chunks_by_file: dict[int, list[str]] = {}
+
+    def _extract_one(idx_fp: tuple[int, Path]) -> tuple[int, list[str], str]:
+        idx, fp = idx_fp
+        file_chunks = [
+            dc.text for dc in _to_chunks(fp, dynamic_chunk_size, 200, root_dir=folder_path)
+        ]
+        try:
+            rel = str(fp.relative_to(folder_path)).replace("\\", "/")
+        except ValueError:
+            rel = fp.name
+        return idx, file_chunks, rel
+
+    with ThreadPoolExecutor(max_workers=extract_workers) as pool:
+        futures = {
+            pool.submit(_extract_one, (i, fp)): (i, fp)
+            for i, fp in enumerate(all_files)
+        }
+        for fut in as_completed(futures):
+            if stop_flag and stop_flag():
+                out_queue.put({"type": MSG_ERROR, "message": "Остановлено пользователем"})
+                return
+            try:
+                idx, file_chunks, display_rel = fut.result()
+            except Exception as exc:
+                logger.warning("Extract failed for file: %s", exc)
+                idx, file_chunks, display_rel = futures[fut][0], [], "unknown"
+            chunks_by_file[idx] = file_chunks
+            completed_files += 1
+            put_progress(completed_files, len(all_files), "extract", file=display_rel)
+
+    # Preserve original file order when assembling chunks
+    for i in range(len(all_files)):
+        all_chunks.extend(chunks_by_file.get(i, []))
+
+    if not all_chunks:
+        out_queue.put({"type": MSG_ERROR,
+                       "message": "Не удалось извлечь текст из файлов"})
+        return
+
+    logger.info("Folder batch: files=%s chunks=%s extract_workers=%s", len(all_files), len(all_chunks), extract_workers)
+    job_id = compute_job_id(folder_path, query)
+
+    # Перехватываем relevant_count из фазы map_relevant для заголовка результата
+    _relevant_files_count: list[int] = [0]
+
+    _orig_put_progress = put_progress
+
+    def _tracking_put_progress(
+        current: int,
+        total: int,
+        phase: str = "map",
+        from_cache: int = 0,
+        **extra: Any,
+    ) -> None:
+        if phase == "map_relevant":
+            _relevant_files_count[0] = extra.get("relevant_files", current)
+        _orig_put_progress(current, total, phase, from_cache, **extra)
+
+    # Phase 2 — Map-Reduce
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        result = loop.run_until_complete(
+            run_map_reduce(
+                chunks=all_chunks,
+                user_query=query,
+                base_url=base_url,
+                api_key=api_key,
+                model=model,
+                workers=workers,
+                dynamic_chunk_size=dynamic_chunk_size,
+                on_progress=_tracking_put_progress,
+                job_id=job_id,
+                max_context_tokens=context_budget,
+                composer_model=composer_model,
+                vision_model=vision_model,
+                api_mode=api_mode,
+                low_vram_mode=low_vram_mode,
+                dual_instance_mode=dual_instance_mode,
+            )
+        )
+    finally:
+        loop.close()
+
+    relevant_count = _relevant_files_count[0]
+    relevant_suffix = f"  |  релевантных файлов: {relevant_count}" if relevant_count > 0 else ""
+    out_queue.put({
+        "type": MSG_RESULT,
+        "text": (
+            f"Обработано: {len(all_files)} файлов  |  {len(all_chunks)} чанков{relevant_suffix}\n"
+            f"{'─' * 60}\n\n{result}"
+        ),
+    })

@@ -1,0 +1,12 @@
+# Локальные секреты — не коммитить
+.local/
+*.local.json
+
+# Python / окружение
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.env
+.env.*
