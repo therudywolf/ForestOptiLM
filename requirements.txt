@@ -1,0 +1,15 @@
+customtkinter>=5.2.0
+httpx>=0.25.0
+pandas>=2.0.0
+openpyxl>=3.1.0
+pdfplumber>=0.10.0
+python-docx>=1.1.0
+tiktoken>=0.5.0
+beautifulsoup4>=4.12.0
+pyyaml>=6.0
+odfpy>=1.4.0
+ebooklib>=0.18
+xlrd>=2.0.0
+striprtf>=0.0.26
+faiss-cpu>=1.8.0
+# weasyprint  # optional: pdf export — install separately: pip install weasyprint
