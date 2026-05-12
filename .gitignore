@@ -1,12 +1,64 @@
-# Локальные секреты — не коммитить
+# ──────────────────────────────────────────────
+#  ForestOptiLM / Nocturne Data Forge — .gitignore
+# ──────────────────────────────────────────────
+
+# Local secrets & runtime config — NEVER commit
 .local/
 *.local.json
 
-# Python / окружение
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+
+# Virtual environments
 .venv/
 venv/
+env/
+ENV/
+
+# Environment variables
 .env
 .env.*
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.settings/
+*.sublime-project
+*.sublime-workspace
+
+# OS files
+Thumbs.db
+Desktop.ini
+.DS_Store
+.DS_Store?
+._*
+
+# Nocturne runtime data (generated locally)
+.nocturne_cache/
+.nocturne_index/
+
+# Test / coverage
+.coverage
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Docker
+*.log
+
+# Misc
+*.bak
+*.tmp
+*.temp

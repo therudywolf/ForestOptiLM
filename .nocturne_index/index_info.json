@@ -1,6 +1,0 @@
-{
-  "embedding_model": "text-embedding-nomic-embed-text-v1.5",
-  "chunks_total": 117,
-  "files_total": 117,
-  "dim": 768
-}
