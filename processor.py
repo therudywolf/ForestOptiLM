@@ -609,8 +609,9 @@ def _extract_context_length(m: dict[str, Any]) -> int | None:
             continue
         for ck in nested_ctx_keys:
             if "." in ck:
-                # некоторые API отдают flattened ключ вида llm.context_length
-                v = _to_positive_int(obj.get(ck))
+                parts = ck.split(".", 1)
+                inner = obj.get(parts[0])
+                v = _to_positive_int(inner.get(parts[1]) if isinstance(inner, dict) else obj.get(ck))
             else:
                 v = _to_positive_int(obj.get(ck))
             if v:
@@ -2051,11 +2052,15 @@ async def _synthesize_final_report(
     """
     from parser import count_tokens
 
+    _MAX_SYNTH_DEPTH = 6
+
     if not sections:
         return ""
     if len(sections) == 1:
-        # Одна секция — это уже полноценный reduce-отчёт, возвращаем как есть
         return sections[0]
+    if _depth >= _MAX_SYNTH_DEPTH:
+        logger.warning("_synthesize_final_report: max depth %s reached, using fallback", _depth)
+        return _concatenate_sections_fallback(sections, user_query, language_hint)
 
     combined = "\n\n---\n\n".join(sections)
     lang_line = f"{language_hint}\n\n" if language_hint else ""
@@ -2133,7 +2138,7 @@ async def _synthesize_final_report(
     return await _synthesize_final_report(
         intermediate, user_query, base_url, api_key, reduce_model, semaphore,
         reduce_max_tokens, api_mode, language_hint, client, max_context_tokens,
-        on_progress=None, _depth=_depth,
+        on_progress=None, _depth=_depth + 1,
     )
 
 
@@ -2231,7 +2236,7 @@ async def run_map_reduce(
     vision_model: str | None = None,
     api_mode: str = "native",
     low_vram_mode: bool = True,
-    dual_instance_mode: bool = True,
+    dual_instance_mode: bool = False,
 ) -> str:
     """
     MAP с кэшем по job_id; адаптивный семафор; иерархический merge MAP JSON и финальный REDUCE.
@@ -2254,7 +2259,6 @@ async def run_map_reduce(
         )
 
     workers = max(1, min(4, workers))
-    dual_instance_mode = False
     reduce_model = (composer_model or model).strip() or model
     vision_llm = (vision_model or model).strip() or model
     # language_hint is derived from the ORIGINAL user_query so meta-prompt generation doesn't break it
