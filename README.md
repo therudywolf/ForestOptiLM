@@ -1,237 +1,174 @@
-# Nocturne Data Forge
+# ForestOptiLM — Nocturne Data Forge
 
-Десктопное приложение на Python для массовой асинхронной обработки больших файлов (TXT, PDF, DOCX, CSV, XLSX) через локальные LLM (LM Studio и другие OpenAI-совместимые API).
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-brightgreen.svg)](https://www.python.org/)
 
-## Установка
+Desktop application for bulk asynchronous processing of large files
+(TXT, PDF, DOCX, CSV, XLSX, images, archives) through local LLMs
+(LM Studio and other OpenAI-compatible APIs).
+
+Десктопное приложение на Python для массовой асинхронной обработки больших файлов
+через локальные LLM (LM Studio и другие OpenAI-совместимые API).
+
+## Features
+
+- **Map-Reduce pipeline** for text documents with structured JSON evidence.
+- **Vision support** for image analysis via multimodal models.
+- **RAG** — local FAISS-based retrieval-augmented generation.
+- **Batch table processing** for CSV/XLSX with JSON responses.
+- **Low VRAM mode** — sequential model loading for constrained hardware.
+- **Composer model** — optional separate model for merge/reduce/refine phases.
+- **SQLite cache** for MAP checkpoint resumption.
+- **Dark theme GUI** (CustomTkinter).
+
+## Installation
 
 ```bash
+git clone https://github.com/therudywolf/ForestOptiLM.git
 cd ForestOptiLM
 pip install -r requirements.txt
 ```
 
-## Запуск
+### Docker
+
+```bash
+docker build -t forestoptilm .
+docker run --rm -it forestoptilm
+```
+
+## Quick Start
 
 ```bash
 python main.py
 ```
 
-### Windows: запуск одним кликом
+### Windows: one-click launch
 
-Дважды нажмите **`start.bat`** в папке проекта. Скрипт сам:
-- создаст виртуальное окружение `.venv`, если его ещё нет;
-- установит зависимости из `requirements.txt`;
-- запустит приложение.
+Double-click **`start.bat`** in the project directory. The script will:
+- create a `.venv` virtual environment if it doesn't exist;
+- install dependencies from `requirements.txt`;
+- launch the application.
 
-Никаких команд вручную вводить не нужно. Для красивого значка на рабочем столе: правый клик по `start.bat` → «Создать ярлык», перенесите ярлык на рабочий стол, затем правый клик по ярлыку → «Свойства» → «Сменить значок» и выберите нужную иконку.
+## Configuration
 
-## Локальный файл подключения LM Studio (рекомендуется)
+### LM Studio connection (recommended)
 
-Параметры **`base_url`** и **`api_key`** (и опционально таймаут) можно хранить **вне репозитория**, чтобы не светить ключ в коде и в логах.
+Copy the template and fill in your values:
 
-1. Скопируйте шаблон:
-   - `config/lmstudio.example.json` → **`.local/lmstudio.json`** в корне проекта (папка `.local/` уже в `.gitignore`).
-2. Заполните поля. Формат:
+```bash
+cp config/lmstudio.example.json .local/lmstudio.json
+```
 
 ```json
 {
   "base_url": "http://127.0.0.1:1234/v1",
-  "api_key": "ваш-ключ",
+  "api_key": "your-api-key",
   "timeout": 600,
-  "default_model": "optional-model-id"
+  "default_model": ""
 }
 ```
 
-- **`base_url`** — OpenAI-совместимый endpoint (обычно заканчивается на `/v1`). Если указать без `/v1`, он будет добавлен автоматически.
-- **`api_key`** — токен LM Studio / произвольная строка, если сервер требует `Authorization: Bearer …`.
-- **`timeout`** (опционально) — таймаут чтения ответа LLM в секундах (по умолчанию `600`).
-- **`default_model`** (опционально) — после «Обновить модели» будет выбрана эта модель, если она есть в списке.
-
-Альтернатива: переменная окружения **`NOCTURNE_LMSTUDIO_CONFIG`** — полный путь к JSON-файлу (имеет приоритет над `.local/lmstudio.json`).
-
-При старте приложения в консоли пишется **маскированный** ключ и источник конфигурации (`default` или `file:…`). Во вкладке **Логи** секреты также маскируются.
-
-**Не коммитьте** файлы с реальными ключами.
-
-### Какой API используется
-
-В GUI доступен выбор режима:
-
-- `native` — LM Studio REST (`/api/v1/*`)
-- `openai` — OpenAI-compatible (`/v1/*`)
-
-По умолчанию включён `native`:
-
-- `GET /api/v1/models`
-- `POST /api/v1/chat`
-- `POST /api/v1/models/load` (при переключении model-phase и инициализации instance pool)
-
-Для стабильности качества в отчётном пайплайне принудительно отключается reasoning-think канал (`reasoning: off` / `thinking: disabled`), чтобы модель возвращала итог в `message/content`, а не длинный внутренний reasoning-текст.
-
-- Отключить native-режим: `NOCTURNE_LMSTUDIO_NATIVE_API=0`
-
-## Настройки по умолчанию
-
-Если локального файла нет, используются встроенные значения из `lmstudio_config.py` (например **API Base URL** `http://localhost:1234/v1`, **API Key** `forest`).
-
-- **Контекст модели:** берётся автоматически из LM Studio (`loaded_context_length` / `context_length`)
-- **Аварийный fallback:** `8096` (только если metadata недоступна)
-- **Резерв под ответ:** вычисляется автоматически (примерно 20% контекста, в диапазоне 1024–4096)
-- **Воркеры:** 1–4 (кнопки в GUI)
-
-В левой панели нажмите «Обновить список моделей», выберите модель, укажите файл и запрос, затем «СТАРТ».
-В главной панели доступны вкладки `Результат`, `Логи` и `RAG`.
-
-## Как работает бюджет токенов
-
-Контекст задаётся автоматически на стороне LM Studio, а приложение его только читает.
-Приоритет источников:
-
-1. `loaded_context_length` (фактический runtime-контекст загруженной модели)
-2. `context_length` / `max_context_length` из metadata
-3. fallback `8096`
-
-Формула:
-
-`effective_context = context_from_lmstudio`
-
-`response_reserve = clamp(0.2 * effective_context, 1024, 4096)`
-
-`chunk_size = effective_context - system_prompt_tokens - user_query_tokens - response_reserve`
-
-Для текстового Map-Reduce в расчёт `system_prompt_tokens` входит **`SYSTEM_PROMPT_MAP`** (структурированный JSON на фазе MAP), а не общий короткий system prompt.
-
-**Ограничение размера чанка (guardrail):** после расчёта применяется верхний предел `min(chunk_size, cap)`, где `cap` задаётся переменной окружения **`NOCTURNE_MAX_CHUNK_TOKENS`** (по умолчанию **6000**). Значение **`0`** отключает ограничение. Это уменьшает риск «слишком общих» ответов MAP на гигантских фрагментах.
-
-Зачем это нужно:
-
-- **Стабильность:** меньше ошибок по лимиту контекста и меньше 500 при старте.
-- **Предсказуемость:** понятно, сколько токенов реально уходит в входной чанк.
-- **Контроль качества/скорости:** меньше чанк — быстрее, больше чанк — больше контекста за запрос.
-
-## Структура
-
-- `main.py` — точка входа, запуск GUI
-- `lmstudio_config.py` — загрузка локального JSON подключения, маскирование секретов в логах
-- `gui.py` — интерфейс CustomTkinter (тёмная тема)
-- `processor.py` — вызовы LLM, Map-Reduce для текста, batching для таблиц, backoff
-- `parser.py` — чтение файлов, tiktoken, разбиение на чанки/батчи
-- `file_extractors.py` — роутинг форматов и рекурсивная распаковка архивов
-- `cache.py` — SQLite кэш MAP-чанков
-- `embeddings.py` — клиент LM Studio `/v1/embeddings`
-- `retrieval.py` — локальный FAISS индекс и поиск
-- `pipeline.py` — ingestion/index/query pipeline
-- `models.py` — dataclass-модели чанков и retrieval-хитов
-
-Текстовые файлы (TXT, PDF, DOCX) обрабатываются по схеме Map-Reduce с динамическим размером чанка. Таблицы (CSV, XLSX) — батчами с ответом в виде JSON-массива.
-
-## Map-Reduce: MAP → merge → REDUCE
-
-1. **MAP (на каждый чанк):** модель возвращает JSON внутри `<results>` с полями вроде `query_alignment`, `findings[]` (severity, type, explanation, `evidence_refs[]` с **file**, **chunk**, **quote**), `recommendations[]`, флаг `no_relevant_data`. В текст чанка добавляются метки `[CHUNK_INDEX: N]` и `[Файл: …]` (если есть).
-2. **Merge:** при большом числе чанков промежуточные JSON объединяются иерархически в один JSON (тот же смысл, без потери `evidence_refs`).
-3. **REDUCE:** по объединённому JSON строится итоговый markdown-отчёт с обязательными разделами: **Executive Summary**, **Comprehensive Findings**, **Evidence Matrix**, **Action Plan**.
-4. **Refine:** если отчёт слишком короткий или без нужных разделов, выполняется второй проход с тем же шаблоном разделов.
-5. **Валидация:** в конец отчёта могут добавляться предупреждения (короткий текст, пропущенные разделы, низкая плотность evidence).
-
-**Правило evidence:** находки с severity **critical** / **high** без пары **file + quote** в `evidence_refs` автоматически понижаются до **medium** на этапе MAP (чтобы не попадали в «критичный» блок без трассировки).
-
-Во вкладке **Логи** отображаются метрики: релевантные MAP-чанки, число findings/evidence до REDUCE, этапы merge/refine и итоговые `covered_chunks`, `evidence_count`, число разделов `##`. В логах можно фильтровать фазы (выпадающий список). Строки имеют вид `timestamp | phase | сообщение`.
-
-### Параллельность и retry
-
-Между повторными попытками запроса к LLM слот параллельности **освобождается** до ожидания backoff, чтобы остальные воркеры не простаивали из‑за одной ошибки.
-
-### Изображения (Vision)
-
-Поддерживаются файлы: `png`, `jpg`, `jpeg`, `webp`, `gif`, `bmp`, `tif`, `tiff`. В боковой панели выберите **Vision-модель** (мультимодальную) и при необходимости нажмите **Проверить Vision** — отправляется тест с минимальным `image_url`. MAP для таких файлов идёт через vision API (`image_url` + текст запроса).
-
-### Низкая VRAM (важно)
-
-Если основная LLM, Vision и Composer — разные модели, приложение выполняет этапы **последовательно по моделям**:
-
-1. text MAP (основная модель),
-2. vision MAP (vision-модель),
-3. merge/reduce/refine (composer или основная).
-
-Это снижает ошибки выгрузки/перезагрузки модели на машинах, где нельзя держать 2 модели одновременно в памяти.
-
-- Переключение между моделями работает по схеме: `unload текущей -> load следующей -> выполнение этапа`.
-- Для native LM Studio выгрузка выполняется через `POST /api/v1/models/unload` с `instance_id`.
-
-### Воркеры и инстансы модели
-
-- Диапазон воркеров в GUI: `1–4`.
-- В каждый момент времени используется **одна активная инстанция модели**.
-- При переключении между main/vision/composer предыдущая инстанция выгружается перед загрузкой следующей.
-
-Это режим для систем с ограниченной VRAM, где критично не держать несколько моделей одновременно.
-
-### Composer-модель
-
-Опция **«Отдельная composer-модель»**: если включена, для этапов **merge MAP JSON**, **REDUCE** и **refine** используется выбранная модель; иначе — основная LLM.
-При включённом low-VRAM режиме переключение на composer выполняется только после завершения MAP-этапов.
-
-### Локальное сохранение GUI-настроек
-
-Выбранные модели и режимы сохраняются локально в файл:
-
-- `.local/ui_runtime.json`
-
-Сохраняются поля:
-
-- `selected_model`, `selected_vision_model`, `selected_composer_model`, `selected_embedding_model`
-- `composer_enabled`
-- `workers`
-- `api_mode`
-- `low_vram_mode`
-- `dual_instance_mode`
-- `base_url`
-- `max_reduce_input_tokens`, `max_chunk_tokens`
-- `rag_index_dir`, `rag_top_k`
-
-Файл локальный, не должен попадать в git.
-
-### Токены по категориям моделей
-
-При `Обновить модели` в логах появляется сводка токенов по категориям:
-
-- `llm`
-- `embedding`
-- `vision`
-- `tool`
-
-Это суммарные `max_context_length/context_length` по каталогу моделей LM Studio.
-
-### Язык ответа
-
-- Если исходный пользовательский запрос на русском (кириллица), финальный отчёт и MAP-инструкции принудительно направляются на русский язык.
-- Это дополнительно уменьшает риск «сваливания» в технический англоязычный reasoning-текст.
-
-### Сверхдлинные текстовые файлы
-
-Если объём текста (в токенах) превышает **`NOCTURNE_MEGA_FILE_TOKEN_THRESHOLD`** (по умолчанию **80000**), чанки дополнительно группируются в **части одного файла**: в префиксе чанка указываются `[FILE_PATH: …]`, `[FILE_PART: i/n]`, `[CHUNK_INDEX: k]` и `[Файл: …]`. Коэффициент крупных частей задаётся **`NOCTURNE_MEGA_PART_FACTOR`** (по умолчанию **6**).
-
-## RAG во вкладке GUI
-
-Вкладка `RAG` поддерживает:
-
-1. Построение локального индекса (`build_index`) по выбранному файлу/папке.
-2. Поиск контекстов (`query_index`) и генерацию ответа (`answer_with_context`).
-
-Шаги:
-1. Нажмите «Обновить модели».
-2. Выберите `Embedding-модель (RAG)`.
-3. Выберите файл/папку.
-4. Вкладка `RAG` -> «Построить индекс».
-5. Введите вопрос -> «Задать вопрос».
+The `.local/` directory is git-ignored — secrets never leak to the repository.
+
+Alternative: set the environment variable `NOCTURNE_LMSTUDIO_CONFIG` to a full
+path to the JSON config file.
+
+### Defaults
+
+If no local config exists, built-in values from `lmstudio_config.py` are used
+(e.g. `http://localhost:1234/v1`, API key `forest`).
+
+### API Mode
+
+The GUI provides a choice between:
+
+| Mode     | Endpoints |
+|----------|-----------|
+| `native` | LM Studio REST (`/api/v1/*`) |
+| `openai` | OpenAI-compatible (`/v1/*`) |
+
+## Token Budget
+
+Context is read automatically from LM Studio metadata:
+
+1. `loaded_context_length` (runtime)
+2. `context_length` / `max_context_length` from metadata
+3. Fallback: `8096`
+
+```
+response_reserve = clamp(0.2 * effective_context, 1024, 4096)
+chunk_size = effective_context - system_prompt - user_query - reserve
+```
+
+A guardrail cap (`NOCTURNE_MAX_CHUNK_TOKENS`, default `6000`, `0` = off)
+limits the maximum chunk size.
+
+## Map-Reduce Pipeline
+
+1. **MAP** — each chunk produces structured JSON with `findings[]`,
+   `evidence_refs[]` (`file`, `chunk`, `quote`), and `recommendations[]`.
+2. **Merge** — hierarchical JSON merge for large document sets.
+3. **REDUCE** — final markdown report with required sections:
+   *Executive Summary*, *Comprehensive Findings*, *Evidence Matrix*, *Action Plan*.
+4. **Refine** — second pass if the report is too short or missing sections.
+5. **Validation** — warnings appended for short text, missing sections, or low
+   evidence density.
+
+Critical/high findings without `file + quote` in `evidence_refs` are
+automatically downgraded to **medium**.
+
+## RAG
+
+1. Select an embedding model in the GUI.
+2. Choose a file or folder, open the **RAG** tab, click **Build Index**.
+3. Enter a question and click **Ask**.
+
+## Project Structure
+
+| File | Purpose |
+|------|---------|
+| `main.py` | Entry point |
+| `gui.py` | CustomTkinter interface (dark theme) |
+| `processor.py` | LLM calls, Map-Reduce, batching, backoff |
+| `parser.py` | File parsing, tiktoken, chunking |
+| `file_extractors.py` | Format routing, archive extraction |
+| `cache.py` | SQLite MAP checkpoint cache |
+| `embeddings.py` | LM Studio `/v1/embeddings` client |
+| `retrieval.py` | Local FAISS index and search |
+| `pipeline.py` | Ingestion / index / query pipeline |
+| `models.py` | Dataclass models for chunks and retrieval |
+| `lmstudio_config.py` | Local JSON config loading, secret masking |
+
+## Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `NOCTURNE_LMSTUDIO_CONFIG` | — | Path to custom JSON config |
+| `NOCTURNE_LMSTUDIO_NATIVE_API` | `1` | Set `0` to disable native LM Studio API |
+| `NOCTURNE_MAX_CHUNK_TOKENS` | `6000` | Max tokens per chunk (`0` = no cap) |
+| `NOCTURNE_MEGA_FILE_TOKEN_THRESHOLD` | `80000` | Mega-file part splitting threshold |
+| `NOCTURNE_MEGA_PART_FACTOR` | `6` | Coarse part multiplier for mega files |
+| `NOCTURNE_CACHE_TTL_DAYS` | `7` | MAP cache TTL in days (`0` = no expiry) |
 
 ## Troubleshooting
 
-- **Модели «двоятся» или не выгружаются**
-  - Проверьте, что включён `Low VRAM Sequential`.
-  - Переключите `API mode` (`native` <-> `openai`) и повторите запуск.
-- **Много ошибок `400 Bad Request`**
-  - Обычно это несовпадение формата endpoint/model options.
-  - Проверьте выбранный `API mode` и совместимость модели с vision/reasoning параметрами.
-  - Смотрите в `Логи` classifier для `400`: `payload_mismatch | unsupported_option | context_limit | unknown`.
-- **Как сбросить сохранённые GUI-настройки**
-  - Удалите `.local/ui_runtime.json` и перезапустите приложение.
+- **Models duplicated or won't unload** — enable *Low VRAM Sequential* mode,
+  toggle API mode and retry.
+- **Frequent 400 errors** — check API mode compatibility; look at Logs tab for
+  the `400` classifier (`payload_mismatch`, `unsupported_option`, `context_limit`).
+- **Reset GUI settings** — delete `.local/ui_runtime.json` and restart.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## License
+
+Copyright (C) 2025 [therudywolf](https://github.com/therudywolf)
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the **GNU Affero General Public License** as published by the Free
+Software Foundation, either version 3 of the License, or (at your option) any
+later version.
+
+See [LICENSE](LICENSE) for the full text.

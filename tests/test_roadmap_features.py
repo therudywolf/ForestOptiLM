@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2025 therudywolf <https://github.com/therudywolf>
 """Smoke/regression: mega-file chunking, FILE_PATH, vision extractors."""
 from __future__ import annotations
 
