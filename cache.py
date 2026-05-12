@@ -71,7 +71,6 @@ def _ensure_db() -> sqlite3.Connection | None:
 
 def _cache_ttl_seconds() -> int:
     """TTL in seconds, configured via NOCTURNE_CACHE_TTL_DAYS (default 7 days, 0 = no expiry)."""
-    import time as _time  # noqa: F401 (imported for clarity)
     try:
         days = int(os.getenv("NOCTURNE_CACHE_TTL_DAYS", "7"))
         return days * 86400 if days > 0 else 0
