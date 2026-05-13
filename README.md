@@ -1,4 +1,17 @@
-# ForestOptiLM — Nocturne Data Forge
+# 🐺 ForestOptiLM — Nocturne Data Forge
+
+> `D34D1N$1D3` :: BMW • Racing • Dead inside wolf :: local LLM data forge
+
+My resources:
+- [Gravatar](https://gravatar.com/therudywolf)
+- [OneToThree](https://onetothree.ru)
+- [Forest blog](https://t.me/theforestserver)
+- [X](https://x.com/therudywolf)
+- [GitHub](https://github.com/therudywolf)
+- [Twitch](https://twitch.tv/therudywolf)
+- [Reddit](https://reddit.com/user/Most-Watercress-6718)
+- [Telegram](https://t.me/rudy_wolf)
+- [YouTube](https://youtube.com/channel/UCXHkoSlaY5QaNmN_l4t0djQ)
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-brightgreen.svg)](https://www.python.org/)
@@ -6,6 +19,8 @@
 Desktop application for bulk asynchronous processing of large files
 (TXT, PDF, DOCX, CSV, XLSX, images, archives) through local LLMs
 (LM Studio and other OpenAI-compatible APIs).
+
+AGPL v3 Copyleft applies to reuse, modification, and network deployment of derived versions.
 
 Десктопное приложение на Python для массовой асинхронной обработки больших файлов
 через локальные LLM (LM Studio и другие OpenAI-совместимые API).
