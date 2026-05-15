@@ -3,11 +3,31 @@ chcp 65001 >nul
 title Nocturne Data Forge
 cd /d "%~dp0"
 
-if not exist ".venv\Scripts\python.exe" (
-    echo [Nocturne] Создаю виртуальное окружение...
-    python -m venv .venv
+set "BOOTSTRAP_PY=python"
+python --version >nul 2>&1
+if errorlevel 1 (
+    py -3 --version >nul 2>&1
     if errorlevel 1 (
         echo Ошибка: не найден Python. Установите Python 3.10+ и добавьте в PATH.
+        pause
+        exit /b 1
+    )
+    set "BOOTSTRAP_PY=py -3"
+)
+
+if exist ".venv\Scripts\python.exe" (
+    ".venv\Scripts\python.exe" --version >nul 2>&1
+    if errorlevel 1 (
+        echo [Nocturne] Виртуальное окружение повреждено, пересоздаю...
+        rmdir /s /q ".venv"
+    )
+)
+
+if not exist ".venv\Scripts\python.exe" (
+    echo [Nocturne] Создаю виртуальное окружение...
+    %BOOTSTRAP_PY% -m venv .venv
+    if errorlevel 1 (
+        echo Ошибка: не удалось создать виртуальное окружение.
         pause
         exit /b 1
     )
