@@ -21,22 +21,43 @@ from typing import Any
 
 import httpx
 
+from lmstudio_config import lmstudio_root_url, normalize_lmstudio_base_url, sanitize_for_log
+
 logger = logging.getLogger("nocturne")
 
 
 class EmbeddingClient:
     def __init__(self, base_url: str, api_key: str, model: str, timeout: float = 120.0) -> None:
-        self.base_url = base_url.rstrip("/")
+        self.base_url = normalize_lmstudio_base_url(base_url).rstrip("/")
+        self.root_url = lmstudio_root_url(base_url)
         self.api_key = api_key
         self.model = model
         self.timeout = timeout
         self._client = httpx.Client(timeout=self.timeout)
+        self._load_attempted = False
 
     def _headers(self) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         return headers
+
+    def _try_load_model(self) -> None:
+        """Best-effort load for LM Studio REST v1; ignored for other compatible servers."""
+        if self._load_attempted or not self.root_url:
+            return
+        self._load_attempted = True
+        try:
+            url = f"{self.root_url}/api/v1/models/load"
+            r = self._client.post(url, headers=self._headers(), json={"model": self.model})
+            if r.status_code >= 400:
+                logger.info(
+                    "Embedding model auto-load skipped/failed: HTTP %s %s",
+                    r.status_code,
+                    sanitize_for_log(r.text[:220]),
+                )
+        except Exception as exc:
+            logger.info("Embedding model auto-load unavailable: %s", sanitize_for_log(str(exc)))
 
     def embed_texts(self, texts: list[str], batch_size: int = 32) -> list[list[float]]:
         vectors: list[list[float]] = []
@@ -51,6 +72,7 @@ class EmbeddingClient:
             "model": self.model,
             "input": texts,
         }
+        self._try_load_model()
         r = self._client.post(url, headers=self._headers(), json=payload)
         try:
             r.raise_for_status()

@@ -48,6 +48,7 @@ python main.py
 
 Double-click **`start.bat`** in the project directory. The script will:
 - create a `.venv` virtual environment if it doesn't exist;
+- recreate `.venv` if it points to a removed Python installation;
 - install dependencies from `requirements.txt`;
 - launch the application.
 
@@ -88,6 +89,10 @@ The GUI provides a choice between:
 |----------|-----------|
 | `native` | LM Studio REST (`/api/v1/*`) |
 | `openai` | OpenAI-compatible (`/v1/*`) |
+
+The URL field accepts LM Studio root URLs and copied API URLs such as
+`http://127.0.0.1:1234`, `http://127.0.0.1:1234/v1`, and
+`http://127.0.0.1:1234/api/v1`.
 
 ## Token Budget
 

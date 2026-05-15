@@ -36,7 +36,13 @@ import httpx
 import pandas as pd
 
 from cache import build_job_id, get_cached_response, set_cached_response
-from lmstudio_config import get_connection_defaults, get_timeout_seconds, sanitize_for_log
+from lmstudio_config import (
+    get_connection_defaults,
+    get_timeout_seconds,
+    lmstudio_root_url,
+    normalize_lmstudio_base_url,
+    sanitize_for_log,
+)
 
 logger = logging.getLogger("nocturne")
 
@@ -253,10 +259,11 @@ def set_runtime_limits(
 
 
 def _lmstudio_root(base_url: str) -> str:
-    base = base_url.rstrip("/")
-    if base.endswith("/v1"):
-        return base[:-3]
-    return base
+    return lmstudio_root_url(base_url)
+
+
+def _openai_base(base_url: str) -> str:
+    return normalize_lmstudio_base_url(base_url)
 
 
 def _auth_headers(api_key: str) -> dict[str, str]:
@@ -270,14 +277,14 @@ def _chat_endpoint(base_url: str, native: bool | None = None) -> str:
     use_native = USE_LMSTUDIO_NATIVE_API if native is None else native
     if use_native:
         return _lmstudio_root(base_url) + "/api/v1/chat"
-    return base_url.rstrip("/") + "/chat/completions"
+    return _openai_base(base_url) + "/chat/completions"
 
 
 def _models_endpoint(base_url: str, native: bool | None = None) -> str:
     use_native = USE_LMSTUDIO_NATIVE_API if native is None else native
     if use_native:
         return _lmstudio_root(base_url) + "/api/v1/models"
-    return base_url.rstrip("/") + "/models"
+    return _openai_base(base_url) + "/models"
 
 
 def _native_input_from_messages(messages: list[dict[str, Any]]) -> tuple[str | None, str | list[dict[str, Any]]]:
@@ -318,7 +325,7 @@ def _extract_chat_response_content(data: dict[str, Any]) -> tuple[str, str]:
     if isinstance(choices, list) and choices:
         message = (choices[0] or {}).get("message", {}) or {}
         content = str(message.get("content") or "")
-        reasoning = str(message.get("reasoning_content") or "")
+        reasoning = str(message.get("reasoning_content") or message.get("reasoning") or "")
         return content, reasoning
 
     output = data.get("output")
@@ -550,6 +557,27 @@ def _classify_http_400(text: str) -> str:
     return "unknown"
 
 
+def _is_unsupported_reasoning_response(response: httpx.Response) -> bool:
+    if response.status_code != 400:
+        return False
+    try:
+        err_body = response.json()
+        if isinstance(err_body, dict):
+            err = err_body.get("error")
+            if isinstance(err, dict):
+                param = str(err.get("param") or "").lower()
+                message = str(err.get("message") or "").lower()
+                code = str(err.get("code") or "").lower()
+                if param == "reasoning" or (
+                    "reasoning" in message
+                    and code in {"invalid_value", "invalid_request_error", ""}
+                ):
+                    return True
+    except Exception:
+        pass
+    return "reasoning" in response.text.lower()
+
+
 def _to_positive_int(value: Any) -> int | None:
     if isinstance(value, bool):
         return None
@@ -566,8 +594,30 @@ def _to_positive_int(value: Any) -> int | None:
     return None
 
 
+def _extract_loaded_context_length(m: dict[str, Any]) -> int | None:
+    loaded = m.get("loaded_instances")
+    if not isinstance(loaded, list):
+        return None
+    values: list[int] = []
+    for inst in loaded:
+        if not isinstance(inst, dict):
+            continue
+        ctx = _to_positive_int(inst.get("loaded_context_length"))
+        if not ctx:
+            cfg = inst.get("config")
+            if isinstance(cfg, dict):
+                ctx = _to_positive_int(cfg.get("context_length"))
+        if ctx:
+            values.append(ctx)
+    return max(values) if values else None
+
+
 def _extract_context_length(m: dict[str, Any]) -> int | None:
     """Извлечь context_length из разных вариантов структуры /models."""
+    loaded_ctx = _extract_loaded_context_length(m)
+    if loaded_ctx:
+        return loaded_ctx
+
     direct_keys = (
         "loaded_context_length",
         "context_length",
@@ -687,7 +737,7 @@ def fetch_models_info(
     LM Studio возвращает context_length в поле model_info.context_length
     или напрямую в поле context_length объекта модели.
     """
-    base = base_url.rstrip("/")
+    root = _lmstudio_root(base_url)
     headers = _auth_headers(api_key)
     primary_url = _models_endpoint(base_url)
     data: dict[str, Any] | None = None
@@ -705,7 +755,7 @@ def fetch_models_info(
 
     # LM Studio often exposes rich metadata at /api/v0/models.
     if not _extract_ids_from_models_payload(data):
-        alt_url = base.replace("/v1", "") + "/api/v0/models"
+        alt_url = root + "/api/v0/models"
         try:
             with httpx.Client(timeout=15.0) as client:
                 r = client.get(alt_url, headers=headers)
@@ -752,36 +802,47 @@ def fetch_models_info(
             ctx_sources[mid_s] = "metadata"
 
     # Если /v1/models вернул только базовые поля (id/object/owned_by),
-    # дополнительно подтягиваем metadata из /api/v0/models.
+    # дополнительно подтягиваем metadata из актуального /api/v1/models и legacy /api/v0/models.
     if ids and not ctx_lengths:
-        alt_url = base.replace("/v1", "") + "/api/v0/models"
-        try:
-            with httpx.Client(timeout=15.0) as client:
-                alt_r = client.get(alt_url, headers=headers)
-                alt_r.raise_for_status()
-                alt_data = alt_r.json()
-            by_id: dict[str, dict[str, Any]] = {}
-            for item in alt_data.get("data", []):
-                if isinstance(item, dict) and item.get("id"):
-                    by_id[str(item["id"])] = item
-            for mid in ids:
-                m = by_id.get(mid)
-                if not m:
-                    continue
-                ctx = _extract_context_length(m)
-                if ctx:
-                    ctx_lengths[mid] = ctx
-                    ctx_sources[mid] = "metadata"
-            if ctx_lengths:
-                logger.info(
-                    "Enriched model context from LM Studio /api/v0/models: %s models",
-                    len(ctx_lengths),
+        for alt_url in (root + "/api/v1/models", root + "/api/v0/models"):
+            try:
+                with httpx.Client(timeout=15.0) as client:
+                    alt_r = client.get(alt_url, headers=headers)
+                    alt_r.raise_for_status()
+                    alt_data = alt_r.json()
+                by_id: dict[str, dict[str, Any]] = {}
+                if isinstance(alt_data, dict):
+                    raw_items = alt_data.get("models")
+                    if not isinstance(raw_items, list):
+                        raw_items = alt_data.get("data")
+                    if isinstance(raw_items, list):
+                        for item in raw_items:
+                            if not isinstance(item, dict):
+                                continue
+                            mid = item.get("id") or item.get("key")
+                            if mid:
+                                by_id[str(mid)] = item
+                for mid in ids:
+                    m = by_id.get(mid)
+                    if not m:
+                        continue
+                    ctx = _extract_context_length(m)
+                    if ctx:
+                        ctx_lengths[mid] = ctx
+                        ctx_sources[mid] = "metadata"
+                if ctx_lengths:
+                    logger.info(
+                        "Enriched model context from LM Studio metadata endpoint %s: %s models",
+                        alt_url,
+                        len(ctx_lengths),
+                    )
+                    break
+            except Exception as exc:
+                logger.warning(
+                    "Cannot enrich context from %s: %s",
+                    alt_url,
+                    sanitize_for_log(str(exc)),
                 )
-        except Exception as exc:
-            logger.warning(
-                "Cannot enrich context from /api/v0/models: %s",
-                sanitize_for_log(str(exc)),
-            )
 
     # Дополнительно идем в per-model endpoint для КАЖДОЙ модели:
     # это повышает шанс получить корректный context на runtime metadata.
@@ -789,7 +850,7 @@ def fetch_models_info(
     if ids:
         def _fetch_one(mid: str) -> tuple[str, int | None]:
             try:
-                detail_url = base.replace("/v1", "") + f"/api/v0/models/{mid}"
+                detail_url = root + f"/api/v0/models/{mid}"
                 with httpx.Client(timeout=10.0) as client:
                     rr = client.get(detail_url, headers=headers)
                     rr.raise_for_status()
@@ -865,9 +926,11 @@ def resolve_runtime_model_context(
       - source=metadata_not_loaded, если модель не загружена, но metadata доступна;
       - source=unavailable, если данные получить не удалось.
     """
-    base = base_url.rstrip("/")
+    root = _lmstudio_root(base_url)
+    openai_base = _openai_base(base_url)
     headers = _auth_headers(api_key)
-    detail_url = base.replace("/v1", "") + f"/api/v0/models/{model}"
+    native_models_url = root + "/api/v1/models"
+    detail_url = root + f"/api/v0/models/{model}"
     deadline = time.monotonic() + max_wait_seconds
     load_triggered = False
 
@@ -881,7 +944,7 @@ def resolve_runtime_model_context(
                     load_url = _lmstudio_root(base_url) + "/api/v1/models/load"
                     client.post(load_url, json={"model": model}, headers=headers)
                 else:
-                    chat_url = base + "/chat/completions"
+                    chat_url = openai_base + "/chat/completions"
                     payload = {
                         "model": model,
                         "messages": [{"role": "user", "content": "ping"}],
@@ -897,6 +960,44 @@ def resolve_runtime_model_context(
     last_ctx: int | None = None
     last_state = ""
     while True:
+        handled_native_catalog = False
+        try:
+            with httpx.Client(timeout=10.0) as client:
+                nr = client.get(native_models_url, headers=headers)
+                nr.raise_for_status()
+                native_data = nr.json()
+            if isinstance(native_data, dict):
+                raw_models = native_data.get("models")
+                if isinstance(raw_models, list):
+                    for item in raw_models:
+                        if not isinstance(item, dict):
+                            continue
+                        mid = str(item.get("key") or item.get("id") or "").strip()
+                        if mid != model:
+                            continue
+                        handled_native_catalog = True
+                        loaded_ctx = _extract_loaded_context_length(item)
+                        any_ctx = _extract_context_length(item)
+                        loaded = bool(item.get("loaded_instances") or [])
+                        last_state = "loaded" if loaded else "not-loaded"
+                        if loaded_ctx:
+                            return loaded_ctx, "runtime_loaded", last_state
+                        if any_ctx:
+                            last_ctx = any_ctx
+                        if wait_for_loaded and not loaded:
+                            _trigger_model_load()
+                        break
+        except Exception:
+            handled_native_catalog = False
+
+        if handled_native_catalog:
+            if not wait_for_loaded or last_state == "loaded":
+                break
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(max(0.2, poll_interval_seconds))
+            continue
+
         try:
             with httpx.Client(timeout=10.0) as client:
                 r = client.get(detail_url, headers=headers)
@@ -988,10 +1089,6 @@ async def call_llm(
             "messages": messages,
             "max_tokens": max_tokens,
             "temperature": 0,
-            # Disable chain-of-thought for reasoning models (qwen3, deepseek-r1, etc.)
-            "enable_thinking": False,
-            "thinking": {"type": "disabled"},
-            "reasoning": "off",
         }
 
     for attempt in range(max_retries):
@@ -1009,39 +1106,33 @@ async def call_llm(
                 async with httpx.AsyncClient(timeout=timeout_cfg) as local_client:
                     r = await local_client.post(endpoint, json=payload, headers=headers)
                     # Special case: model doesn't support reasoning param → retry once without it.
-                    if r.status_code == 400 and use_native and model not in _MODELS_NO_REASONING_PARAM:
-                        try:
-                            err_body = r.json()
-                            if (
-                                isinstance(err_body, dict)
-                                and (err_body.get("error") or {}).get("param") == "reasoning"
-                            ):
-                                _MODELS_NO_REASONING_PARAM.add(model)
-                                logger.info(
-                                    "Model %s does not support reasoning param; retrying without it.", model
-                                )
-                                fallback_payload = _build_payload(use_native, include_reasoning_off=False)
-                                r = await local_client.post(endpoint, json=fallback_payload, headers=headers)
-                        except Exception:
-                            pass
+                    if (
+                        r.status_code == 400
+                        and use_native
+                        and model not in _MODELS_NO_REASONING_PARAM
+                        and _is_unsupported_reasoning_response(r)
+                    ):
+                        _MODELS_NO_REASONING_PARAM.add(model)
+                        logger.info(
+                            "Model %s does not support reasoning param; retrying without it.", model
+                        )
+                        fallback_payload = _build_payload(use_native, include_reasoning_off=False)
+                        r = await local_client.post(endpoint, json=fallback_payload, headers=headers)
             else:
                 r = await client.post(endpoint, json=payload, headers=headers)
                 # Special case: model doesn't support reasoning param → retry once without it.
-                if r.status_code == 400 and use_native and model not in _MODELS_NO_REASONING_PARAM:
-                    try:
-                        err_body = r.json()
-                        if (
-                            isinstance(err_body, dict)
-                            and (err_body.get("error") or {}).get("param") == "reasoning"
-                        ):
-                            _MODELS_NO_REASONING_PARAM.add(model)
-                            logger.info(
-                                "Model %s does not support reasoning param; retrying without it.", model
-                            )
-                            fallback_payload = _build_payload(use_native, include_reasoning_off=False)
-                            r = await client.post(endpoint, json=fallback_payload, headers=headers)
-                    except Exception:
-                        pass
+                if (
+                    r.status_code == 400
+                    and use_native
+                    and model not in _MODELS_NO_REASONING_PARAM
+                    and _is_unsupported_reasoning_response(r)
+                ):
+                    _MODELS_NO_REASONING_PARAM.add(model)
+                    logger.info(
+                        "Model %s does not support reasoning param; retrying without it.", model
+                    )
+                    fallback_payload = _build_payload(use_native, include_reasoning_off=False)
+                    r = await client.post(endpoint, json=fallback_payload, headers=headers)
             if r.status_code in (500, 502, 503):
                 raise httpx.HTTPStatusError(
                     f"Server error {r.status_code}",
@@ -1207,9 +1298,6 @@ def check_vision_capability(base_url: str, api_key: str, model: str) -> tuple[bo
         ],
         "max_tokens": 16,
         "temperature": 0,
-        "enable_thinking": False,
-        "thinking": {"type": "disabled"},
-        "reasoning": "off",
     }
     try:
         with httpx.Client(timeout=90.0) as client:

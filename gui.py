@@ -37,6 +37,7 @@ import pandas as pd
 
 from lmstudio_config import (
     get_default_model_optional,
+    lmstudio_root_url,
     load_ui_runtime_state,
     sanitize_for_log,
     save_ui_runtime_state,
@@ -115,6 +116,7 @@ class NocturneApp(ctk.CTk):
         self._runtime_state_ready = True
         self._bind_runtime_state_watchers()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.after(300, self._on_fetch_models)
 
     # ------------------------------------------------------------------ #
     #  Layout
@@ -547,7 +549,7 @@ class NocturneApp(ctk.CTk):
     def _poll_loaded_model(self) -> None:
         base_url = self._url_var.get().strip() or API_BASE
         api_key = self._api_key_var.get().strip() or API_KEY
-        root = base_url[:-3] if base_url.endswith("/v1") else base_url
+        root = lmstudio_root_url(base_url)
         headers: dict[str, str] = {}
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"

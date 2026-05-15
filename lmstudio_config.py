@@ -35,10 +35,31 @@ from typing import Final
 logger = logging.getLogger("nocturne")
 
 # Значения по умолчанию (если файл отсутствует или поля пустые)
-DEFAULT_BASE_URL: Final = "http://10.77.77.2:29931/v1"
+DEFAULT_BASE_URL: Final = "http://127.0.0.1:1234/v1"
 DEFAULT_API_KEY: Final = "forest"
 DEFAULT_TIMEOUT_SECONDS: Final = 600.0
 RUNTIME_UI_FILE: Final = ".local/ui_runtime.json"
+
+_KNOWN_API_SUFFIXES: Final[tuple[str, ...]] = (
+    "/api/v1/models/unload",
+    "/api/v1/models/load",
+    "/api/v1/models",
+    "/api/v1/chat",
+    "/api/v0/models",
+    "/v1/chat/completions",
+    "/v1/completions",
+    "/v1/embeddings",
+    "/v1/responses",
+    "/v1/models",
+    "/chat/completions",
+    "/completions",
+    "/embeddings",
+    "/responses",
+    "/models",
+    "/api/v1",
+    "/api/v0",
+    "/v1",
+)
 
 _cached: dict[str, object] | None = None
 
@@ -73,14 +94,31 @@ def load_lmstudio_config_file() -> dict[str, object]:
     return {}
 
 
+def lmstudio_root_url(base_url: str) -> str:
+    """Вернуть корень LM Studio server из root/base/endpoint URL."""
+    root = str(base_url or "").strip().rstrip("/")
+    changed = True
+    while changed and root:
+        changed = False
+        for suffix in _KNOWN_API_SUFFIXES:
+            if root.endswith(suffix):
+                root = root[: -len(suffix)].rstrip("/")
+                changed = True
+                break
+    return root
+
+
+def normalize_lmstudio_base_url(base_url: str) -> str:
+    """Нормализовать URL к OpenAI-compatible base URL, оканчивающемуся на /v1."""
+    root = lmstudio_root_url(base_url)
+    if not root:
+        return ""
+    return root + "/v1"
+
+
 def _normalize_base_url(bu: str) -> str:
     """Убедиться, что base URL заканчивается на /v1 (OpenAI-совместимый API)."""
-    base_url = bu.strip().rstrip("/")
-    if base_url.endswith("/v1"):
-        return base_url
-    if "/v1" not in base_url:
-        base_url = base_url + "/v1"
-    return base_url
+    return normalize_lmstudio_base_url(bu)
 
 
 def _to_float_timeout(value: object) -> float | None:
