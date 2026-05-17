@@ -103,6 +103,19 @@ SYSTEM_PROMPT_MAP = (
     '"recommendations": [ string ] }\n'
 )
 
+# SCOUT: быстрый проход релевантности перед тяжёлым MAP (большие корпуса)
+SYSTEM_PROMPT_SCOUT = (
+    "YOU MUST FOLLOW THESE RULES WITHOUT EXCEPTION:\n"
+    "1. DO NOT write thinking or text outside <results>.\n"
+    "2. Your ENTIRE response must be wrapped in <results> and </results>.\n"
+    "3. Inside <results> write ONE valid JSON object (no markdown fences).\n"
+    "4. Judge ONLY whether the fragment may help answer the user query.\n"
+    "JSON schema:\n"
+    '{ "relevance_score": number between 0 and 1, "relevant": boolean, '
+    '"topics": [ string ], "one_line_summary": string, "no_relevant_data": boolean }\n'
+    "5. If clearly irrelevant, set no_relevant_data=true, relevant=false, relevance_score<=0.2.\n"
+)
+
 # META-PLANNER: генерация оптимального промта перед MAP-фазой (composer model)
 SYSTEM_PROMPT_META_PLANNER = (
     "YOU MUST FOLLOW THESE RULES WITHOUT EXCEPTION:\n"
@@ -183,6 +196,24 @@ CONTEXT_FALLBACK = 8096
 MAX_REDUCE_INPUT_TOKENS = int(os.getenv("NOCTURNE_MAX_REDUCE_INPUT_TOKENS", "24000"))
 
 
+def _context_safety_margin(claimed_max_context: int) -> int:
+    """
+    Запас под расхождение tiktoken и llama.cpp.
+
+    По умолчанию — 15% от заявленного контекста (512..8192), а не фиксированные 20480,
+    чтобы модели 8k–32k не обрезались до пола 4096.
+    Явное значение: NOCTURNE_CONTEXT_SAFETY_MARGIN (целое число токенов).
+    """
+    env_raw = os.getenv("NOCTURNE_CONTEXT_SAFETY_MARGIN", "").strip()
+    if env_raw:
+        try:
+            return max(0, int(env_raw))
+        except ValueError:
+            pass
+    adaptive = int(claimed_max_context * 0.15)
+    return max(512, min(8192, adaptive))
+
+
 def _server_safe_context_limit(claimed_max_context: int) -> int:
     """
     Консервативный бюджет для подсчёта размера промпта (MAP / REDUCE / синтез).
@@ -193,12 +224,13 @@ def _server_safe_context_limit(claimed_max_context: int) -> int:
     """
     if claimed_max_context <= 0:
         return CONTEXT_FALLBACK
-    margin = int(os.getenv("NOCTURNE_CONTEXT_SAFETY_MARGIN", "20480"))
+    margin = _context_safety_margin(claimed_max_context)
     util_raw = os.getenv("NOCTURNE_CONTEXT_UTILIZATION", "").strip()
     util = float(util_raw) if util_raw else 0.82
     util = max(0.5, min(0.99, util))
-    by_margin = max(4096, claimed_max_context - margin)
-    by_util = max(4096, int(claimed_max_context * util))
+    floor = 4096 if claimed_max_context >= 8192 else max(1024, claimed_max_context // 4)
+    by_margin = max(floor, claimed_max_context - margin)
+    by_util = max(floor, int(claimed_max_context * util))
     return min(by_margin, by_util)
 ENABLE_CONTEXT_PROBE = os.getenv("NOCTURNE_ENABLE_CONTEXT_PROBE", "").strip() == "1"
 MAX_CONTEXT_PROBES_PER_REFRESH = 2
@@ -1747,9 +1779,64 @@ def _fallback_merge_map_json(items: list[str]) -> str:
     return json.dumps(merged, ensure_ascii=False)
 
 
-def compute_job_id(file_path: Path, user_query: str) -> str:
-    """job_id для кэша: инвалидация при смене файла или запроса."""
-    return build_job_id(file_path, user_query)
+def compute_job_id(
+    file_path: Path,
+    user_query: str,
+    *,
+    file_paths: list[Path] | None = None,
+) -> str:
+    """job_id для кэша: инвалидация при смене файла, запроса или состава корпуса."""
+    fingerprint: str | None = None
+    if file_paths:
+        from cache import corpus_fingerprint_from_paths
+
+        fingerprint = corpus_fingerprint_from_paths(file_paths)
+    return build_job_id(file_path, user_query, corpus_fingerprint=fingerprint)
+
+
+def _parse_scout_json_payload(raw: str) -> dict[str, Any] | None:
+    if not raw or not raw.strip():
+        return None
+    inner = _extract_results_tag(raw) if "<results>" in raw.lower() else raw.strip()
+    try:
+        obj = json.loads(inner)
+    except json.JSONDecodeError:
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def scout_relevance_score(parsed: dict[str, Any]) -> float:
+    """Оценка 0..1 из scout JSON; при ошибке парсинга вызывающий код должен трактовать как «пропустить фильтр»."""
+    if bool(parsed.get("no_relevant_data")):
+        return 0.0
+    score = 0.0
+    try:
+        score = float(parsed.get("relevance_score", 0))
+    except (TypeError, ValueError):
+        score = 0.0
+    if bool(parsed.get("relevant")):
+        score = max(score, 0.45)
+    return max(0.0, min(1.0, score))
+
+
+def filter_indices_by_scout_scores(
+    indices: list[int],
+    scores: dict[int, float],
+    threshold: float,
+) -> tuple[list[int], list[int]]:
+    """Вернуть (deep_map_indices, skipped_indices). Неизвестный score → deep MAP (безопасный fallback)."""
+    deep: list[int] = []
+    skipped: list[int] = []
+    thr = max(0.0, min(1.0, threshold))
+    for i in indices:
+        if i not in scores:
+            deep.append(i)
+            continue
+        if scores[i] >= thr:
+            deep.append(i)
+        else:
+            skipped.append(i)
+    return deep, skipped
 
 
 def _available_user_tokens(max_context_tokens: int, system_prompt: str, reserve: int = 2048) -> int:
@@ -2325,6 +2412,9 @@ async def run_map_reduce(
     api_mode: str = "native",
     low_vram_mode: bool = True,
     dual_instance_mode: bool = False,
+    scout_mode: bool = False,
+    scout_relevance_threshold: float = 0.35,
+    scout_min_chunks: int = 8,
 ) -> str:
     """
     MAP с кэшем по job_id; адаптивный семафор; иерархический merge MAP JSON и финальный REDUCE.
@@ -2886,7 +2976,106 @@ async def run_map_reduce(
             except Exception as _meta_exc:
                 logger.warning("Meta-plan step failed: %s", _meta_exc)
 
-        await _run_phase(text_indices, phase_name="text_map", phase_model=model, is_vision=False)
+        map_text_indices = list(text_indices)
+        scout_skipped = 0
+        if (
+            scout_mode
+            and text_indices
+            and len(text_indices) >= max(2, scout_min_chunks)
+        ):
+            scout_job = f"{job_id}:scout" if job_id else None
+            if on_progress:
+                on_progress(
+                    0, len(text_indices), "scout", from_cache_count,
+                    scout_total=len(text_indices),
+                )
+            await _ensure_model_ready(model, "scout")
+
+            async def _scout_one(i: int) -> tuple[int, float]:
+                chunk = chunks[i]
+                if scout_job:
+                    cached = get_cached_response(scout_job, i)
+                    if cached is not None:
+                        parsed = _parse_scout_json_payload(cached)
+                        if parsed is not None:
+                            return i, scout_relevance_score(parsed)
+                from parser import count_tokens as _ct_scout
+
+                labeled = chunk
+                if "[CHUNK_INDEX:" not in chunk.upper():
+                    labeled = f"[CHUNK_INDEX: {i + 1}]\n{chunk}"
+                query_line = effective_query
+                if max_context_tokens and max_context_tokens > 0:
+                    overhead = _ct_scout(SYSTEM_PROMPT_SCOUT) + _ct_scout(query_line) + 400
+                    chunk_budget = max(150, max_context_tokens - overhead)
+                    if _ct_scout(labeled) > chunk_budget:
+                        labeled = _truncate_text_to_tokens(labeled, chunk_budget)
+                prompt = (
+                    f"{query_line}\n\n"
+                    f"{language_hint}\n\n"
+                    "Оцени релевантность ТОЛЬКО этого фрагмента запросу. Верни JSON по схеме scout.\n\n"
+                    f"{labeled}"
+                )
+                messages = [
+                    {"role": "system", "content": SYSTEM_PROMPT_SCOUT},
+                    {"role": "user", "content": prompt},
+                ]
+                try:
+                    out = await call_llm(
+                        messages,
+                        model,
+                        base_url,
+                        api_key,
+                        semaphore,
+                        max_tokens=320,
+                        max_retries=2,
+                        allow_empty_content=False,
+                        api_mode=api_mode,
+                        client=shared_client,
+                    )
+                    result = _extract_results_tag(out)
+                    parsed = _parse_scout_json_payload(result)
+                    if parsed is None:
+                        return i, 1.0
+                    if scout_job:
+                        set_cached_response(scout_job, i, json.dumps(parsed, ensure_ascii=False))
+                    return i, scout_relevance_score(parsed)
+                except Exception as exc:
+                    logger.warning(
+                        "Scout chunk %s failed: %s — will run full MAP",
+                        i + 1,
+                        sanitize_for_log(str(exc)[:120]),
+                    )
+                    return i, 1.0
+
+            scout_results = await asyncio.gather(
+                *[_scout_one(i) for i in text_indices],
+                return_exceptions=False,
+            )
+            score_map = {idx: sc for idx, sc in scout_results}
+            map_text_indices, skipped_list = filter_indices_by_scout_scores(
+                text_indices, score_map, scout_relevance_threshold,
+            )
+            scout_skipped = len(skipped_list)
+            if on_progress:
+                on_progress(
+                    len(map_text_indices),
+                    len(text_indices),
+                    "scout_done",
+                    from_cache_count,
+                    scout_deep=len(map_text_indices),
+                    scout_skipped=scout_skipped,
+                    scout_threshold=scout_relevance_threshold,
+                )
+            logger.info(
+                "Scout phase: total=%s deep_map=%s skipped=%s threshold=%.2f",
+                len(text_indices),
+                len(map_text_indices),
+                scout_skipped,
+                scout_relevance_threshold,
+            )
+
+        await _run_phase(map_text_indices, phase_name="text_map", phase_model=model, is_vision=False)
         await _run_phase(vision_indices, phase_name="vision_map", phase_model=vision_llm, is_vision=True)
         map_results_raw = [map_results_by_index.get(i, "") for i in range(len(chunks))]
 
@@ -2931,6 +3120,9 @@ async def run_map_reduce(
                 vision_model=vision_llm,
                 reduce_model=reduce_model,
                 text_chunks=len(text_indices),
+                text_map_chunks=len(map_text_indices),
+                scout_skipped=scout_skipped,
+                scout_mode=scout_mode,
                 vision_chunks=len(vision_indices),
                 low_vram_sequential=low_vram_mode,
                 api_mode=api_mode,

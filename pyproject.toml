@@ -1,6 +1,6 @@
 [project]
 name = "forestoptilm"
-version = "1.0.0"
+version = "0.5.0-alpha.1"
 description = "Bulk async file processing through local LLMs (LM Studio)"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
@@ -10,7 +10,7 @@ authors = [
 ]
 keywords = ["llm", "lm-studio", "map-reduce", "rag", "document-processing"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 3 - Alpha",
     "Environment :: X11 Applications",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",

@@ -3,9 +3,10 @@
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-brightgreen.svg)](https://www.python.org/)
 
-Desktop application for bulk asynchronous processing of large files
-(TXT, PDF, DOCX, CSV, XLSX, images, archives) through local LLMs
-(LM Studio and other OpenAI-compatible APIs).
+Desktop application for bulk asynchronous processing of large files and
+folders (including multi‑hundred‑thousand‑token corpora) through local LLMs
+(LM Studio and other OpenAI-compatible APIs). Uses Map‑Reduce with an optional
+**scout pass** (fast relevance filter) and a **composer** model for merge/reduce.
 
 AGPL v3 Copyleft applies to reuse, modification, and network deployment of derived versions.
 
@@ -15,6 +16,8 @@ AGPL v3 Copyleft applies to reuse, modification, and network deployment of deriv
 ## Features
 
 - **Map-Reduce pipeline** for text documents with structured JSON evidence.
+- **Scout pass** — quick relevance scoring before full MAP (for huge folders).
+- **Large corpus preset** — scout + smaller chunks + composer in one click.
 - **Vision support** for image analysis via multimodal models.
 - **RAG** — local FAISS-based retrieval-augmented generation.
 - **Batch table processing** for CSV/XLSX with JSON responses.
@@ -156,6 +159,8 @@ automatically downgraded to **medium**.
 | `NOCTURNE_MEGA_FILE_TOKEN_THRESHOLD` | `80000` | Mega-file part splitting threshold |
 | `NOCTURNE_MEGA_PART_FACTOR` | `6` | Coarse part multiplier for mega files |
 | `NOCTURNE_CACHE_TTL_DAYS` | `7` | MAP cache TTL in days (`0` = no expiry) |
+| `NOCTURNE_CONTEXT_SAFETY_MARGIN` | *(adaptive)* | Fixed token margin; default is ~15% of model context (512–8192) |
+| `NOCTURNE_SCOUT_THRESHOLD` | `0.35` | Default relevance threshold when scout is enabled from env |
 
 ## Troubleshooting
 

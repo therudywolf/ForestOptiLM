@@ -44,13 +44,40 @@ CREATE INDEX IF NOT EXISTS idx_map_chunks_job ON map_chunks(job_id);
 _conn: sqlite3.Connection | None = None
 
 
-def build_job_id(file_path: Path, user_query: str) -> str:
-    """job_id = hash(file_path + mtime + user_query)."""
+_MAX_CORPUS_HASH_BYTES = 65536
+
+
+def corpus_fingerprint_from_paths(paths: list[Path]) -> str:
+    """Хеш состава корпуса: путь + размер + mtime (+ content hash для небольших файлов)."""
+    parts: list[str] = []
+    for p in sorted(paths, key=lambda x: str(x).lower()):
+        try:
+            st = p.stat()
+            content_tag = ""
+            if st.st_size <= _MAX_CORPUS_HASH_BYTES:
+                content_tag = hashlib.sha256(p.read_bytes()).hexdigest()[:12]
+            parts.append(f"{p}|{st.st_size}|{st.st_mtime_ns}|{content_tag}")
+        except OSError:
+            parts.append(str(p))
+    if not parts:
+        return ""
+    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()[:16]
+
+
+def build_job_id(
+    file_path: Path,
+    user_query: str,
+    *,
+    corpus_fingerprint: str | None = None,
+) -> str:
+    """job_id = hash(file_path + mtime + user_query [+ corpus fingerprint])."""
     try:
         stat = file_path.stat()
         payload = f"{file_path!s}{stat.st_mtime}{user_query}"
     except OSError:
         payload = f"{file_path!s}{user_query}"
+    if corpus_fingerprint:
+        payload = f"{payload}|corpus:{corpus_fingerprint}"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
 
 
