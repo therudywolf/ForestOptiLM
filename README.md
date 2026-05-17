@@ -81,8 +81,22 @@ path to the JSON config file.
 
 ### Defaults
 
-If no local config exists, built-in values from `lmstudio_config.py` are used
-(e.g. `http://10.77.77.2:29931/v1`, API key `forest`).
+If no local config exists, defaults to `http://127.0.0.1:1234` with no API key.
+Create `.local/lmstudio.json` from the template (never commit it).
+
+### LM Studio 0.4+ REST API v1
+
+With **Server Settings → Require authentication** enabled, create a token under
+**Manage Tokens** (`sk-lm-...`) and put it in `.local/lmstudio.json`. The app uses:
+
+| Endpoint | Use |
+|----------|-----|
+| `GET /api/v1/models` | Model list |
+| `POST /api/v1/chat` | MAP / REDUCE / scout |
+| `POST /api/v1/models/load` | Low VRAM model load (`context_length` supported) |
+| `POST /api/v1/models/unload` | Unload instance |
+
+Native mode is default (`api_mode: native` in local config or GUI).
 
 ### API Mode
 

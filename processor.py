@@ -48,9 +48,6 @@ logger = logging.getLogger("nocturne")
 
 API_BASE, API_KEY, _LM_CONFIG_SOURCE = get_connection_defaults()
 
-# Runtime-кэш моделей, которые не принимают параметр reasoning (400 invalid_value для param=reasoning).
-# Заполняется автоматически при первой ошибке 400 от конкретной модели.
-_MODELS_NO_REASONING_PARAM: set[str] = set()
 DEFAULT_TIMEOUT = get_timeout_seconds()
 
 SYSTEM_PROMPT = (
@@ -306,17 +303,15 @@ def _auth_headers(api_key: str) -> dict[str, str]:
 
 
 def _chat_endpoint(base_url: str, native: bool | None = None) -> str:
-    use_native = USE_LMSTUDIO_NATIVE_API if native is None else native
-    if use_native:
-        return _lmstudio_root(base_url) + "/api/v1/chat"
-    return _openai_base(base_url) + "/chat/completions"
+    from lm_client import chat_endpoint
+
+    return chat_endpoint(base_url, native=USE_LMSTUDIO_NATIVE_API if native is None else native)
 
 
 def _models_endpoint(base_url: str, native: bool | None = None) -> str:
-    use_native = USE_LMSTUDIO_NATIVE_API if native is None else native
-    if use_native:
-        return _lmstudio_root(base_url) + "/api/v1/models"
-    return _openai_base(base_url) + "/models"
+    from lm_client import models_endpoint
+
+    return models_endpoint(base_url, native=USE_LMSTUDIO_NATIVE_API if native is None else native)
 
 
 def _native_input_from_messages(messages: list[dict[str, Any]]) -> tuple[str | None, str | list[dict[str, Any]]]:
@@ -352,32 +347,9 @@ def _native_input_from_messages(messages: list[dict[str, Any]]) -> tuple[str | N
 
 
 def _extract_chat_response_content(data: dict[str, Any]) -> tuple[str, str]:
-    """Вернуть (content, reasoning) для OpenAI-совместимого и native LM Studio форматов."""
-    choices = data.get("choices")
-    if isinstance(choices, list) and choices:
-        message = (choices[0] or {}).get("message", {}) or {}
-        content = str(message.get("content") or "")
-        reasoning = str(message.get("reasoning_content") or message.get("reasoning") or "")
-        return content, reasoning
+    from lm_client import extract_chat_response_content
 
-    output = data.get("output")
-    if isinstance(output, list):
-        content_parts: list[str] = []
-        reasoning_parts: list[str] = []
-        for item in output:
-            if not isinstance(item, dict):
-                continue
-            typ = str(item.get("type") or "").strip().lower()
-            if typ == "message":
-                c = str(item.get("content") or "")
-                if c:
-                    content_parts.append(c)
-            elif typ == "reasoning":
-                r = str(item.get("content") or "")
-                if r:
-                    reasoning_parts.append(r)
-        return "\n".join(content_parts).strip(), "\n".join(reasoning_parts).strip()
-    return "", ""
+    return extract_chat_response_content(data)
 
 
 def _prefer_russian(query: str) -> bool:
@@ -463,15 +435,20 @@ def fetch_models(base_url: str, api_key: str) -> list[str]:
 
 
 def categorize_models(base_url: str, api_key: str) -> dict[str, list[str]]:
-    """Разделить модели на chat / vision / embedding по каталогу LM Studio."""
+    """Разделить модели на chat / vision / embedding / reasoning по каталогу LM Studio."""
+    from reasoning_models import model_has_reasoning_capability, refresh_model_catalog_cache
+
     catalog = fetch_models_catalog(base_url, api_key)
-    out: dict[str, list[str]] = {"chat": [], "vision": [], "embedding": []}
+    refresh_model_catalog_cache(catalog)
+    out: dict[str, list[str]] = {"chat": [], "vision": [], "embedding": [], "reasoning": []}
     for m in catalog:
         key = str(m.get("key") or m.get("id") or "").strip()
         if not key:
             continue
         mtype = str(m.get("type") or "llm").strip().lower()
         caps = m.get("capabilities")
+        if model_has_reasoning_capability(key, caps):
+            out["reasoning"].append(key)
         if mtype == "embedding" or "embed" in key.lower():
             out["embedding"].append(key)
         elif isinstance(caps, dict) and caps.get("vision"):
@@ -569,7 +546,9 @@ def _try_unload_model(base_url: str, api_key: str, model_key: str) -> bool:
     """
     root = _lmstudio_root(base_url)
     headers = {"Content-Type": "application/json", **_auth_headers(api_key)}
-    unload_url = root + "/api/v1/models/unload"
+    from lm_studio_api import V1_MODELS_UNLOAD, v1_url
+
+    unload_url = v1_url(root, V1_MODELS_UNLOAD)
     instance_ids = _extract_loaded_instance_ids(base_url, api_key, model_key)
     if not instance_ids:
         return True
@@ -609,27 +588,6 @@ def _classify_http_400(text: str) -> str:
     if any(s in low for s in ("thinking", "reasoning", "tool", "image", "vision", "model")):
         return "unsupported_option"
     return "unknown"
-
-
-def _is_unsupported_reasoning_response(response: httpx.Response) -> bool:
-    if response.status_code != 400:
-        return False
-    try:
-        err_body = response.json()
-        if isinstance(err_body, dict):
-            err = err_body.get("error")
-            if isinstance(err, dict):
-                param = str(err.get("param") or "").lower()
-                message = str(err.get("message") or "").lower()
-                code = str(err.get("code") or "").lower()
-                if param == "reasoning" or (
-                    "reasoning" in message
-                    and code in {"invalid_value", "invalid_request_error", ""}
-                ):
-                    return True
-    except Exception:
-        pass
-    return "reasoning" in response.text.lower()
 
 
 def _to_positive_int(value: Any) -> int | None:
@@ -1137,13 +1095,18 @@ def run_lmstudio_smoke_test(
         chat_url = _chat_endpoint(base_url, native=USE_LMSTUDIO_NATIVE_API)
         payload: dict[str, Any]
         if USE_LMSTUDIO_NATIVE_API:
+            from reasoning_models import native_reasoning_payload, refresh_model_catalog_cache
+
+            refresh_model_catalog_cache(fetch_models_catalog(base_url, api_key))
             payload = {
                 "model": chat,
                 "input": "Reply with exactly: OK",
                 "max_output_tokens": 16,
                 "temperature": 0,
                 "store": False,
+                "context_length": 2048,
             }
+            payload.update(native_reasoning_payload(chat))
         else:
             payload = {
                 "model": chat,
@@ -1198,8 +1161,10 @@ async def call_llm(
     use_native = api_mode.strip().lower() != "openai"
     endpoint = _chat_endpoint(base_url, native=use_native)
 
-    def _build_payload(native: bool, include_reasoning_off: bool = True) -> dict[str, Any]:
+    def _build_payload(native: bool, include_reasoning_control: bool = True) -> dict[str, Any]:
         if native:
+            from reasoning_models import native_reasoning_payload
+
             system_prompt, native_input = _native_input_from_messages(messages)
             payload: dict[str, Any] = {
                 "model": model,
@@ -1208,13 +1173,13 @@ async def call_llm(
                 "temperature": 0,
                 "store": False,
             }
-            # "reasoning": "off" disables chain-of-thought on reasoning models (qwen3, deepseek-r1, etc.).
-            # Some models (e.g. liquid/lfm2.5) don't support this param and return 400.
-            # We detect this on first failure and skip it for subsequent calls.
-            if include_reasoning_off and model not in _MODELS_NO_REASONING_PARAM:
-                payload["reasoning"] = "off"
+            if include_reasoning_control:
+                payload.update(native_reasoning_payload(model))
             if system_prompt:
                 payload["system_prompt"] = system_prompt
+            ctx_env = os.getenv("NOCTURNE_NATIVE_CHAT_CONTEXT_LENGTH", "").strip()
+            if ctx_env.isdigit():
+                payload["context_length"] = int(ctx_env)
             return payload
         return {
             "model": model,
@@ -1234,36 +1199,37 @@ async def call_llm(
                 write=30.0,
                 pool=15.0,
             )
+            from lm_client import is_unsupported_reasoning_response
+            from reasoning_models import is_no_reasoning_param, mark_no_reasoning_param
+
             if client is None:
                 async with httpx.AsyncClient(timeout=timeout_cfg) as local_client:
                     r = await local_client.post(endpoint, json=payload, headers=headers)
-                    # Special case: model doesn't support reasoning param → retry once without it.
                     if (
                         r.status_code == 400
                         and use_native
-                        and model not in _MODELS_NO_REASONING_PARAM
-                        and _is_unsupported_reasoning_response(r)
+                        and not is_no_reasoning_param(model)
+                        and is_unsupported_reasoning_response(r)
                     ):
-                        _MODELS_NO_REASONING_PARAM.add(model)
+                        mark_no_reasoning_param(model)
                         logger.info(
                             "Model %s does not support reasoning param; retrying without it.", model
                         )
-                        fallback_payload = _build_payload(use_native, include_reasoning_off=False)
+                        fallback_payload = _build_payload(use_native, include_reasoning_control=False)
                         r = await local_client.post(endpoint, json=fallback_payload, headers=headers)
             else:
                 r = await client.post(endpoint, json=payload, headers=headers)
-                # Special case: model doesn't support reasoning param → retry once without it.
                 if (
                     r.status_code == 400
                     and use_native
-                    and model not in _MODELS_NO_REASONING_PARAM
-                    and _is_unsupported_reasoning_response(r)
+                    and not is_no_reasoning_param(model)
+                    and is_unsupported_reasoning_response(r)
                 ):
-                    _MODELS_NO_REASONING_PARAM.add(model)
+                    mark_no_reasoning_param(model)
                     logger.info(
                         "Model %s does not support reasoning param; retrying without it.", model
                     )
-                    fallback_payload = _build_payload(use_native, include_reasoning_off=False)
+                    fallback_payload = _build_payload(use_native, include_reasoning_control=False)
                     r = await client.post(endpoint, json=fallback_payload, headers=headers)
             if r.status_code in (500, 502, 503):
                 raise httpx.HTTPStatusError(
@@ -1278,14 +1244,19 @@ async def call_llm(
             content, reasoning = _extract_chat_response_content(data)
             if not str(content).strip():
                 reasoning_str = str(reasoning).strip()
-                if reasoning_str.startswith("<results>") or reasoning_str.lower().startswith("<results>"):
-                    content = reasoning_str
-                elif allow_empty_content:
-                    content = ""
-                else:
-                    raise RuntimeError(
-                        "Model returned empty content (possibly reasoning-only output)"
-                    )
+                if reasoning_str:
+                    salvaged = _extract_results_tag(reasoning_str)
+                    if salvaged:
+                        content = salvaged
+                    elif re.search(r"<results>", reasoning_str, re.IGNORECASE):
+                        content = reasoning_str
+                if not str(content).strip():
+                    if allow_empty_content:
+                        content = ""
+                    else:
+                        raise RuntimeError(
+                            "Model returned empty content (possibly reasoning-only output)"
+                        )
             if isinstance(semaphore, AdaptiveSemaphore):
                 await semaphore.record_success()
             return content.strip()
@@ -2616,6 +2587,21 @@ async def run_map_reduce(
     if api_mode not in {"native", "openai"}:
         api_mode = "native"
     use_native = api_mode == "native"
+    try:
+        from reasoning_models import list_reasoning_models, refresh_model_catalog_cache
+
+        catalog = fetch_models_catalog(base_url, api_key)
+        refresh_model_catalog_cache(catalog)
+        reasoning_models = list_reasoning_models(catalog)
+        if reasoning_models:
+            logger.info(
+                "Reasoning-capable models (%s): %s",
+                len(reasoning_models),
+                ", ".join(reasoning_models[:6])
+                + ("…" if len(reasoning_models) > 6 else ""),
+            )
+    except Exception:
+        pass
     # effective_query will be replaced by meta-prompt if composer is set
     effective_query = user_query
 
@@ -2719,11 +2705,18 @@ async def run_map_reduce(
                         _try_unload_model(base_url, api_key, target_model)
                         current_count = 0
 
-                    load_url = _lmstudio_root(base_url) + "/api/v1/models/load"
+                    from lm_studio_api import V1_MODELS_LOAD, v1_url
+
+                    load_url = v1_url(_lmstudio_root(base_url), V1_MODELS_LOAD)
                     headers = {"Content-Type": "application/json", **_auth_headers(api_key)}
+                    load_body: dict[str, Any] = {"model": target_model}
+                    if max_context_tokens and max_context_tokens > 0:
+                        load_body["context_length"] = int(max_context_tokens)
                     to_load = max(0, target_instances - current_count)
                     for _ in range(to_load):
-                        rr = await shared_client.post(load_url, json={"model": target_model}, headers=headers)
+                        rr = await shared_client.post(
+                            load_url, json=load_body, headers=headers,
+                        )
                         if rr.status_code >= 400:
                             logger.warning(
                                 "Native load failed for %s on stage %s: HTTP %s %s",

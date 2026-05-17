@@ -7,7 +7,8 @@ from typing import Any
 
 import httpx
 
-from lmstudio_config import lmstudio_root_url, normalize_lmstudio_base_url, sanitize_for_log
+from lm_studio_api import V1_CHAT, V1_MODELS, v1_url
+from lmstudio_config import lmstudio_root_url, normalize_lmstudio_base_url
 
 USE_LMSTUDIO_NATIVE_API = os.getenv("NOCTURNE_LMSTUDIO_NATIVE_API", "1").strip() != "0"
 
@@ -21,14 +22,14 @@ def auth_headers(api_key: str) -> dict[str, str]:
 def chat_endpoint(base_url: str, *, native: bool | None = None) -> str:
     use_native = USE_LMSTUDIO_NATIVE_API if native is None else native
     if use_native:
-        return lmstudio_root_url(base_url) + "/api/v1/chat"
+        return v1_url(lmstudio_root_url(base_url), V1_CHAT)
     return normalize_lmstudio_base_url(base_url) + "/chat/completions"
 
 
 def models_endpoint(base_url: str, *, native: bool | None = None) -> str:
     use_native = USE_LMSTUDIO_NATIVE_API if native is None else native
     if use_native:
-        return lmstudio_root_url(base_url) + "/api/v1/models"
+        return v1_url(lmstudio_root_url(base_url), V1_MODELS)
     return normalize_lmstudio_base_url(base_url) + "/models"
 
 
@@ -70,6 +71,64 @@ def fetch_models_http(base_url: str, api_key: str, timeout: float = 15.0) -> lis
         except Exception:
             continue
     return []
+
+
+def extract_chat_response_content(data: dict[str, Any]) -> tuple[str, str]:
+    """(message_content, reasoning_content) for OpenAI-compatible and native LM Studio."""
+    choices = data.get("choices")
+    if isinstance(choices, list) and choices:
+        message = (choices[0] or {}).get("message", {}) or {}
+        content = str(message.get("content") or "")
+        reasoning = str(message.get("reasoning_content") or message.get("reasoning") or "")
+        return content, reasoning
+
+    top = data.get("content")
+    if isinstance(top, str) and top.strip():
+        return top.strip(), ""
+
+    output = data.get("output")
+    if isinstance(output, list):
+        content_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+            typ = str(item.get("type") or "").strip().lower()
+            if typ == "message":
+                c = str(item.get("content") or "")
+                if c:
+                    content_parts.append(c)
+            elif typ in ("text", "output_text"):
+                c = str(item.get("content") or item.get("text") or "")
+                if c:
+                    content_parts.append(c)
+            elif typ == "reasoning":
+                r = str(item.get("content") or item.get("text") or "")
+                if r:
+                    reasoning_parts.append(r)
+        return "\n".join(content_parts).strip(), "\n".join(reasoning_parts).strip()
+    return "", ""
+
+
+def is_unsupported_reasoning_response(response: httpx.Response) -> bool:
+    if response.status_code != 400:
+        return False
+    try:
+        err_body = response.json()
+        if isinstance(err_body, dict):
+            err = err_body.get("error")
+            if isinstance(err, dict):
+                param = str(err.get("param") or "").lower()
+                message = str(err.get("message") or "").lower()
+                code = str(err.get("code") or "").lower()
+                if param == "reasoning" or (
+                    "reasoning" in message
+                    and code in {"invalid_value", "invalid_request_error", ""}
+                ):
+                    return True
+    except Exception:
+        pass
+    return "reasoning" in response.text.lower()
 
 
 def classify_http_400(body: str) -> str:
