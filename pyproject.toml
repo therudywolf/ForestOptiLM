@@ -35,3 +35,9 @@ forestoptilm = "forestoptilm.cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.4"]
+
+[tool.ruff.lint]
+select = ["E", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+"forestoptilm/cli.py" = ["E402"]

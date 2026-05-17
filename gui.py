@@ -25,7 +25,6 @@ import datetime as dt
 import logging
 import os
 import queue
-import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -1747,7 +1746,8 @@ class NocturneApp(ctk.CTk):
                             remain = max(0, deep_ch - cur)
                             eta_min = remain / cpm if cpm else 0
                             self._set_status(
-                                f"MAP ~{eta_min:.0f} мин осталось (throughput {cpm:.1f} ch/min)",
+                                f"MAP {cur}/{total_ch}: ~{eta_min:.0f} мин осталось "
+                                f"({cpm:.1f} ch/min)",
                             )
                         wk = msg.get("workers", "")
                         mm = msg.get("map_model", "")
@@ -2025,7 +2025,6 @@ class NocturneApp(ctk.CTk):
 
     def _on_export_evidence_json(self) -> None:
         import json
-        import re
 
         text = self._last_result_text or ""
         rows: list[dict[str, str]] = []
