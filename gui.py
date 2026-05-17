@@ -799,6 +799,12 @@ class NocturneApp(ctk.CTk):
         em = str(state.get("selected_embedding_model") or "").strip()
         if em:
             self._embedding_model_var.set(em)
+        mcc = state.get("model_context_cache")
+        if isinstance(mcc, dict) and mcc:
+            try:
+                self._model_ctx.update({str(k): int(v) for k, v in mcc.items()})
+            except (TypeError, ValueError):
+                pass
         try:
             set_runtime_limits(
                 max_reduce_input_tokens=int(self._max_reduce_tokens_var.get() or "24000"),
@@ -840,6 +846,7 @@ class NocturneApp(ctk.CTk):
             "scout_mode": bool(self._scout_var.get()),
             "scout_threshold": self._scout_threshold_var.get().strip() or "0.35",
             "selected_scout_model": self._scout_model_var.get().strip(),
+            "model_context_cache": dict(self._model_ctx),
             "rag_index_dir": self._rag_index_dir_var.get().strip() or ".nocturne_index",
             "rag_top_k": rag_top_k,
         }

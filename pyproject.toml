@@ -33,10 +33,5 @@ Issues = "https://github.com/therudywolf/ForestOptiLM/issues"
 [project.scripts]
 forestoptilm = "forestoptilm.cli:main"
 
-[tool.pytest.ini_options]
-markers = [
-    "integration: tests requiring live LM Studio",
-]
-
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.4"]
