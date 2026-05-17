@@ -41,6 +41,7 @@ from lmstudio_config import (
     load_ui_runtime_state,
     sanitize_for_log,
     save_ui_runtime_state,
+    validate_lmstudio_url,
 )
 from parser import ParseError, compute_dynamic_chunk_size, parse_file
 from processor import (
@@ -107,7 +108,9 @@ class NocturneApp(ctk.CTk):
         # context_length per model, populated after "Обновить модели"
         self._model_ctx: dict[str, int] = {}
         self._model_ctx_source: dict[str, str] = {}
-        self._models_by_kind: dict[str, list[str]] = {"chat": [], "vision": [], "embedding": []}
+        self._models_by_kind: dict[str, list[str]] = {
+            "chat": [], "vision": [], "embedding": [], "reasoning": [],
+        }
         self._cfg_default_model = get_default_model_optional()
         self._runtime_state = load_ui_runtime_state()
         self._runtime_state_ready = False
@@ -926,15 +929,7 @@ class NocturneApp(ctk.CTk):
 
     def _validate_lm_connection_fields(self) -> tuple[bool, str]:
         """Проверка полей подключения до сетевых запросов."""
-        url = self._url_var.get().strip()
-        if not url:
-            return (
-                False,
-                "Укажите API Base URL в боковой панели или создайте .local/lmstudio.json (см. README).",
-            )
-        if not re.match(r"^https?://", url, re.I):
-            return False, "API Base URL должен начинаться с http:// или https://"
-        return True, ""
+        return validate_lmstudio_url(self._url_var.get())
 
     def _on_fetch_models(self) -> None:
         url = self._url_var.get().strip()
@@ -1016,7 +1011,11 @@ class NocturneApp(ctk.CTk):
             self._composer_model_var.set(composer_sel)
             self._embedding_model_var.set(embedding_sel)
             self._update_ctx_label(chat)
-        self._set_status(f"Загружено моделей: {len(models)}")
+        n_reason = len(self._models_by_kind.get("reasoning") or [])
+        status = f"Загружено моделей: {len(models)}"
+        if n_reason:
+            status += f" (reasoning: {n_reason})"
+        self._set_status(status)
         self._persist_runtime_state()
         if self._model_poll_after_id is None:
             self._poll_loaded_model()
@@ -1660,10 +1659,12 @@ class NocturneApp(ctk.CTk):
         scout = "on" if self._scout_var.get() else "off"
         path = self._folder_path or self._file_path
         path_s = str(path) if path else "—"
+        n_reason = len(self._models_by_kind.get("reasoning") or [])
+        reason_s = f" reasoning_models={n_reason}" if n_reason else ""
         self._preflight_label.configure(
             text=(
                 f"Preflight: ctx={ctx:,} chunk≈{chunk} scout={scout} "
-                f"workers={self._workers_var.get()} path={path_s}"
+                f"workers={self._workers_var.get()}{reason_s} path={path_s}"
             ).replace(",", " "),
             text_color="gray",
         )

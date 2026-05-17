@@ -10,7 +10,9 @@ import pytest
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     if os.getenv("NOCTURNE_RUN_INTEGRATION", "").strip() == "1":
         return
-    skip = pytest.mark.skip(reason="Set NOCTURNE_RUN_INTEGRATION=1 to run live LM Studio tests")
+    skip = pytest.mark.skip(
+        reason="Set NOCTURNE_RUN_INTEGRATION=1 for live LM Studio tests (CI uses -m 'not integration')",
+    )
     for item in items:
         if "integration" in item.keywords:
             item.add_marker(skip)

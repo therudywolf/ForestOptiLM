@@ -17,7 +17,7 @@ from parser import compute_dynamic_chunk_size, parse_file
 from pipeline import _iter_files
 from processor import SYSTEM_PROMPT_MAP, compute_job_id, run_map_reduce
 from run_profiles import get_profile
-from chunking import build_document_chunks, chunks_to_map_strings
+from chunking import build_document_chunks
 
 
 def _collect_chunks(target: Path, chunk_size: int) -> list[str]:

@@ -13,8 +13,9 @@ the same license that covers this project. See [LICENSE](LICENSE) for the full t
 1. **Fork** the repository and create a feature branch.
 2. Make your changes. Please follow the existing code style.
 3. Add or update **tests** if applicable.
-4. Ensure all tests pass: `python -m pytest tests/`
-5. Submit a **Pull Request** with a clear description of the changes.
+4. Ensure all tests pass: `python -m pytest tests/ -m "not integration"`
+5. For live LM Studio checks: `NOCTURNE_RUN_INTEGRATION=1 python -m pytest tests/test_lmstudio_integration.py`
+6. Submit a **Pull Request** with a clear description of the changes.
 
 ## Reporting Issues
 
