@@ -239,6 +239,7 @@ LOW_VRAM_SEQUENTIAL_MODE = os.getenv("NOCTURNE_LOW_VRAM_SEQUENTIAL_MODE", "1").s
 # По умолчанию используем native LM Studio REST API (/api/v1/*).
 USE_LMSTUDIO_NATIVE_API = os.getenv("NOCTURNE_LMSTUDIO_NATIVE_API", "1").strip() != "0"
 DUAL_INSTANCE_5PLUS_MODE = os.getenv("NOCTURNE_DUAL_INSTANCE_5PLUS_MODE", "0").strip() != "0"
+DUAL_MAP_RESOLVE = os.getenv("NOCTURNE_DUAL_MAP_RESOLVE", "0").strip() == "1"
 
 _SECTION_ALIASES: dict[str, tuple[str, ...]] = {
     "executive summary": ("executive summary", "исполнительное резюме", "краткое резюме"),
@@ -2999,6 +3000,42 @@ async def run_map_reduce(
                 if parsed_map is not None:
                     parsed_map = _normalize_map_json(parsed_map)
                     result = json.dumps(parsed_map, ensure_ascii=False)
+                if (
+                    DUAL_MAP_RESOLVE
+                    and result
+                    and not is_vision
+                    and dual_instance_mode
+                    and use_native
+                ):
+                    pool_ids = model_instance_pool.get(map_llm) or []
+                    if len(pool_ids) >= 2:
+                        alt_id = pool_ids[1] if call_model == pool_ids[0] else pool_ids[0]
+                        try:
+                            out_b = await call_llm(
+                                messages,
+                                alt_id,
+                                base_url,
+                                api_key,
+                                semaphore,
+                                on_retry=on_retry_event,
+                                api_mode=api_mode,
+                                client=shared_client,
+                            )
+                            result_b = _extract_results_tag(out_b)
+                            parsed_b = _parse_map_json_payload(result_b)
+                            if parsed_b is not None:
+                                parsed_b = _normalize_map_json(parsed_b)
+                                result_b = json.dumps(parsed_b, ensure_ascii=False)
+                            if result_b:
+                                from conflict_resolve import pick_findings_from_dual_worker
+
+                                result = pick_findings_from_dual_worker(result, result_b)
+                        except Exception as exc:
+                            logger.debug(
+                                "Dual MAP resolve skipped for chunk %s: %s",
+                                i + 1,
+                                sanitize_for_log(str(exc)),
+                            )
                 server_5xx_count = 0
             except Exception as exc:
                 failed_count += 1
@@ -3303,30 +3340,46 @@ async def run_map_reduce(
 
         await _run_phase(map_text_indices, phase_name="text_map", phase_model=model, is_vision=False)
         await _run_phase(vision_indices, phase_name="vision_map", phase_model=vision_llm, is_vision=True)
+        from map_result_store import MapResultStore, normalize_spill_threshold
+
+        use_result_store = bool(job_id) and len(chunks) >= normalize_spill_threshold()
+        result_store: MapResultStore | None = None
+        file_groups_prebuilt: dict[str, list[str]] | None = None
+        if use_result_store:
+            result_store = MapResultStore(job_id or "anon", chunk_count=len(chunks))
         map_results_raw: list[str] = []
         for i in range(len(chunks)):
             raw_r = map_results_by_index.get(i, "")
             if not raw_r and job_id:
                 raw_r = get_cached_response(job_id, i) or ""
-            map_results_raw.append(raw_r)
-
-        # Post-process each MAP result:
-        # 1. Deduplicate identical findings within the same chunk (prevents hallucinating
-        #    models from flooding the merge with 25+ copies of the same finding).
-        # 2. Fix the 'file' / evidence_refs.file fields using the authoritative [FILE_PATH:]
-        #    tag from the chunk header, overriding wrong Sonar component IDs or other values.
-        normalized_raw: list[str] = []
-        for idx, raw_r in enumerate(map_results_raw):
             if not raw_r or not raw_r.strip():
-                normalized_raw.append(raw_r)
+                if not use_result_store:
+                    map_results_raw.append(raw_r)
                 continue
-            chunk_text_for_fix = chunks[idx] if idx < len(chunks) else ""
-            norm = _to_normalized_map_json_text(raw_r, chunk_text=chunk_text_for_fix)
-            normalized_raw.append(norm or raw_r)
-        map_results_raw = normalized_raw
+            chunk_text_for_fix = chunks[i] if i < len(chunks) else ""
+            norm = _to_normalized_map_json_text(raw_r, chunk_text=chunk_text_for_fix) or raw_r
+            if use_result_store and result_store is not None:
+                inner = _extract_results_tag(norm) if "<results>" in norm.lower() else norm
+                parsed_norm = _parse_map_json_payload(inner)
+                result_store.add(i, norm, parsed=parsed_norm)
+            else:
+                map_results_raw.append(norm)
 
-        map_results = [r for r in map_results_raw if r and r.strip()]
-        if not map_results:
+        if use_result_store and result_store is not None:
+            file_groups_prebuilt = result_store.build_file_groups()
+            if result_store._spilled:
+                map_results = []
+                map_results_count = result_store.nonempty_count
+            else:
+                map_results = list(result_store.iter_nonempty())
+                map_results_count = len(map_results)
+        else:
+            map_results = [r for r in map_results_raw if r and r.strip()]
+            map_results_count = len(map_results)
+
+        if map_results_count == 0:
+            if result_store is not None:
+                result_store.cleanup()
             _cleanup_models_after_run()
             return (
                 f"(Нет данных по запросу. "
@@ -3334,16 +3387,24 @@ async def run_map_reduce(
                 f"Проверьте доступность LM Studio и таймаут.)"
             )
         if failed_count:
-            logger.warning("MAP finished: %s/%s chunks OK, %s failed", len(map_results), len(chunks), failed_count)
+            logger.warning(
+                "MAP finished: %s/%s chunks OK, %s failed",
+                map_results_count,
+                len(chunks),
+                failed_count,
+            )
 
         elapsed_s = max(0.001, time.monotonic() - started_at)
-        metrics = _map_metrics_from_results(map_results)
+        if use_result_store and result_store is not None:
+            metrics = dict(result_store.metrics)
+        else:
+            metrics = _map_metrics_from_results(map_results)
         if on_progress:
             on_progress(
-                len(map_results), len(chunks), "summary", from_cache_count,
+                map_results_count, len(chunks), "summary", from_cache_count,
                 retries=retry_count,
                 failed=failed_count,
-                ok=len(map_results),
+                ok=map_results_count,
                 elapsed_s=elapsed_s,
                 chunks_per_min=(len(chunks) / elapsed_s) * 60.0,
                 workers=workers,
@@ -3361,54 +3422,54 @@ async def run_map_reduce(
                 dual_instance_active=dual_instance_active,
             )
             on_progress(
-                len(map_results), len(chunks), "map_metrics", from_cache_count,
+                map_results_count, len(chunks), "map_metrics", from_cache_count,
                 relevant_chunks=metrics["relevant_chunks"],
                 findings_count=metrics["findings_count"],
                 evidence_refs_count=metrics["evidence_refs_count"],
             )
 
-        # Передаём в reduce только чанки с реальными находками.
-        # Чанки с no_relevant_data=true содержат пустые findings и только добавляют шум.
-        relevant_for_merge: list[str] = []
-        for _r in map_results:
-            _inner = _extract_results_tag(_r) if "<results>" in _r.lower() else _r
-            _parsed = _parse_map_json_payload(_inner)
-            if _parsed is None:
-                relevant_for_merge.append(_r)  # не парсится — не теряем на всякий случай
-            elif not _parsed.get("no_relevant_data") and _parsed.get("findings"):
-                relevant_for_merge.append(_r)
-        merge_inputs = relevant_for_merge if relevant_for_merge else map_results
-        relevant_count = len(relevant_for_merge)
+        if file_groups_prebuilt is not None:
+            file_groups = file_groups_prebuilt
+            merge_inputs = [r for group in file_groups.values() for r in group]
+            relevant_count = len(merge_inputs)
+        else:
+            relevant_for_merge: list[str] = []
+            for _r in map_results:
+                _inner = _extract_results_tag(_r) if "<results>" in _r.lower() else _r
+                _parsed = _parse_map_json_payload(_inner)
+                if _parsed is None:
+                    relevant_for_merge.append(_r)
+                elif not _parsed.get("no_relevant_data") and _parsed.get("findings"):
+                    relevant_for_merge.append(_r)
+            merge_inputs = relevant_for_merge if relevant_for_merge else map_results
+            relevant_count = len(relevant_for_merge)
+            from collections import defaultdict as _defaultdict
+
+            file_groups = _defaultdict(list)
+            for _r in merge_inputs:
+                _inner = _extract_results_tag(_r) if "<results>" in _r.lower() else _r
+                _parsed = _parse_map_json_payload(_inner)
+                _fkey = (_parsed.get("file") or "unknown") if _parsed else "unknown"
+                file_groups[_fkey].append(_r)
+            file_groups = dict(file_groups)
+
         logger.info(
             "Merge inputs: %s relevant (with findings) out of %s total MAP results",
-            relevant_count, len(map_results),
+            relevant_count,
+            map_results_count,
         )
         if on_progress:
             try:
                 on_progress(
-                    relevant_count, len(map_results), "map_relevant",
+                    relevant_count, map_results_count, "map_relevant",
                     from_cache_count, relevant_files=relevant_count,
                 )
             except TypeError:
                 pass
 
-        # Используем реальный контекст модели без hard cap по MAX_REDUCE_INPUT_TOKENS
         ctx_limit = max_context_tokens if max_context_tokens is not None else CONTEXT_FALLBACK
         reduce_max_tokens = min(8192, max(4096, dynamic_chunk_size + 2048))
         await _ensure_model_ready(reduce_model, "reduce")
-
-        # ── ГРУППИРОВКА ПО ФАЙЛУ ────────────────────────────────────────────────
-        # Группируем релевантные MAP-результаты по source-файлу.
-        # Это позволяет обрабатывать каждый файл независимо и параллельно,
-        # преодолевая ограничения контекста при большом числе файлов.
-        from collections import defaultdict as _defaultdict
-        file_groups: dict[str, list[str]] = _defaultdict(list)
-        for _r in merge_inputs:
-            _inner = _extract_results_tag(_r) if "<results>" in _r.lower() else _r
-            _parsed = _parse_map_json_payload(_inner)
-            _fkey = (_parsed.get("file") or "unknown") if _parsed else "unknown"
-            file_groups[_fkey].append(_r)
-        file_groups = dict(file_groups)
         n_file_groups = len(file_groups)
         logger.info("File groups for reduce: %s", n_file_groups)
 
@@ -3466,7 +3527,12 @@ async def run_map_reduce(
                     "Reduce model '%s' produced incomplete output — generating fallback report.",
                     reduce_model,
                 )
-                draft = _build_fallback_report(aggregated, effective_query, map_results, language_hint)
+                draft = _build_fallback_report(
+                    aggregated,
+                    effective_query,
+                    map_results if map_results else merge_inputs,
+                    language_hint,
+                )
         else:
             # ── НЕСКОЛЬКО ГРУПП: посекционный reduce + синтез ───────────────────
             # Для каждой файловой группы — независимый параллельный reduce-вызов,
@@ -3550,7 +3616,7 @@ async def run_map_reduce(
                     metrics_row_id,
                     duration_s=time.monotonic() - started_at,
                     chunks_total=len(chunks),
-                    chunks_ok=len(map_results),
+                    chunks_ok=map_results_count,
                     chunks_failed=failed_count,
                     scout_skipped=scout_skipped,
                     retries=retry_count,
@@ -3559,6 +3625,8 @@ async def run_map_reduce(
             except Exception:
                 pass
         _cleanup_models_after_run()
+        if result_store is not None:
+            result_store.cleanup()
         if job_id:
             try:
                 from cache import mark_job_complete

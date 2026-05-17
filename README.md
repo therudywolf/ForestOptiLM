@@ -167,6 +167,8 @@ depends on LM Studio throughput, scout threshold, and hardware. Use **scout** +
 | `NOCTURNE_MAX_ARCHIVE_BYTES` | `8589934592` (8 GiB) | Refuse to extract larger archives |
 | `NOCTURNE_MAX_CHUNKS_IN_RAM` | `12000` | Spill MAP chunks to SQLite above this count |
 | `NOCTURNE_MAP_BATCH_SIZE` | `workers × 4` | MAP concurrency batch size (limits peak in-flight tasks) |
+| `NOCTURNE_MAP_NORMALIZE_SPILL` | `2500` | Spill normalized MAP JSON to SQLite before merge (`0` = keep all in RAM) |
+| `NOCTURNE_DUAL_MAP_RESOLVE` | `0` | When `1` and dual-instance pool has 2+ IDs, run MAP on both and merge via `conflict_resolve` |
 
 ### GUI (no manual tuning)
 
@@ -209,6 +211,8 @@ automatically downgraded to **medium**.
 | `large_corpus_io.py` | Streaming huge text files; archive → folder expansion |
 | `corpus_planner.py` | Dry-run estimates; file-level relevance heuristic |
 | `chunk_store.py` | On-disk MAP chunk spill (bounded RAM) |
+| `map_result_store.py` | On-disk normalized MAP JSON before merge (large jobs) |
+| `conflict_resolve.py` | Pick richer MAP JSON when dual-instance resolve is on |
 | `processor.py` | LLM calls, Map-Reduce, scout, batching |
 | `parser.py`, `chunking.py`, `file_extractors.py` | Parsing and chunking |
 | `cache.py` | SQLite MAP checkpoint cache |
@@ -235,6 +239,8 @@ automatically downgraded to **medium**.
 | `NOCTURNE_SKIP_INTEGRATION` | — | Documented alias; CI uses `-m "not integration"` |
 | `NOCTURNE_CACHE_DIR` | `.nocturne_cache` | Override MAP SQLite cache directory |
 | `NOCTURNE_MAP_BATCH_SIZE` | `workers × 4` | Max parallel MAP chunks per batch |
+| `NOCTURNE_MAP_NORMALIZE_SPILL` | `2500` | Spill normalized MAP results before merge |
+| `NOCTURNE_DUAL_MAP_RESOLVE` | `0` | Dual-instance MAP + conflict resolution per chunk |
 | `NOCTURNE_SMOKE_CHAT_MODEL` | — | Override chat model for integration smoke |
 | `NOCTURNE_SMOKE_EMBED_MODEL` | — | Override embedding model for integration smoke |
 
