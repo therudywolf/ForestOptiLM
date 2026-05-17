@@ -1986,11 +1986,12 @@ async def _merge_map_json_recursive(
         normalized_single = _to_normalized_map_json_text(map_results[0].strip())
         return normalized_single or map_results[0].strip()
 
-    # Оцениваем средний размер одного результата
-    sample_tokens = count_tokens("\n\n---\n\n".join(map_results[:min(10, len(map_results))]))
-    tokens_per = max(1, sample_tokens // min(10, len(map_results)))
-    # Группируем по 32 штуки (разумный размер для _fallback_merge_map_json)
-    group_size = max(2, min(32, len(map_results)))
+    # Оцениваем средний размер одного результата и подбираем размер группы merge
+    sample_n = min(10, len(map_results))
+    sample_tokens = count_tokens("\n\n---\n\n".join(map_results[:sample_n]))
+    tokens_per = max(1, sample_tokens // sample_n)
+    merge_token_budget = 12000
+    group_size = max(2, min(32, len(map_results), merge_token_budget // tokens_per))
     next_level: list[str] = []
     total_groups = (len(map_results) + group_size - 1) // group_size
     for i in range(0, len(map_results), group_size):

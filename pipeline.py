@@ -33,7 +33,6 @@ from file_extractors import (
 )
 from models import DocumentChunk, IndexStats, RetrievalHit
 from chunking import build_document_chunks
-from parser import count_tokens
 from retrieval import LocalFaissStore
 
 logger = logging.getLogger("nocturne")

@@ -2,14 +2,13 @@
 """GUI worker paths for ZIP and huge plain files (no display required)."""
 from __future__ import annotations
 
-import asyncio
 import os
 import queue
 import tempfile
 import unittest
 import zipfile
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from large_corpus_io import is_large_corpus_input, large_corpus_profile_kwargs
 from gui import MSG_TRACE, _run_processing
