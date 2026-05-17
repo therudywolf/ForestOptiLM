@@ -12,6 +12,10 @@ Core idea: **Map‑Reduce over documents** with structured JSON evidence, option
 **scout pass** (fast relevance filter), **reasoning-model control** (`reasoning: off`
 for qwen3 / deepseek-r1 etc.), and an optional **composer** model for merge/reduce.
 
+**Target workloads (by design):** multi‑GB logs, huge line-oriented dumps, ZIP/TAR
+trees with thousands of source files, and folder corpora in the **~1M+ token** range
+with scout + hierarchical merge — not “one tiny PDF only”.
+
 Licensed under **AGPL-3.0-or-later** — see [LICENSE](LICENSE), [NOTICE](NOTICE),
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
@@ -144,6 +148,24 @@ chunk_size = effective_context - system_prompt - user_query - reserve
 A guardrail cap (`NOCTURNE_MAX_CHUNK_TOKENS`, default `6000`, `0` = off)
 limits the maximum chunk size.
 
+## Large files and archives
+
+| Input | Behavior |
+|-------|----------|
+| **Plain text/code/log ≥ 50 MiB** (`NOCTURNE_STREAMING_FILE_BYTES`) | Line streaming into MAP chunks — file is **not** loaded entirely into RAM |
+| **ZIP / TAR / `.tar.gz`** | Extracted to a temp dir; each file keeps its **path** (same as choosing a folder) |
+| **Folder** | Every supported file → chunks → one Map-Reduce job (scout recommended) |
+
+Limits are practical, not magical: each MAP/SCOUT chunk still calls your local LLM.
+A **trillion-line** file is supported in the sense of **streaming input**; total runtime
+depends on LM Studio throughput, scout threshold, and hardware. Use **scout** +
+`large_corpus` profile for huge corpora.
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `NOCTURNE_STREAMING_FILE_BYTES` | `52428800` (50 MiB) | Stream plain files at or above this size (`0` = always load whole file) |
+| `NOCTURNE_MAX_ARCHIVE_BYTES` | `8589934592` (8 GiB) | Refuse to extract larger archives |
+
 ## Map-Reduce Pipeline
 
 1. **MAP** — each chunk produces structured JSON with `findings[]`,
@@ -171,6 +193,7 @@ automatically downgraded to **medium**.
 | `main.py` | GUI entry point |
 | `gui.py` | CustomTkinter interface (dark theme) |
 | `forestoptilm/cli.py` | Headless `analyze` command |
+| `large_corpus_io.py` | Streaming huge text files; archive → folder expansion |
 | `processor.py` | LLM calls, Map-Reduce, scout, batching |
 | `parser.py`, `chunking.py`, `file_extractors.py` | Parsing and chunking |
 | `cache.py` | SQLite MAP checkpoint cache |
