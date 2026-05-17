@@ -313,6 +313,21 @@ def parse_file(
     if not path.exists():
         raise ParseError(f"File not found: {path}")
 
+    from large_corpus_io import should_stream_plain_file, chunk_plain_file_streaming
+
+    if should_stream_plain_file(path):
+        try:
+            from file_extractors import extract_file_metadata
+
+            meta = extract_file_metadata(path, root_dir=root_dir)
+        except Exception:
+            meta = None
+        chunks = chunk_plain_file_streaming(
+            path, dynamic_chunk_size, overlap_tokens, root_dir=root_dir, file_meta=meta,
+        )
+        logger.info("Streamed large plain file: %s chunks (%s)", len(chunks), path.name)
+        return ("text", chunks, None)
+
     kind, content = extract_content(path)
 
     if root_dir is not None:

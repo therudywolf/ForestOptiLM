@@ -1120,6 +1120,8 @@ class NocturneApp(ctk.CTk):
             self._file_path = Path(path)
             self._folder_path = None
             self._file_label.configure(text=str(self._file_path))
+            self._hint_large_corpus(self._file_path)
+            self._update_preflight_label()
 
     def _on_select_folder(self) -> None:
         path = ctk.filedialog.askdirectory()
@@ -1127,6 +1129,43 @@ class NocturneApp(ctk.CTk):
             self._folder_path = Path(path)
             self._file_path = None
             self._file_label.configure(text=f"[Папка]  {self._folder_path}")
+            self._hint_large_corpus(self._folder_path)
+            self._update_preflight_label()
+
+    def _hint_large_corpus(self, selected: Path) -> None:
+        from large_corpus_io import is_large_corpus_input
+
+        ok, reason = is_large_corpus_input(selected)
+        if ok:
+            self._set_status(
+                f"Большой корпус ({reason}): при старте включим scout и пресет 1M+ автоматически",
+                "#93c5fd",
+            )
+
+    def _auto_apply_large_corpus_if_needed(self, selected: Path) -> str | None:
+        """Применить пресет large_corpus без ручной донастройки."""
+        from large_corpus_io import is_large_corpus_input, large_corpus_profile_kwargs
+
+        ok, reason = is_large_corpus_input(selected)
+        if not ok:
+            return None
+        prof = large_corpus_profile_kwargs()
+        self._scout_var.set(bool(prof.get("scout_mode", True)))
+        self._scout_threshold_var.set(str(prof.get("scout_threshold", 0.35)))
+        self._workers_var.set(str(prof.get("workers", 4)))
+        self._max_chunk_tokens_var.set(str(prof.get("max_chunk_tokens", 4500)))
+        self._composer_use_var.set(bool(prof.get("composer_enabled", True)))
+        self._on_composer_toggle()
+        cm = self._model_var.get().strip()
+        if cm and not cm.startswith("("):
+            if not self._composer_model_var.get().strip() or self._composer_model_var.get().startswith("("):
+                self._composer_model_var.set(cm)
+        try:
+            set_runtime_limits(max_chunk_tokens=int(prof.get("max_chunk_tokens", 4500)))
+        except Exception:
+            pass
+        self._persist_runtime_state()
+        return f"large_corpus auto ({reason}): scout, chunk={prof.get('max_chunk_tokens')}, workers={prof.get('workers')}"
 
     def _on_stop(self) -> None:
         self._stop_requested = True
@@ -1155,6 +1194,10 @@ class NocturneApp(ctk.CTk):
         if not model or model.startswith("("):
             self._set_status("Выберите модель (нажмите «Обновить модели»)")
             return
+
+        auto_line = self._auto_apply_large_corpus_if_needed(selected)
+        if auto_line:
+            self._append_log_line(f"[AUTO] {auto_line}", "preflight")
 
         context_budget = self._get_context_budget()
         response_reserve = self._get_response_reserve(context_budget)
@@ -1793,6 +1836,38 @@ def _run_processing(
         }
         payload.update(extra)
         out_queue.put(payload)
+
+    # ---- archive as corpus (ZIP/TAR → per-file MAP, not one merged blob) ----
+    if file_path is not None:
+        from large_corpus_io import is_archive, corpus_input_root
+
+        if is_archive(file_path):
+            try:
+                with corpus_input_root(file_path) as archive_root:
+                    _run_folder_batch(
+                        folder_path=archive_root,
+                        query=query,
+                        model=model,
+                        base_url=base_url,
+                        api_key=api_key,
+                        context_budget=context_budget,
+                        dynamic_chunk_size=dynamic_chunk_size,
+                        workers=workers,
+                        out_queue=out_queue,
+                        put_progress=put_progress,
+                        stop_flag=stop_flag,
+                        vision_model=vision_model,
+                        composer_model=composer_model,
+                        api_mode=api_mode,
+                        low_vram_mode=low_vram_mode,
+                        dual_instance_mode=dual_instance_mode,
+                        scout_mode=scout_mode,
+                        scout_relevance_threshold=scout_relevance_threshold,
+                        scout_model=scout_model,
+                    )
+            except ParseError as exc:
+                out_queue.put({"type": MSG_ERROR, "message": sanitize_for_log(str(exc))})
+            return
 
     # ---- folder → Map-Reduce over ALL files ----
     if folder_path is not None:
