@@ -31,6 +31,10 @@ class TestRunProfiles(unittest.TestCase):
 
 
 class TestConflictResolve(unittest.TestCase):
+    def test_tie_prefers_first_result(self) -> None:
+        empty = json.dumps({"findings": []})
+        self.assertEqual(pick_findings_from_dual_worker(empty, empty), empty)
+
     def test_picks_richer_result(self) -> None:
         a = json.dumps({"findings": [{"evidence_refs": [{"file": "a"}]}]})
         b = json.dumps({"findings": []})
