@@ -35,8 +35,8 @@ from typing import Final
 logger = logging.getLogger("nocturne")
 
 # Значения по умолчанию (если файл отсутствует или поля пустые)
-DEFAULT_BASE_URL: Final = "http://127.0.0.1:1234/v1"
-DEFAULT_API_KEY: Final = "forest"
+DEFAULT_BASE_URL: Final = "http://127.0.0.1:1234"
+DEFAULT_API_KEY: Final = ""
 DEFAULT_TIMEOUT_SECONDS: Final = 600.0
 RUNTIME_UI_FILE: Final = ".local/ui_runtime.json"
 
@@ -327,6 +327,7 @@ def mask_secret(value: str | None, head: int = 4, tail: int = 2) -> str:
 _BEARER_RE = re.compile(r"(?i)(Bearer\s+)([A-Za-z0-9._\-+/=]{8,})")
 _API_KEY_PARAM_RE = re.compile(r"(?i)(api[_-]?key\s*[=:]\s*)(\S+)")
 _SK_RE = re.compile(r"\bsk-[A-Za-z0-9_-]{10,}\b")
+_LM_SK_RE = re.compile(r"\bsk-lm-[A-Za-z0-9_:\-]{10,}\b", re.I)
 
 
 def sanitize_for_log(text: str) -> str:
@@ -337,6 +338,7 @@ def sanitize_for_log(text: str) -> str:
     out = _BEARER_RE.sub(r"\1***", out)
     out = _API_KEY_PARAM_RE.sub(r"\1***", out)
     out = _SK_RE.sub("sk-***", out)
+    out = _LM_SK_RE.sub("sk-lm-***", out)
     return out
 
 

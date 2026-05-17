@@ -957,8 +957,10 @@ class NocturneApp(ctk.CTk):
                 self.after(0, lambda m=models, c=ctx, s=sources, k=by_kind: self._set_models(m, c, s, k))
                 self.after(
                     0,
-                    lambda t=cat_tokens: self._append_log_line(
-                        f"[MODELS tokens] llm={t.get('llm', 0)} embedding={t.get('embedding', 0)} vision={t.get('vision', 0)} tool={t.get('tool', 0)}",
+                    lambda t=cat_tokens, k=by_kind: self._append_log_line(
+                        f"[MODELS tokens] llm={t.get('llm', 0)} embedding={t.get('embedding', 0)} "
+                        f"vision={t.get('vision', 0)} tool={t.get('tool', 0)} "
+                        f"reasoning={len(k.get('reasoning', []))}",
                         "general",
                     ),
                 )
