@@ -312,7 +312,33 @@ class NocturneApp(ctk.CTk):
         ctk.CTkEntry(sb, textvariable=self._max_reduce_tokens_var).pack(fill="x", pady=(2, 4), **pad)
         ctk.CTkLabel(sb, text="NOCTURNE_MAX_CHUNK_TOKENS").pack(anchor="w", pady=(2, 0), **pad)
         self._max_chunk_tokens_var = ctk.StringVar(value=str(self._runtime_state.get("max_chunk_tokens", 6000)))
-        ctk.CTkEntry(sb, textvariable=self._max_chunk_tokens_var).pack(fill="x", pady=(2, 8), **pad)
+        ctk.CTkEntry(sb, textvariable=self._max_chunk_tokens_var).pack(fill="x", pady=(2, 4), **pad)
+
+        ctk.CTkLabel(sb, text="Большой корпус", font=ctk.CTkFont(size=12, weight="bold")
+                     ).pack(anchor="w", pady=(8, 0), **pad)
+        self._scout_var = ctk.BooleanVar(value=bool(self._runtime_state.get("scout_mode", False)))
+        self._scout_check = ctk.CTkCheckBox(
+            sb,
+            text="Scout-pass (быстрая релевантность)",
+            variable=self._scout_var,
+            command=self._persist_runtime_state,
+        )
+        self._scout_check.pack(anchor="w", pady=(2, 2), **pad)
+        ctk.CTkLabel(sb, text="Порог релевантности (0–1)").pack(anchor="w", pady=(2, 0), **pad)
+        self._scout_threshold_var = ctk.StringVar(
+            value=str(self._runtime_state.get("scout_threshold", 0.35))
+        )
+        ctk.CTkEntry(sb, textvariable=self._scout_threshold_var, width=80).pack(
+            fill="x", pady=(2, 4), **pad,
+        )
+        ctk.CTkButton(
+            sb,
+            text="Пресет: корпус 1M+",
+            height=28,
+            fg_color="#1d4ed8",
+            hover_color="#1e40af",
+            command=self._on_large_corpus_preset,
+        ).pack(fill="x", pady=(2, 8), **pad)
 
     def _build_main(self, main: ctk.CTkFrame) -> None:
         # File / folder row
@@ -741,6 +767,8 @@ class NocturneApp(ctk.CTk):
         self._dual_instance_var.set(False)
         self._max_reduce_tokens_var.set(str(state.get("max_reduce_input_tokens", 24000)))
         self._max_chunk_tokens_var.set(str(state.get("max_chunk_tokens", 6000)))
+        self._scout_var.set(bool(state.get("scout_mode", False)))
+        self._scout_threshold_var.set(str(state.get("scout_threshold", 0.35)))
         self._rag_index_dir_var.set(str(state.get("rag_index_dir") or ".nocturne_index"))
         self._rag_top_k_var.set(str(state.get("rag_top_k", 8)))
         em = str(state.get("selected_embedding_model") or "").strip()
@@ -785,9 +813,33 @@ class NocturneApp(ctk.CTk):
             "base_url": self._url_var.get().strip(),
             "max_reduce_input_tokens": max_reduce_tokens,
             "max_chunk_tokens": max_chunk_tokens,
+            "scout_mode": bool(self._scout_var.get()),
+            "scout_threshold": self._scout_threshold_var.get().strip() or "0.35",
             "rag_index_dir": self._rag_index_dir_var.get().strip() or ".nocturne_index",
             "rag_top_k": rag_top_k,
         }
+
+    def _on_large_corpus_preset(self) -> None:
+        """Пресет для анализа очень больших папок/архивов: scout + composer + меньшие чанки."""
+        self._scout_var.set(True)
+        self._scout_threshold_var.set("0.35")
+        self._workers_var.set("4")
+        self._max_chunk_tokens_var.set("4500")
+        self._composer_use_var.set(True)
+        self._on_composer_toggle()
+        if not self._composer_model_var.get().strip() or self._composer_model_var.get().startswith("("):
+            cm = self._model_var.get().strip()
+            if cm and not cm.startswith("("):
+                self._composer_model_var.set(cm)
+        try:
+            set_runtime_limits(max_chunk_tokens=4500)
+        except Exception:
+            pass
+        self._persist_runtime_state()
+        self._set_status(
+            "Пресет 1M+: scout on, chunk≈4500, workers=4, composer on",
+            "lightgreen",
+        )
 
     def _persist_runtime_state(self) -> None:
         if not self._runtime_state_ready:
@@ -1087,6 +1139,12 @@ class NocturneApp(ctk.CTk):
         api_mode = self._api_mode_var.get().strip().lower()
         low_vram_mode = bool(self._low_vram_var.get())
         dual_instance_mode = False
+        scout_mode = bool(self._scout_var.get())
+        try:
+            scout_threshold = float(self._scout_threshold_var.get().strip() or "0.35")
+        except ValueError:
+            scout_threshold = 0.35
+        scout_threshold = max(0.0, min(1.0, scout_threshold))
         set_runtime_modes(
             api_mode=api_mode,
             low_vram_mode=low_vram_mode,
@@ -1105,7 +1163,8 @@ class NocturneApp(ctk.CTk):
                 f"[START] model={model} vision={vm or model} composer={cm or model} "
                 f"context={context_budget} reserve={response_reserve} "
                 f"workers={workers} source={self._model_ctx_source.get(model, 'unknown')} "
-                f"api_mode={api_mode} low_vram={low_vram_mode} dual_instance={dual_instance_mode}"
+                f"api_mode={api_mode} low_vram={low_vram_mode} dual_instance={dual_instance_mode} "
+                f"scout={scout_mode} scout_threshold={scout_threshold}"
             ),
             "general",
         )
@@ -1165,6 +1224,8 @@ class NocturneApp(ctk.CTk):
                     api_mode=api_mode,
                     low_vram_mode=low_vram_mode,
                     dual_instance_mode=dual_instance_mode,
+                    scout_mode=scout_mode,
+                    scout_relevance_threshold=scout_threshold,
                 )
             except Exception as exc:
                 logger.exception("Worker thread error: %s", sanitize_for_log(str(exc)))
@@ -1216,6 +1277,25 @@ class NocturneApp(ctk.CTk):
                                 f"[MAP start #{chunk_idx}] route={route} instance={instance_id or '-'} active={active} in_flight={in_flight} retrying={retrying} eff={effective_workers} file={file_name or 'n/a'} | {preview}",
                                 "map",
                             )
+                    elif phase == "scout":
+                        scout_total = msg.get("scout_total", total)
+                        self._set_status(f"Scout: оценка релевантности 0/{scout_total}…")
+                        self._append_log_line(
+                            f"[SCOUT] starting relevance pass for {scout_total} chunks",
+                            "map",
+                        )
+                    elif phase == "scout_done":
+                        deep = msg.get("scout_deep", cur)
+                        skipped = msg.get("scout_skipped", 0)
+                        thr = msg.get("scout_threshold", 0.35)
+                        self._set_status(
+                            f"Scout готов: deep MAP {deep}, пропущено {skipped} (порог {thr})",
+                            "lightgreen",
+                        )
+                        self._append_log_line(
+                            f"[SCOUT done] deep_map={deep} skipped={skipped} threshold={thr}",
+                            "map",
+                        )
                     elif phase == "map":
                         extra = f" ({cache} из кэша)" if cache else ""
                         suffix = f" | файл: {file_name}" if file_name else ""
@@ -1297,7 +1377,9 @@ class NocturneApp(ctk.CTk):
                         self._append_log_line(
                             f"[SUMMARY] ok={ok} failed={failed} retries={retries} elapsed={elapsed_s:.1f}s "
                             f"throughput={cpm:.1f} chunks/min workers={wk} map={mm} vision={vm} reduce={rm} "
-                            f"text_chunks={msg.get('text_chunks', 0)} vision_chunks={msg.get('vision_chunks', 0)} "
+                            f"text_chunks={msg.get('text_chunks', 0)} text_map={msg.get('text_map_chunks', 0)} "
+                            f"scout_skipped={msg.get('scout_skipped', 0)} scout_mode={msg.get('scout_mode', False)} "
+                            f"vision_chunks={msg.get('vision_chunks', 0)} "
                             f"low_vram_sequential={msg.get('low_vram_sequential', True)} "
                             f"api_mode={msg.get('api_mode', 'native')} instances={msg.get('instances_loaded', 1)} "
                             f"dual_instance_active={msg.get('dual_instance_active', False)}",
@@ -1515,6 +1597,8 @@ def _run_processing(
     api_mode: str = "native",
     low_vram_mode: bool = True,
     dual_instance_mode: bool = False,
+    scout_mode: bool = False,
+    scout_relevance_threshold: float = 0.35,
 ) -> None:
     dynamic_chunk_size = compute_dynamic_chunk_size(
         context_budget, SYSTEM_PROMPT_MAP, query, response_reserve=response_reserve,
@@ -1525,7 +1609,8 @@ def _run_processing(
             f"[PIPELINE] context_budget={context_budget} response_reserve={response_reserve} "
             f"dynamic_chunk_size={dynamic_chunk_size} workers={workers} "
             f"vision_model={vision_model or model} composer_model={composer_model or model} "
-            f"api_mode={api_mode} low_vram={low_vram_mode} dual_instance={dual_instance_mode}"
+            f"api_mode={api_mode} low_vram={low_vram_mode} dual_instance={dual_instance_mode} "
+            f"scout={scout_mode} scout_threshold={scout_relevance_threshold}"
         ),
     })
     q_preview = " ".join(query.strip().split())
@@ -1566,6 +1651,8 @@ def _run_processing(
             api_mode=api_mode,
             low_vram_mode=low_vram_mode,
             dual_instance_mode=dual_instance_mode,
+            scout_mode=scout_mode,
+            scout_relevance_threshold=scout_relevance_threshold,
         )
         return
 
@@ -1604,6 +1691,8 @@ def _run_processing(
                     api_mode=api_mode,
                     low_vram_mode=low_vram_mode,
                     dual_instance_mode=dual_instance_mode,
+                    scout_mode=scout_mode,
+                    scout_relevance_threshold=scout_relevance_threshold,
                 )
             )
             out_queue.put({"type": MSG_RESULT, "text": result})
@@ -1627,6 +1716,8 @@ def _run_processing(
                     api_mode=api_mode,
                     low_vram_mode=low_vram_mode,
                     dual_instance_mode=dual_instance_mode,
+                    scout_mode=scout_mode,
+                    scout_relevance_threshold=scout_relevance_threshold,
                 )
             )
             out_queue.put({"type": MSG_RESULT, "text": result})
@@ -1674,6 +1765,8 @@ def _run_folder_batch(
     api_mode: str = "native",
     low_vram_mode: bool = True,
     dual_instance_mode: bool = True,
+    scout_mode: bool = False,
+    scout_relevance_threshold: float = 0.35,
 ) -> None:
     from pipeline import _iter_files, _to_chunks
 
@@ -1728,7 +1821,7 @@ def _run_folder_batch(
         return
 
     logger.info("Folder batch: files=%s chunks=%s extract_workers=%s", len(all_files), len(all_chunks), extract_workers)
-    job_id = compute_job_id(folder_path, query)
+    job_id = compute_job_id(folder_path, query, file_paths=all_files)
 
     # Перехватываем relevant_count из фазы map_relevant для заголовка результата
     _relevant_files_count: list[int] = [0]
@@ -1767,6 +1860,8 @@ def _run_folder_batch(
                 api_mode=api_mode,
                 low_vram_mode=low_vram_mode,
                 dual_instance_mode=dual_instance_mode,
+                scout_mode=scout_mode,
+                scout_relevance_threshold=scout_relevance_threshold,
             )
         )
     finally:
