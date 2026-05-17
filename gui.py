@@ -337,6 +337,21 @@ class NocturneApp(ctk.CTk):
             width=250,
         )
         self._scout_menu.pack(fill="x", pady=(2, 4), **pad)
+        mode_row = ctk.CTkFrame(sb, fg_color="transparent")
+        mode_row.pack(fill="x", pady=(2, 4), **pad)
+        ctk.CTkButton(
+            mode_row, text="Быстро", width=72, height=26,
+            command=lambda: self._apply_run_profile("quick_scan"),
+        ).pack(side="left", padx=(0, 4))
+        ctk.CTkButton(
+            mode_row, text="Глубоко", width=72, height=26,
+            command=lambda: self._apply_run_profile("deep_audit"),
+        ).pack(side="left", padx=(0, 4))
+        ctk.CTkButton(
+            mode_row, text="1M+", width=56, height=26,
+            fg_color="#1d4ed8",
+            command=lambda: self._apply_run_profile("large_corpus"),
+        ).pack(side="left")
         ctk.CTkButton(
             sb,
             text="Пресет: корпус 1M+",
@@ -344,7 +359,7 @@ class NocturneApp(ctk.CTk):
             fg_color="#1d4ed8",
             hover_color="#1e40af",
             command=self._on_large_corpus_preset,
-        ).pack(fill="x", pady=(2, 8), **pad)
+        ).pack(fill="x", pady=(2, 4), **pad)
 
     def _build_main(self, main: ctk.CTkFrame) -> None:
         # File / folder row
@@ -382,6 +397,18 @@ class NocturneApp(ctk.CTk):
             state="disabled", command=self._on_stop,
         )
         self._stop_btn.pack(side="left")
+        ctk.CTkButton(
+            act_row, text="Оценка (dry-run)", width=130,
+            fg_color="transparent",
+            border_width=1,
+            command=self._on_dry_run,
+        ).pack(side="left", padx=(8, 0))
+        ctk.CTkButton(
+            act_row, text="История", width=80,
+            fg_color="transparent",
+            border_width=1,
+            command=self._on_run_history,
+        ).pack(side="left", padx=(6, 0))
 
         # Progress
         self._progress_bar = ctk.CTkProgressBar(main)
@@ -854,30 +881,88 @@ class NocturneApp(ctk.CTk):
             "rag_top_k": rag_top_k,
         }
 
-    def _on_large_corpus_preset(self) -> None:
-        """Пресет для анализа очень больших папок/архивов: scout + composer + меньшие чанки."""
+    def _apply_run_profile(self, name: str) -> None:
         from run_profiles import get_profile
 
-        prof = get_profile("large_corpus")
-        self._scout_var.set(bool(prof.get("scout_mode", True)))
+        prof = get_profile(name)
+        self._scout_var.set(bool(prof.get("scout_mode", False)))
         self._scout_threshold_var.set(str(prof.get("scout_threshold", 0.35)))
-        self._workers_var.set(str(prof.get("workers", 4)))
-        self._max_chunk_tokens_var.set(str(prof.get("max_chunk_tokens", 4500)))
-        self._composer_use_var.set(bool(prof.get("composer_enabled", True)))
+        self._workers_var.set(str(prof.get("workers", 3)))
+        self._max_chunk_tokens_var.set(str(prof.get("max_chunk_tokens", 6000)))
+        self._composer_use_var.set(bool(prof.get("composer_enabled", False)))
         self._on_composer_toggle()
-        if not self._composer_model_var.get().strip() or self._composer_model_var.get().startswith("("):
-            cm = self._model_var.get().strip()
-            if cm and not cm.startswith("("):
-                self._composer_model_var.set(cm)
         try:
-            set_runtime_limits(max_chunk_tokens=4500)
+            set_runtime_limits(max_chunk_tokens=int(prof.get("max_chunk_tokens", 6000)))
         except Exception:
             pass
         self._persist_runtime_state()
-        self._set_status(
-            "Пресет 1M+: scout on, chunk≈4500, workers=4, composer on",
-            "lightgreen",
-        )
+        self._update_preflight_label()
+        self._set_status(f"Режим: {name}", "lightgreen")
+
+    def _on_large_corpus_preset(self) -> None:
+        """Пресет для анализа очень больших папок/архивов: scout + composer + меньшие чанки."""
+        self._apply_run_profile("large_corpus")
+        cm = self._model_var.get().strip()
+        if cm and not cm.startswith("("):
+            if not self._composer_model_var.get().strip() or self._composer_model_var.get().startswith("("):
+                self._composer_model_var.set(cm)
+
+    def _on_dry_run(self) -> None:
+        selected = self._file_path or self._folder_path
+        if not selected:
+            self._set_status("Выберите файл или папку для оценки", "#f59e0b")
+            return
+        query = self._query_text.get("1.0", "end").strip() or "(без запроса)"
+        model = self._model_var.get().strip()
+        ctx = self._model_ctx.get(model, CONTEXT_FALLBACK) if model and not model.startswith("(") else CONTEXT_FALLBACK
+        reserve = self._get_response_reserve(ctx)
+        try:
+            chunk = compute_dynamic_chunk_size(ctx, SYSTEM_PROMPT_MAP, query, response_reserve=reserve)
+        except Exception:
+            chunk = 4500
+
+        def work() -> None:
+            try:
+                from corpus_planner import format_plan_ru, plan_corpus
+
+                plan = plan_corpus(
+                    selected,
+                    query,
+                    chunk,
+                    scout_mode=bool(self._scout_var.get()),
+                    scout_threshold=float(self._scout_threshold_var.get() or "0.35"),
+                )
+                text = format_plan_ru(plan)
+                self.after(0, lambda: self._preflight_label.configure(text=f"Оценка: {text}"))
+                self.after(0, lambda: self._set_status("Dry-run готов (без вызовов LLM)", "lightgreen"))
+            except Exception as exc:
+                safe = sanitize_for_log(str(exc))
+                self.after(0, lambda: self._set_status(f"Оценка: {safe}", "#f87171"))
+
+        self._set_status("Считаю чанки и объём…")
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_run_history(self) -> None:
+        from metrics import list_recent_runs
+
+        runs = list_recent_runs(15)
+        dlg = ctk.CTkToplevel(self)
+        dlg.title("История прогонов")
+        dlg.geometry("640x320")
+        if not runs:
+            ctk.CTkLabel(dlg, text="Пока нет сохранённых прогонов").pack(pady=20)
+            return
+        box = ctk.CTkTextbox(dlg, wrap="none")
+        box.pack(fill="both", expand=True, padx=10, pady=10)
+        for r in runs:
+            line = (
+                f"#{r['id']} job={r.get('job_id','')[:12]}… "
+                f"ok={r.get('chunks_ok')}/{r.get('chunks_failed')} "
+                f"scout_skip={r.get('scout_skipped')} "
+                f"{r.get('duration_s') or 0:.0f}s | {r.get('query_preview','')}\n"
+            )
+            box.insert("end", line)
+        box.configure(state="disabled")
 
     def _persist_runtime_state(self) -> None:
         if not self._runtime_state_ready:
@@ -1259,6 +1344,32 @@ class NocturneApp(ctk.CTk):
             pass
         self._persist_runtime_state()
         self._update_preflight_label()
+        try:
+            from run_config import RunConfig
+
+            rc = RunConfig.from_gui(
+                base_url=base_url,
+                api_key=api_key,
+                chat_model=model,
+                vision_model=vm,
+                composer_model=cm,
+                scout_model=scout_m,
+                embedding_model=self._embedding_model_var.get().strip(),
+                api_mode=api_mode,
+                low_vram=low_vram_mode,
+                workers=workers,
+                context_budget=context_budget,
+                max_chunk_tokens=int(self._max_chunk_tokens_var.get() or "6000"),
+                max_reduce_input_tokens=int(self._max_reduce_tokens_var.get() or "24000"),
+                scout_mode=scout_mode,
+                scout_threshold=scout_threshold,
+            )
+            self._append_log_line(
+                f"[RUN_CONFIG] scout={rc.scout_mode} workers={rc.workers} chunk_max={rc.max_chunk_tokens}",
+                "preflight",
+            )
+        except Exception:
+            pass
         self._append_log_line(
             (
                 f"[START] model={model} vision={vm or model} composer={cm or model} "
@@ -1702,15 +1813,26 @@ class NocturneApp(ctk.CTk):
         scout = "on" if self._scout_var.get() else "off"
         path = self._folder_path or self._file_path
         path_s = str(path) if path else "—"
-        n_reason = len(self._models_by_kind.get("reasoning") or [])
-        reason_s = f" reasoning_models={n_reason}" if n_reason else ""
-        self._preflight_label.configure(
-            text=(
-                f"Preflight: ctx={ctx:,} chunk≈{chunk} scout={scout} "
-                f"workers={self._workers_var.get()}{reason_s} path={path_s}"
-            ).replace(",", " "),
-            text_color="gray",
+        plan_line = ""
+        if path and path.exists():
+            try:
+                from corpus_planner import format_plan_ru, plan_corpus
+
+                plan = plan_corpus(
+                    path,
+                    query,
+                    max(chunk, 500),
+                    scout_mode=bool(self._scout_var.get()),
+                    scout_threshold=float(self._scout_threshold_var.get() or "0.35"),
+                )
+                plan_line = format_plan_ru(plan)
+            except Exception:
+                plan_line = ""
+        base = (
+            f"Preflight: ctx={ctx} chunk≈{chunk} scout={scout} workers={self._workers_var.get()} | {path_s}"
         )
+        text = f"{base} || {plan_line}" if plan_line else base
+        self._preflight_label.configure(text=text.replace(",", " "), text_color="gray")
 
     def _maybe_first_run_wizard(self) -> None:
         from first_run import is_first_run, mark_first_run_complete
@@ -2010,6 +2132,8 @@ def _run_folder_batch(
     scout_model: str | None = None,
 ) -> None:
     from pipeline import _iter_files, _to_chunks
+    from corpus_planner import filter_files_by_relevance
+    from chunk_store import ChunkStore
 
     all_files = _iter_files([folder_path])
     if not all_files:
@@ -2017,116 +2141,135 @@ def _run_folder_batch(
                        "message": "Нет поддерживаемых файлов в папке"})
         return
 
-    # Phase 1 — parallel text extraction using ThreadPoolExecutor
-    all_chunks: list[str] = []
-    extract_workers = min(8, os.cpu_count() or 4)
-    completed_files = 0
-    chunks_by_file: dict[int, list[str]] = {}
-
-    def _extract_one(idx_fp: tuple[int, Path]) -> tuple[int, list[str], str]:
-        idx, fp = idx_fp
-        file_chunks = [
-            dc.text for dc in _to_chunks(fp, dynamic_chunk_size, 200, root_dir=folder_path)
-        ]
-        try:
-            rel = str(fp.relative_to(folder_path)).replace("\\", "/")
-        except ValueError:
-            rel = fp.name
-        return idx, file_chunks, rel
-
-    with ThreadPoolExecutor(max_workers=extract_workers) as pool:
-        futures = {
-            pool.submit(_extract_one, (i, fp)): (i, fp)
-            for i, fp in enumerate(all_files)
-        }
-        for fut in as_completed(futures):
-            if stop_flag and stop_flag():
-                out_queue.put({"type": MSG_ERROR, "message": "Остановлено пользователем"})
-                return
-            try:
-                idx, file_chunks, display_rel = fut.result()
-            except Exception as exc:
-                logger.warning("Extract failed for file: %s", exc)
-                idx, file_chunks, display_rel = futures[fut][0], [], "unknown"
-            chunks_by_file[idx] = file_chunks
-            completed_files += 1
-            put_progress(completed_files, len(all_files), "extract", file=display_rel)
-
-    # Preserve original file order when assembling chunks
-    for i in range(len(all_files)):
-        all_chunks.extend(chunks_by_file.get(i, []))
-
-    if not all_chunks:
-        out_queue.put({"type": MSG_ERROR,
-                       "message": "Не удалось извлечь текст из файлов"})
-        return
-
-    logger.info("Folder batch: files=%s chunks=%s extract_workers=%s", len(all_files), len(all_chunks), extract_workers)
-    try:
-        from corpus_manifest import build_corpus_manifest, manifest_to_json
-
-        manifest = build_corpus_manifest([folder_path])
-        manifest_path = folder_path / ".nocturne_manifest.json"
-        manifest_path.write_text(manifest_to_json(manifest), encoding="utf-8")
+    filtered_files, files_skipped = filter_files_by_relevance(
+        all_files,
+        query,
+        scout_mode=scout_mode,
+        threshold=scout_relevance_threshold,
+    )
+    if files_skipped:
         out_queue.put({
             "type": MSG_TRACE,
-            "line": f"[MANIFEST] files={manifest.get('files_total')} bytes={manifest.get('total_bytes')}",
+            "line": f"[FILE SCOUT] skipped {files_skipped} low-relevance files (heuristic)",
         })
-    except Exception as exc:
-        logger.warning("Manifest build failed: %s", exc)
-    job_id = compute_job_id(folder_path, query, file_paths=all_files)
 
-    # Перехватываем relevant_count из фазы map_relevant для заголовка результата
-    _relevant_files_count: list[int] = [0]
-
-    _orig_put_progress = put_progress
-
-    def _tracking_put_progress(
-        current: int,
-        total: int,
-        phase: str = "map",
-        from_cache: int = 0,
-        **extra: Any,
-    ) -> None:
-        if phase == "map_relevant":
-            _relevant_files_count[0] = extra.get("relevant_files", current)
-        _orig_put_progress(current, total, phase, from_cache, **extra)
-
-    # Phase 2 — Map-Reduce
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    job_id = compute_job_id(folder_path, query, file_paths=filtered_files)
+    chunk_store = ChunkStore(job_id)
     try:
-        result = loop.run_until_complete(
-            run_map_reduce(
-                chunks=all_chunks,
-                user_query=query,
-                base_url=base_url,
-                api_key=api_key,
-                model=model,
-                workers=workers,
-                dynamic_chunk_size=dynamic_chunk_size,
-                on_progress=_tracking_put_progress,
-                job_id=job_id,
-                max_context_tokens=context_budget,
-                composer_model=composer_model,
-                vision_model=vision_model,
-                api_mode=api_mode,
-                low_vram_mode=low_vram_mode,
-                dual_instance_mode=dual_instance_mode,
-                scout_mode=scout_mode,
-                scout_relevance_threshold=scout_relevance_threshold,
-                scout_model=scout_model,
-            )
-        )
-    finally:
-        loop.close()
+        extract_workers = min(8, os.cpu_count() or 4)
+        completed_files = 0
+        chunks_by_file: dict[int, list[str]] = {}
 
-    relevant_count = _relevant_files_count[0]
-    relevant_suffix = f"  |  релевантных файлов: {relevant_count}" if relevant_count > 0 else ""
-    out_queue.put({
-        "type": MSG_RESULT,
-        "text": (
-            f"Обработано: {len(all_files)} файлов  |  {len(all_chunks)} чанков{relevant_suffix}\n"
-            f"{'─' * 60}\n\n{result}"
-        ),
-    })
+        def _extract_one(idx_fp: tuple[int, Path]) -> tuple[int, list[str], str]:
+            idx, fp = idx_fp
+            file_chunks = [
+                dc.text for dc in _to_chunks(fp, dynamic_chunk_size, 200, root_dir=folder_path)
+            ]
+            try:
+                rel = str(fp.relative_to(folder_path)).replace("\\", "/")
+            except ValueError:
+                rel = fp.name
+            return idx, file_chunks, rel
+
+        with ThreadPoolExecutor(max_workers=extract_workers) as pool:
+            futures = {
+                pool.submit(_extract_one, (i, fp)): (i, fp)
+                for i, fp in enumerate(filtered_files)
+            }
+            for fut in as_completed(futures):
+                if stop_flag and stop_flag():
+                    out_queue.put({"type": MSG_ERROR, "message": "Остановлено пользователем"})
+                    return
+                try:
+                    idx, file_chunks, display_rel = fut.result()
+                except Exception as exc:
+                    logger.warning("Extract failed for file: %s", exc)
+                    idx, file_chunks, display_rel = futures[fut][0], [], "unknown"
+                chunks_by_file[idx] = file_chunks
+                completed_files += 1
+                put_progress(completed_files, len(filtered_files), "extract", file=display_rel)
+
+        for i in range(len(filtered_files)):
+            chunk_store.extend(chunks_by_file.get(i, []))
+
+        if len(chunk_store) == 0:
+            out_queue.put({"type": MSG_ERROR,
+                           "message": "Не удалось извлечь текст из файлов"})
+            return
+
+        all_chunks: list[str] | ChunkStore = chunk_store
+        logger.info(
+            "Folder batch: files=%s filtered=%s chunks=%s spilled=%s",
+            len(all_files),
+            len(filtered_files),
+            len(chunk_store),
+            chunk_store._spilled,
+        )
+
+        try:
+            from corpus_manifest import build_corpus_manifest, manifest_to_json
+
+            manifest = build_corpus_manifest([folder_path])
+            manifest_path = folder_path / ".nocturne_manifest.json"
+            manifest_path.write_text(manifest_to_json(manifest), encoding="utf-8")
+            out_queue.put({
+                "type": MSG_TRACE,
+                "line": f"[MANIFEST] files={manifest.get('files_total')} bytes={manifest.get('total_bytes')}",
+            })
+        except Exception as exc:
+            logger.warning("Manifest build failed: %s", exc)
+
+        _relevant_files_count: list[int] = [0]
+        _orig_put_progress = put_progress
+
+        def _tracking_put_progress(
+            current: int,
+            total: int,
+            phase: str = "map",
+            from_cache: int = 0,
+            **extra: Any,
+        ) -> None:
+            if phase == "map_relevant":
+                _relevant_files_count[0] = extra.get("relevant_files", current)
+            _orig_put_progress(current, total, phase, from_cache, **extra)
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            result = loop.run_until_complete(
+                run_map_reduce(
+                    chunks=all_chunks,  # type: ignore[arg-type]
+                    user_query=query,
+                    base_url=base_url,
+                    api_key=api_key,
+                    model=model,
+                    workers=workers,
+                    dynamic_chunk_size=dynamic_chunk_size,
+                    on_progress=_tracking_put_progress,
+                    job_id=job_id,
+                    max_context_tokens=context_budget,
+                    composer_model=composer_model,
+                    vision_model=vision_model,
+                    api_mode=api_mode,
+                    low_vram_mode=low_vram_mode,
+                    dual_instance_mode=dual_instance_mode,
+                    scout_mode=scout_mode,
+                    scout_relevance_threshold=scout_relevance_threshold,
+                    scout_model=scout_model,
+                )
+            )
+        finally:
+            loop.close()
+
+        relevant_count = _relevant_files_count[0]
+        relevant_suffix = f"  |  релевантных файлов: {relevant_count}" if relevant_count > 0 else ""
+        out_queue.put({
+            "type": MSG_RESULT,
+            "text": (
+                f"Обработано: {len(filtered_files)} файлов (из {len(all_files)})  |  "
+                f"{len(all_chunks)} чанков{relevant_suffix}\n"
+                f"{'─' * 60}\n\n{result}"
+            ),
+        })
+    finally:
+        chunk_store.cleanup()

@@ -165,6 +165,14 @@ depends on LM Studio throughput, scout threshold, and hardware. Use **scout** +
 |----------|---------|---------|
 | `NOCTURNE_STREAMING_FILE_BYTES` | `52428800` (50 MiB) | Stream plain files at or above this size (`0` = always load whole file) |
 | `NOCTURNE_MAX_ARCHIVE_BYTES` | `8589934592` (8 GiB) | Refuse to extract larger archives |
+| `NOCTURNE_MAX_CHUNKS_IN_RAM` | `12000` | Spill MAP chunks to SQLite above this count |
+
+### GUI (no manual tuning)
+
+- **Быстро / Глубоко / 1M+** — run profiles in one click.
+- **Оценка (dry-run)** — chunk/file estimates and rough ETA without LLM calls.
+- **История** — recent runs from metrics DB.
+- Large file / ZIP / folder → **auto** large_corpus preset on Start.
 
 ## Map-Reduce Pipeline
 
@@ -194,6 +202,8 @@ automatically downgraded to **medium**.
 | `gui.py` | CustomTkinter interface (dark theme) |
 | `forestoptilm/cli.py` | Headless `analyze` command |
 | `large_corpus_io.py` | Streaming huge text files; archive → folder expansion |
+| `corpus_planner.py` | Dry-run estimates; file-level relevance heuristic |
+| `chunk_store.py` | On-disk MAP chunk spill (bounded RAM) |
 | `processor.py` | LLM calls, Map-Reduce, scout, batching |
 | `parser.py`, `chunking.py`, `file_extractors.py` | Parsing and chunking |
 | `cache.py` | SQLite MAP checkpoint cache |
