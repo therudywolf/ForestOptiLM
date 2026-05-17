@@ -166,13 +166,18 @@ depends on LM Studio throughput, scout threshold, and hardware. Use **scout** +
 | `NOCTURNE_STREAMING_FILE_BYTES` | `52428800` (50 MiB) | Stream plain files at or above this size (`0` = always load whole file) |
 | `NOCTURNE_MAX_ARCHIVE_BYTES` | `8589934592` (8 GiB) | Refuse to extract larger archives |
 | `NOCTURNE_MAX_CHUNKS_IN_RAM` | `12000` | Spill MAP chunks to SQLite above this count |
+| `NOCTURNE_MAP_BATCH_SIZE` | `workers × 4` | MAP concurrency batch size (limits peak in-flight tasks) |
 
 ### GUI (no manual tuning)
 
 - **Быстро / Глубоко / 1M+** — run profiles in one click.
 - **Оценка (dry-run)** — chunk/file estimates and rough ETA without LLM calls.
 - **История** — recent runs from metrics DB.
+- **Продолжить** — resume an interrupted MAP job from SQLite cache (same file/folder + query).
 - Large file / ZIP / folder → **auto** large_corpus preset on Start.
+
+MAP checkpoints and job metadata live under `.nocturne_cache/` (or `NOCTURNE_CACHE_DIR`).
+The last incomplete job pointer is stored in `.local/last_job.json` next to your LM Studio config.
 
 ## Map-Reduce Pipeline
 
@@ -229,6 +234,7 @@ automatically downgraded to **medium**.
 | `NOCTURNE_RUN_INTEGRATION` | — | Set `1` to run live LM Studio integration tests |
 | `NOCTURNE_SKIP_INTEGRATION` | — | Documented alias; CI uses `-m "not integration"` |
 | `NOCTURNE_CACHE_DIR` | `.nocturne_cache` | Override MAP SQLite cache directory |
+| `NOCTURNE_MAP_BATCH_SIZE` | `workers × 4` | Max parallel MAP chunks per batch |
 | `NOCTURNE_SMOKE_CHAT_MODEL` | — | Override chat model for integration smoke |
 | `NOCTURNE_SMOKE_EMBED_MODEL` | — | Override embedding model for integration smoke |
 

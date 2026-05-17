@@ -71,6 +71,7 @@ MSG_RESULT    = "result"
 MSG_RESULT_DF = "result_df"
 MSG_ERROR     = "error"
 MSG_TRACE     = "trace"
+MSG_JOB_ID    = "job_id"
 MAX_UI_WORKERS = 4
 
 FILE_TYPES = [
@@ -101,6 +102,7 @@ class NocturneApp(ctk.CTk):
         self._queue: queue.Queue[dict[str, Any]] = queue.Queue()
         self._running = False
         self._stop_requested = False
+        self._active_job_id: str | None = None
         self._log_entries: list[tuple[str, str]] = []  # (phase, formatted_line)
         self._pending_log_lines: list[str] = []
         self._log_flush_scheduled = False
@@ -1377,7 +1379,14 @@ class NocturneApp(ctk.CTk):
 
     def _on_stop(self) -> None:
         self._stop_requested = True
-        self._set_status("Остановка после текущего чанка…")
+        if self._active_job_id:
+            try:
+                from cache import mark_job_paused
+
+                mark_job_paused(self._active_job_id)
+            except Exception:
+                pass
+        self._set_status("Остановка после текущего чанка… (можно «Продолжить»)")
 
     def _on_start(self) -> None:
         if self._running:
@@ -1421,6 +1430,16 @@ class NocturneApp(ctk.CTk):
         self._last_result_text = ""
         self._last_result_df   = None
         self._stop_requested   = False
+        self._active_job_id = None
+        try:
+            from processor import compute_job_id
+
+            if self._file_path is not None:
+                self._active_job_id = compute_job_id(self._file_path, query)
+            elif self._folder_path is not None:
+                self._active_job_id = compute_job_id(self._folder_path, query)
+        except Exception:
+            self._active_job_id = None
         self._result_text.delete("1.0", "end")
         self._progress_bar.set(0)
         self._running = True
@@ -1632,6 +1651,22 @@ class NocturneApp(ctk.CTk):
                             f"[SCOUT done] deep_map={deep} skipped={skipped} threshold={thr}",
                             "map",
                         )
+                    elif phase == "map_resume":
+                        self._set_status(
+                            f"Продолжение: {cache} чанков уже в кэше ({cur}/{total})"
+                        )
+                        self._append_log_line(
+                            f"[RESUME cache] loaded={cache} total={total}",
+                            "preflight",
+                        )
+                    elif phase == "map_batch":
+                        phase_name = msg.get("phase_name", "")
+                        batch_done = msg.get("batch_done", 0)
+                        batch_total = msg.get("batch_total", 0)
+                        self._set_status(
+                            f"MAP {phase_name}: пакет {batch_done}/{batch_total} "
+                            f"(всего {cur}/{total}, кэш {cache})"
+                        )
                     elif phase == "map":
                         extra = f" ({cache} из кэша)" if cache else ""
                         suffix = f" | файл: {file_name}" if file_name else ""
@@ -1838,6 +1873,10 @@ class NocturneApp(ctk.CTk):
                     self._set_status(f"Ошибка: {err[:100]}", "#f87171")
                     self._append_log_line(f"[ERROR] {err}", "error")
 
+                elif t == MSG_JOB_ID:
+                    jid = msg.get("job_id")
+                    if isinstance(jid, str) and jid:
+                        self._active_job_id = jid
                 elif t == MSG_TRACE:
                     self._append_log_line(str(msg.get("line", "")), "trace")
 
@@ -2162,6 +2201,7 @@ def _run_processing(
         if kind == "text":
             chunks: list[str] = payload  # type: ignore[assignment]
             job_id = compute_job_id(file_path, query)
+            out_queue.put({"type": MSG_JOB_ID, "job_id": job_id})
             result = loop.run_until_complete(
                 run_map_reduce(
                     chunks=chunks,
@@ -2189,6 +2229,7 @@ def _run_processing(
         elif kind == "vision":
             vchunks: list[str] = payload  # type: ignore[assignment]
             job_id = compute_job_id(file_path, query)
+            out_queue.put({"type": MSG_JOB_ID, "job_id": job_id})
             result = loop.run_until_complete(
                 run_map_reduce(
                     chunks=vchunks,
@@ -2288,6 +2329,7 @@ def _run_folder_batch(
     id_root = job_id_root or folder_path
     job_id = compute_job_id(id_root, query, file_paths=filtered_files)
     corpus_src = source_path or str(id_root)
+    out_queue.put({"type": MSG_JOB_ID, "job_id": job_id})
     chunk_store = ChunkStore(job_id)
     try:
         extract_workers = min(8, os.cpu_count() or 4)

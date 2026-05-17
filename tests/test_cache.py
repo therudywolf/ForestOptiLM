@@ -53,10 +53,16 @@ class TestMapCache(unittest.TestCase):
         st = cache.get_job_state("job_resume")
         assert st is not None
         self.assertEqual(st["chunks_total"], 10)
-        cache.mark_job_complete("job_resume")
+        cache.mark_job_paused("job_resume")
         st2 = cache.get_job_state("job_resume")
         assert st2 is not None
-        self.assertEqual(st2["status"], "complete")
+        self.assertEqual(st2["status"], "paused")
+        jobs2 = cache.list_resumable_jobs(5)
+        self.assertTrue(any(j["job_id"] == "job_resume" for j in jobs2))
+        cache.mark_job_complete("job_resume")
+        st3 = cache.get_job_state("job_resume")
+        assert st3 is not None
+        self.assertEqual(st3["status"], "complete")
 
 
 if __name__ == "__main__":

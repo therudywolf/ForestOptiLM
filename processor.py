@@ -3084,6 +3084,26 @@ async def run_map_reduce(
             return result
 
         map_results_by_index: dict[int, str] = {}
+        if job_id:
+            for i in range(len(chunks)):
+                cached = get_cached_response(job_id, i)
+                if cached:
+                    map_results_by_index[i] = cached
+                    from_cache_count += 1
+                    completed_count += 1
+            if from_cache_count and on_progress:
+                active, in_flight, retrying, effective_workers = _counts_snapshot()
+                on_progress(
+                    completed_count,
+                    len(chunks),
+                    "map_resume",
+                    from_cache_count,
+                    active=active,
+                    in_flight=in_flight,
+                    retrying=retrying,
+                    effective_workers=effective_workers,
+                )
+
         text_indices = [i for i, c in enumerate(chunks) if _VISION_FILE_RE.search(c) is None]
         vision_indices = [i for i, c in enumerate(chunks) if _VISION_FILE_RE.search(c) is not None]
 
@@ -3094,7 +3114,8 @@ async def run_map_reduce(
             return max(1, workers) * 4
 
         async def _run_phase(indices: list[int], *, phase_name: str, phase_model: str, is_vision: bool) -> None:
-            if not indices:
+            pending = [i for i in indices if i not in map_results_by_index]
+            if not pending:
                 return
             if on_progress:
                 active, in_flight, retrying, effective_workers = _counts_snapshot()
@@ -3105,7 +3126,7 @@ async def run_map_reduce(
                     from_cache_count,
                     phase_name=phase_name,
                     model=phase_model,
-                    chunks_count=len(indices),
+                    chunks_count=len(pending),
                     active=active,
                     in_flight=in_flight,
                     retrying=retrying,
@@ -3113,8 +3134,8 @@ async def run_map_reduce(
                 )
             await _ensure_model_ready(phase_model, phase_name)
             batch_sz = _map_batch_size()
-            for offset in range(0, len(indices), batch_sz):
-                batch = indices[offset : offset + batch_sz]
+            for offset in range(0, len(pending), batch_sz):
+                batch = pending[offset : offset + batch_sz]
                 phase_results = await asyncio.gather(
                     *[
                         process_chunk(
@@ -3138,7 +3159,7 @@ async def run_map_reduce(
                         from_cache_count,
                         phase_name=phase_name,
                         batch_done=offset + len(batch),
-                        batch_total=len(indices),
+                        batch_total=len(pending),
                         active=active,
                         in_flight=in_flight,
                         retrying=retrying,
