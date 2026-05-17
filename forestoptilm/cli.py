@@ -105,6 +105,7 @@ def main(argv: list[str] | None = None) -> int:
                 scout_mode=scout_mode,
                 scout_relevance_threshold=scout_threshold,
                 scout_model=scout_m,
+                source_path=str(args.path),
             )
         )
     out_path = args.output or Path("report.md")

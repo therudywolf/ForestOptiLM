@@ -19,6 +19,7 @@ Nocturne Data Forge — кэш чекпоинтов MAP-фазы (SQLite).
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sqlite3
@@ -46,6 +47,15 @@ CREATE TABLE IF NOT EXISTS map_chunks (
     PRIMARY KEY (job_id, chunk_index)
 );
 CREATE INDEX IF NOT EXISTS idx_map_chunks_job ON map_chunks(job_id);
+CREATE TABLE IF NOT EXISTS job_state (
+    job_id TEXT PRIMARY KEY,
+    query_preview TEXT,
+    source_path TEXT,
+    chunks_total INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'running',
+    updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_job_state_status ON job_state(status);
 """
 
 _conn: sqlite3.Connection | None = None
@@ -149,6 +159,167 @@ def get_cached_response(job_id: str, chunk_index: int) -> str | None:
     except Exception as e:
         logger.warning("Cache get failed: %s", e)
         return None
+
+
+def count_cached_chunks(job_id: str) -> int:
+    try:
+        conn = _ensure_db()
+        if conn is None:
+            return 0
+        row = conn.execute(
+            "SELECT COUNT(*) FROM map_chunks WHERE job_id = ?",
+            (job_id,),
+        ).fetchone()
+        return int(row[0]) if row else 0
+    except Exception:
+        return 0
+
+
+def _last_job_pointer_path() -> Path:
+    return CACHE_DIR.parent / "last_job.json"
+
+
+def persist_last_job_pointer(job_id: str) -> None:
+    meta = get_job_state(job_id)
+    if not meta:
+        return
+    try:
+        path = _last_job_pointer_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "job_id": job_id,
+                    "source_path": meta.get("source_path", ""),
+                    "query_preview": meta.get("query_preview", ""),
+                    "chunks_total": meta.get("chunks_total", 0),
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+    except Exception as e:
+        logger.warning("persist_last_job_pointer failed: %s", e)
+
+
+def load_last_job_pointer() -> dict[str, object] | None:
+    try:
+        path = _last_job_pointer_path()
+        if not path.is_file():
+            return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def save_job_state(
+    job_id: str,
+    *,
+    chunks_total: int,
+    query_preview: str,
+    source_path: str,
+    status: str = "running",
+) -> None:
+    try:
+        import time
+
+        conn = _ensure_db()
+        if conn is None:
+            return
+        conn.execute(
+            """INSERT OR REPLACE INTO job_state
+               (job_id, query_preview, source_path, chunks_total, status, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                job_id,
+                (query_preview or "")[:500],
+                str(source_path or "")[:2000],
+                int(chunks_total),
+                status,
+                int(time.time()),
+            ),
+        )
+        conn.commit()
+        persist_last_job_pointer(job_id)
+    except Exception as e:
+        logger.warning("save_job_state failed: %s", e)
+
+
+def get_job_state(job_id: str) -> dict[str, object] | None:
+    try:
+        conn = _ensure_db()
+        if conn is None:
+            return None
+        row = conn.execute(
+            "SELECT job_id, query_preview, source_path, chunks_total, status, updated_at "
+            "FROM job_state WHERE job_id = ?",
+            (job_id,),
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "job_id": row[0],
+            "query_preview": row[1],
+            "source_path": row[2],
+            "chunks_total": int(row[3]),
+            "status": row[4],
+            "updated_at": int(row[5]),
+        }
+    except Exception:
+        return None
+
+
+def list_resumable_jobs(limit: int = 15) -> list[dict[str, object]]:
+    """Jobs with MAP cache progress (for resume UI)."""
+    try:
+        conn = _ensure_db()
+        if conn is None:
+            return []
+        rows = conn.execute(
+            """SELECT js.job_id, js.query_preview, js.source_path, js.chunks_total, js.status,
+                      (SELECT COUNT(*) FROM map_chunks mc WHERE mc.job_id = js.job_id) AS cached
+               FROM job_state js
+               WHERE js.status IN ('running', 'paused')
+               ORDER BY js.updated_at DESC
+               LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        out: list[dict[str, object]] = []
+        for row in rows:
+            cached = int(row[5])
+            total = int(row[3])
+            if total <= 0:
+                continue
+            if cached >= total and row[4] == "complete":
+                continue
+            out.append({
+                "job_id": row[0],
+                "query_preview": row[1],
+                "source_path": row[2],
+                "chunks_total": total,
+                "status": row[4],
+                "cached": cached,
+            })
+        return out
+    except Exception:
+        return []
+
+
+def mark_job_complete(job_id: str) -> None:
+    try:
+        import time
+
+        conn = _ensure_db()
+        if conn is None:
+            return
+        conn.execute(
+            "UPDATE job_state SET status='complete', updated_at=? WHERE job_id=?",
+            (int(time.time()), job_id),
+        )
+        conn.commit()
+    except Exception as e:
+        logger.warning("mark_job_complete failed: %s", e)
 
 
 def set_cached_response(job_id: str, chunk_index: int, response_text: str) -> None:

@@ -2519,7 +2519,7 @@ async def generate_meta_prompt(
 
 
 async def run_map_reduce(
-    chunks: list[str],
+    chunks: list[str] | Any,
     user_query: str,
     base_url: str,
     api_key: str,
@@ -2538,6 +2538,7 @@ async def run_map_reduce(
     scout_relevance_threshold: float = 0.35,
     scout_min_chunks: int = 8,
     scout_model: str | None = None,
+    source_path: str = "",
 ) -> str:
     """
     MAP с кэшем по job_id; адаптивный семафор; иерархический merge MAP JSON и финальный REDUCE.
@@ -2548,6 +2549,21 @@ async def run_map_reduce(
     """
     if not chunks:
         return ""
+
+    n_chunks = len(chunks)
+    if job_id:
+        try:
+            from cache import save_job_state
+
+            save_job_state(
+                job_id,
+                chunks_total=n_chunks,
+                query_preview=user_query,
+                source_path=source_path,
+                status="running",
+            )
+        except Exception:
+            pass
 
     metrics_row_id = 0
     if job_id:
@@ -3071,6 +3087,12 @@ async def run_map_reduce(
         text_indices = [i for i, c in enumerate(chunks) if _VISION_FILE_RE.search(c) is None]
         vision_indices = [i for i, c in enumerate(chunks) if _VISION_FILE_RE.search(c) is not None]
 
+        def _map_batch_size() -> int:
+            raw = os.getenv("NOCTURNE_MAP_BATCH_SIZE", "").strip()
+            if raw.isdigit():
+                return max(1, int(raw))
+            return max(1, workers) * 4
+
         async def _run_phase(indices: list[int], *, phase_name: str, phase_model: str, is_vision: bool) -> None:
             if not indices:
                 return
@@ -3090,20 +3112,38 @@ async def run_map_reduce(
                     effective_workers=effective_workers,
                 )
             await _ensure_model_ready(phase_model, phase_name)
-            phase_results = await asyncio.gather(
-                *[
-                    process_chunk(
-                        i,
-                        chunks[i],
-                        map_llm=phase_model,
-                        is_vision=is_vision,
+            batch_sz = _map_batch_size()
+            for offset in range(0, len(indices), batch_sz):
+                batch = indices[offset : offset + batch_sz]
+                phase_results = await asyncio.gather(
+                    *[
+                        process_chunk(
+                            i,
+                            chunks[i],
+                            map_llm=phase_model,
+                            is_vision=is_vision,
+                        )
+                        for i in batch
+                    ],
+                    return_exceptions=False,
+                )
+                for idx, result in zip(batch, phase_results):
+                    map_results_by_index[idx] = result
+                if on_progress:
+                    active, in_flight, retrying, effective_workers = _counts_snapshot()
+                    on_progress(
+                        completed_count,
+                        len(chunks),
+                        "map_batch",
+                        from_cache_count,
+                        phase_name=phase_name,
+                        batch_done=offset + len(batch),
+                        batch_total=len(indices),
+                        active=active,
+                        in_flight=in_flight,
+                        retrying=retrying,
+                        effective_workers=effective_workers,
                     )
-                    for i in indices
-                ],
-                return_exceptions=False,
-            )
-            for idx, result in zip(indices, phase_results):
-                map_results_by_index[idx] = result
 
         # ── META-PROMPT GENERATION (before MAP) ───────────────────────
         # When composer_model is set and we have enough chunks, ask the
@@ -3241,7 +3281,12 @@ async def run_map_reduce(
 
         await _run_phase(map_text_indices, phase_name="text_map", phase_model=model, is_vision=False)
         await _run_phase(vision_indices, phase_name="vision_map", phase_model=vision_llm, is_vision=True)
-        map_results_raw = [map_results_by_index.get(i, "") for i in range(len(chunks))]
+        map_results_raw: list[str] = []
+        for i in range(len(chunks)):
+            raw_r = map_results_by_index.get(i, "")
+            if not raw_r and job_id:
+                raw_r = get_cached_response(job_id, i) or ""
+            map_results_raw.append(raw_r)
 
         # Post-process each MAP result:
         # 1. Deduplicate identical findings within the same chunk (prevents hallucinating
@@ -3492,6 +3537,13 @@ async def run_map_reduce(
             except Exception:
                 pass
         _cleanup_models_after_run()
+        if job_id:
+            try:
+                from cache import mark_job_complete
+
+                mark_job_complete(job_id)
+            except Exception:
+                pass
         return final_report
 
 
