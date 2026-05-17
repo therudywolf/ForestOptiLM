@@ -161,6 +161,21 @@ automatically downgraded to **medium**.
 | `NOCTURNE_CACHE_TTL_DAYS` | `7` | MAP cache TTL in days (`0` = no expiry) |
 | `NOCTURNE_CONTEXT_SAFETY_MARGIN` | *(adaptive)* | Fixed token margin; default is ~15% of model context (512–8192) |
 | `NOCTURNE_SCOUT_THRESHOLD` | `0.35` | Default relevance threshold when scout is enabled from env |
+| `NOCTURNE_SKIP_INTEGRATION` | — | Set `1` to skip integration tests |
+| `NOCTURNE_SMOKE_CHAT_MODEL` | — | Override chat model for integration smoke |
+| `NOCTURNE_SMOKE_EMBED_MODEL` | — | Override embedding model for integration smoke |
+
+### Integration smoke (local)
+
+```bash
+# Unit tests only (CI default)
+python -m pytest tests/ -q -m "not integration"
+
+# Full smoke against running LM Studio
+python -m pytest tests/test_lmstudio_integration.py -m integration -q
+```
+
+GUI **Проверить LM Studio** runs full smoke when a chat model is selected.
 
 ## Troubleshooting
 

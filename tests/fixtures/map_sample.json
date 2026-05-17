@@ -1,0 +1,17 @@
+{
+  "chunk_index": 1,
+  "file": "docs/readme.md",
+  "query_alignment": "docs review",
+  "no_relevant_data": false,
+  "findings": [
+    {
+      "severity": "medium",
+      "type": "doc_gap",
+      "explanation": "Missing install section",
+      "evidence_refs": [
+        {"file": "docs/readme.md", "chunk": "1", "quote": "TODO install"}
+      ]
+    }
+  ],
+  "recommendations": ["Add install steps"]
+}

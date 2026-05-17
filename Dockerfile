@@ -20,4 +20,7 @@ COPY . .
 
 ENV PYTHONUNBUFFERED=1
 
+# GUI (default)
 CMD ["python", "main.py"]
+# Headless example:
+# docker run --rm -v %cd%:/data forestoptilm python -m forestoptilm.cli analyze /data -q "..." -o /data/out.md
