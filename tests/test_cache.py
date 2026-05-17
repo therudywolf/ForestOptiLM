@@ -37,6 +37,27 @@ class TestMapCache(unittest.TestCase):
         b = cache.build_job_id(p, "query")
         self.assertEqual(a, b)
 
+    def test_job_state_and_resume_list(self) -> None:
+        cache.save_job_state(
+            "job_resume",
+            chunks_total=10,
+            query_preview="find bugs",
+            source_path="/data/corpus",
+            status="running",
+        )
+        cache.set_cached_response("job_resume", 0, "{}")
+        cache.set_cached_response("job_resume", 1, "{}")
+        jobs = cache.list_resumable_jobs(5)
+        self.assertTrue(any(j["job_id"] == "job_resume" for j in jobs))
+        self.assertEqual(cache.count_cached_chunks("job_resume"), 2)
+        st = cache.get_job_state("job_resume")
+        assert st is not None
+        self.assertEqual(st["chunks_total"], 10)
+        cache.mark_job_complete("job_resume")
+        st2 = cache.get_job_state("job_resume")
+        assert st2 is not None
+        self.assertEqual(st2["status"], "complete")
+
 
 if __name__ == "__main__":
     unittest.main()

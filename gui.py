@@ -301,14 +301,27 @@ class NocturneApp(ctk.CTk):
             command=self._on_runtime_mode_changed,
         )
         self._low_vram_check.pack(anchor="w", pady=(2, 2), **pad)
-        ctk.CTkLabel(sb, text="Лимиты токенов", font=ctk.CTkFont(size=12, weight="bold")
-                     ).pack(anchor="w", pady=(10, 0), **pad)
-        ctk.CTkLabel(sb, text="MAX_REDUCE_INPUT_TOKENS").pack(anchor="w", pady=(4, 0), **pad)
+        self._advanced_visible = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            sb,
+            text="Дополнительно (лимиты, scout-модель)",
+            variable=self._advanced_visible,
+            command=self._toggle_advanced_panel,
+        ).pack(anchor="w", pady=(10, 2), **pad)
+        self._advanced_frame = ctk.CTkFrame(sb, fg_color="transparent")
         self._max_reduce_tokens_var = ctk.StringVar(value=str(self._runtime_state.get("max_reduce_input_tokens", 24000)))
-        ctk.CTkEntry(sb, textvariable=self._max_reduce_tokens_var).pack(fill="x", pady=(2, 4), **pad)
-        ctk.CTkLabel(sb, text="NOCTURNE_MAX_CHUNK_TOKENS").pack(anchor="w", pady=(2, 0), **pad)
         self._max_chunk_tokens_var = ctk.StringVar(value=str(self._runtime_state.get("max_chunk_tokens", 6000)))
-        ctk.CTkEntry(sb, textvariable=self._max_chunk_tokens_var).pack(fill="x", pady=(2, 4), **pad)
+        ctk.CTkLabel(
+            self._advanced_frame, text="Лимиты токенов", font=ctk.CTkFont(size=12, weight="bold"),
+        ).pack(anchor="w", pady=(4, 0), **pad)
+        ctk.CTkLabel(self._advanced_frame, text="MAX_REDUCE_INPUT_TOKENS").pack(anchor="w", pady=(4, 0), **pad)
+        ctk.CTkEntry(self._advanced_frame, textvariable=self._max_reduce_tokens_var).pack(
+            fill="x", pady=(2, 4), **pad,
+        )
+        ctk.CTkLabel(self._advanced_frame, text="NOCTURNE_MAX_CHUNK_TOKENS").pack(anchor="w", pady=(2, 0), **pad)
+        ctk.CTkEntry(self._advanced_frame, textvariable=self._max_chunk_tokens_var).pack(
+            fill="x", pady=(2, 4), **pad,
+        )
 
         ctk.CTkLabel(sb, text="Большой корпус", font=ctk.CTkFont(size=12, weight="bold")
                      ).pack(anchor="w", pady=(8, 0), **pad)
@@ -320,17 +333,21 @@ class NocturneApp(ctk.CTk):
             command=self._persist_runtime_state,
         )
         self._scout_check.pack(anchor="w", pady=(2, 2), **pad)
-        ctk.CTkLabel(sb, text="Порог релевантности (0–1)").pack(anchor="w", pady=(2, 0), **pad)
         self._scout_threshold_var = ctk.StringVar(
             value=str(self._runtime_state.get("scout_threshold", 0.35))
         )
-        ctk.CTkEntry(sb, textvariable=self._scout_threshold_var, width=80).pack(
+        self._scout_model_var = ctk.StringVar(value=str(self._runtime_state.get("selected_scout_model", "")))
+        ctk.CTkLabel(self._advanced_frame, text="Порог релевантности (0–1)").pack(
+            anchor="w", pady=(2, 0), **pad,
+        )
+        ctk.CTkEntry(self._advanced_frame, textvariable=self._scout_threshold_var, width=80).pack(
             fill="x", pady=(2, 4), **pad,
         )
-        ctk.CTkLabel(sb, text="Scout-модель (пусто = MAP-модель)").pack(anchor="w", pady=(2, 0), **pad)
-        self._scout_model_var = ctk.StringVar(value=str(self._runtime_state.get("selected_scout_model", "")))
+        ctk.CTkLabel(self._advanced_frame, text="Scout-модель (пусто = MAP-модель)").pack(
+            anchor="w", pady=(2, 0), **pad,
+        )
         self._scout_menu = ctk.CTkOptionMenu(
-            sb,
+            self._advanced_frame,
             variable=self._scout_model_var,
             values=["(как MAP-модель)"],
             dynamic_resizing=False,
@@ -408,6 +425,12 @@ class NocturneApp(ctk.CTk):
             fg_color="transparent",
             border_width=1,
             command=self._on_run_history,
+        ).pack(side="left", padx=(6, 0))
+        ctk.CTkButton(
+            act_row, text="Продолжить", width=100,
+            fg_color="#1d4ed8",
+            hover_color="#1e40af",
+            command=self._on_resume_job,
         ).pack(side="left", padx=(6, 0))
 
         # Progress
@@ -906,6 +929,106 @@ class NocturneApp(ctk.CTk):
         if cm and not cm.startswith("("):
             if not self._composer_model_var.get().strip() or self._composer_model_var.get().startswith("("):
                 self._composer_model_var.set(cm)
+
+    def _toggle_advanced_panel(self) -> None:
+        pad = {"padx": 12}
+        if self._advanced_visible.get():
+            self._advanced_frame.pack(fill="x", pady=(0, 4), **pad)
+        else:
+            self._advanced_frame.pack_forget()
+
+    def _apply_source_path(self, path: Path) -> None:
+        if path.is_dir():
+            self._folder_path = path
+            self._file_path = None
+            self._file_label.configure(text=f"[Папка]  {path}")
+        else:
+            self._file_path = path
+            self._folder_path = None
+            self._file_label.configure(text=str(path))
+        self._hint_large_corpus(path)
+        self._update_preflight_label()
+
+    def _on_resume_job(self) -> None:
+        from cache import get_job_state, list_resumable_jobs, load_last_job_pointer
+
+        jobs = list_resumable_jobs(12)
+        if not jobs:
+            last = load_last_job_pointer()
+            if last and last.get("job_id"):
+                st = get_job_state(str(last["job_id"]))
+                if st:
+                    cached = 0
+                    try:
+                        from cache import count_cached_chunks
+
+                        cached = count_cached_chunks(str(last["job_id"]))
+                    except Exception:
+                        pass
+                    total = int(st.get("chunks_total") or 0)
+                    if total > 0 and cached < total:
+                        jobs = [{
+                            "job_id": last["job_id"],
+                            "query_preview": last.get("query_preview", ""),
+                            "source_path": last.get("source_path", ""),
+                            "chunks_total": total,
+                            "cached": cached,
+                            "status": st.get("status", "running"),
+                        }]
+        if not jobs:
+            self._set_status("Нет незавершённых задач для продолжения", "#f59e0b")
+            return
+
+        dlg = ctk.CTkToplevel(self)
+        dlg.title("Продолжить задачу")
+        dlg.geometry("720x360")
+        ctk.CTkLabel(
+            dlg,
+            text="Выберите прогон (MAP-кэш). Путь и запрос подставятся автоматически.",
+            wraplength=680,
+            justify="left",
+        ).pack(anchor="w", padx=12, pady=(12, 8))
+
+        def _pick(job: dict[str, object]) -> None:
+            src = str(job.get("source_path") or "").strip()
+            if not src or not Path(src).exists():
+                self._set_status("Исходный путь недоступен — выберите тот же файл/папку вручную", "#f59e0b")
+                dlg.destroy()
+                return
+            self._apply_source_path(Path(src))
+            q = str(job.get("query_preview") or "").strip()
+            if q:
+                self._query_text.delete("1.0", "end")
+                self._query_text.insert("1.0", q)
+            cached = int(job.get("cached") or 0)
+            total = int(job.get("chunks_total") or 0)
+            self._append_log_line(
+                f"[RESUME] job={str(job.get('job_id',''))[:16]}… MAP {cached}/{total}",
+                "preflight",
+            )
+            dlg.destroy()
+            self._on_start()
+
+        scroll = ctk.CTkScrollableFrame(dlg, height=240)
+        scroll.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        for job in jobs:
+            cached = int(job.get("cached") or 0)
+            total = int(job.get("chunks_total") or 0)
+            src = str(job.get("source_path") or "")
+            preview = str(job.get("query_preview") or "")[:120]
+            row = ctk.CTkFrame(scroll, fg_color="#1e293b")
+            row.pack(fill="x", pady=4)
+            ctk.CTkLabel(
+                row,
+                text=f"{cached}/{total} чанков  |  {Path(src).name}\n{preview}",
+                anchor="w",
+                justify="left",
+                wraplength=520,
+            ).pack(side="left", fill="x", expand=True, padx=8, pady=8)
+            ctk.CTkButton(
+                row, text="Продолжить", width=100,
+                command=lambda j=job: _pick(j),
+            ).pack(side="right", padx=8, pady=8)
 
     def _on_dry_run(self) -> None:
         selected = self._file_path or self._folder_path
@@ -1927,6 +2050,7 @@ def _run_processing(
     scout_relevance_threshold: float = 0.35,
     scout_model: str | None = None,
 ) -> None:
+    source_path = str(file_path or folder_path or "")
     dynamic_chunk_size = compute_dynamic_chunk_size(
         context_budget, SYSTEM_PROMPT_MAP, query, response_reserve=response_reserve,
     )
@@ -1986,6 +2110,8 @@ def _run_processing(
                         scout_mode=scout_mode,
                         scout_relevance_threshold=scout_relevance_threshold,
                         scout_model=scout_model,
+                        job_id_root=file_path,
+                        source_path=source_path,
                     )
             except ParseError as exc:
                 out_queue.put({"type": MSG_ERROR, "message": sanitize_for_log(str(exc))})
@@ -2013,6 +2139,8 @@ def _run_processing(
             scout_mode=scout_mode,
             scout_relevance_threshold=scout_relevance_threshold,
             scout_model=scout_model,
+            job_id_root=folder_path,
+            source_path=source_path,
         )
         return
 
@@ -2054,6 +2182,7 @@ def _run_processing(
                     scout_mode=scout_mode,
                     scout_relevance_threshold=scout_relevance_threshold,
                     scout_model=scout_model,
+                    source_path=source_path,
                 )
             )
             out_queue.put({"type": MSG_RESULT, "text": result})
@@ -2080,6 +2209,7 @@ def _run_processing(
                     scout_mode=scout_mode,
                     scout_relevance_threshold=scout_relevance_threshold,
                     scout_model=scout_model,
+                    source_path=source_path,
                 )
             )
             out_queue.put({"type": MSG_RESULT, "text": result})
@@ -2130,6 +2260,8 @@ def _run_folder_batch(
     scout_mode: bool = False,
     scout_relevance_threshold: float = 0.35,
     scout_model: str | None = None,
+    job_id_root: Path | None = None,
+    source_path: str = "",
 ) -> None:
     from pipeline import _iter_files, _to_chunks
     from corpus_planner import filter_files_by_relevance
@@ -2153,7 +2285,9 @@ def _run_folder_batch(
             "line": f"[FILE SCOUT] skipped {files_skipped} low-relevance files (heuristic)",
         })
 
-    job_id = compute_job_id(folder_path, query, file_paths=filtered_files)
+    id_root = job_id_root or folder_path
+    job_id = compute_job_id(id_root, query, file_paths=filtered_files)
+    corpus_src = source_path or str(id_root)
     chunk_store = ChunkStore(job_id)
     try:
         extract_workers = min(8, os.cpu_count() or 4)
@@ -2256,6 +2390,7 @@ def _run_folder_batch(
                     scout_mode=scout_mode,
                     scout_relevance_threshold=scout_relevance_threshold,
                     scout_model=scout_model,
+                    source_path=corpus_src,
                 )
             )
         finally:
