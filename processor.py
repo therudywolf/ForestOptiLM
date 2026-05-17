@@ -1087,7 +1087,7 @@ def resolve_runtime_model_context(
     return None, "unavailable", last_state or "unknown"
 
 
-def test_lmstudio_connection(
+def check_lmstudio_connection(
     base_url: str,
     api_key: str,
     embedding_model: str | None = None,
@@ -1111,6 +1111,10 @@ def test_lmstudio_connection(
     except Exception as exc:
         logger.exception("LM Studio connection test failed: %s", sanitize_for_log(str(exc)))
         return (False, sanitize_for_log(str(exc)))
+
+
+# Backward-compatible alias for GUI and external callers.
+test_lmstudio_connection = check_lmstudio_connection
 
 
 def run_lmstudio_smoke_test(

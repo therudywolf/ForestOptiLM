@@ -251,6 +251,7 @@ def load_ui_runtime_state() -> dict[str, object]:
         "max_chunk_tokens": 6000,
         "rag_index_dir": ".nocturne_index",
         "rag_top_k": 8,
+        "model_context_cache": {},
     }
     path = _runtime_ui_path()
     if not path.is_file():
@@ -275,6 +276,8 @@ def load_ui_runtime_state() -> dict[str, object]:
         out["max_chunk_tokens"] = _to_int_in_range(data.get("max_chunk_tokens"), 6000, 500, 50000)
         out["rag_index_dir"] = str(data.get("rag_index_dir") or ".nocturne_index").strip() or ".nocturne_index"
         out["rag_top_k"] = _to_int_in_range(data.get("rag_top_k"), 8, 1, 100)
+        mcc = data.get("model_context_cache")
+        out["model_context_cache"] = dict(mcc) if isinstance(mcc, dict) else {}
         return out
     except Exception as exc:
         logger.warning("Runtime UI state unreadable %s: %s", path, exc)
