@@ -51,6 +51,7 @@ from processor import (
     check_vision_capability,
     compute_job_id,
     fetch_models_info,
+    categorize_models,
     answer_with_context,
     set_runtime_modes,
     set_runtime_limits,
@@ -106,6 +107,7 @@ class NocturneApp(ctk.CTk):
         # context_length per model, populated after "Обновить модели"
         self._model_ctx: dict[str, int] = {}
         self._model_ctx_source: dict[str, str] = {}
+        self._models_by_kind: dict[str, list[str]] = {"chat": [], "vision": [], "embedding": []}
         self._cfg_default_model = get_default_model_optional()
         self._runtime_state = load_ui_runtime_state()
         self._runtime_state_ready = False
@@ -117,6 +119,7 @@ class NocturneApp(ctk.CTk):
         self._bind_runtime_state_watchers()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(300, self._on_fetch_models)
+        self.after(600, self._maybe_first_run_wizard)
 
     # ------------------------------------------------------------------ #
     #  Layout
@@ -295,16 +298,6 @@ class NocturneApp(ctk.CTk):
             command=self._on_runtime_mode_changed,
         )
         self._low_vram_check.pack(anchor="w", pady=(2, 2), **pad)
-        self._dual_instance_var = ctk.BooleanVar(value=False)
-        self._dual_instance_check = ctk.CTkCheckBox(
-            sb,
-            text="Dual instance для 5+ воркеров",
-            variable=self._dual_instance_var,
-            command=self._on_runtime_mode_changed,
-        )
-        # Принудительно отключено: в текущем режиме используем только 1 инстанс модели.
-        self._dual_instance_check.pack_forget()
-
         ctk.CTkLabel(sb, text="Лимиты токенов", font=ctk.CTkFont(size=12, weight="bold")
                      ).pack(anchor="w", pady=(10, 0), **pad)
         ctk.CTkLabel(sb, text="MAX_REDUCE_INPUT_TOKENS").pack(anchor="w", pady=(4, 0), **pad)
@@ -331,6 +324,16 @@ class NocturneApp(ctk.CTk):
         ctk.CTkEntry(sb, textvariable=self._scout_threshold_var, width=80).pack(
             fill="x", pady=(2, 4), **pad,
         )
+        ctk.CTkLabel(sb, text="Scout-модель (пусто = MAP-модель)").pack(anchor="w", pady=(2, 0), **pad)
+        self._scout_model_var = ctk.StringVar(value=str(self._runtime_state.get("selected_scout_model", "")))
+        self._scout_menu = ctk.CTkOptionMenu(
+            sb,
+            variable=self._scout_model_var,
+            values=["(как MAP-модель)"],
+            dynamic_resizing=False,
+            width=250,
+        )
+        self._scout_menu.pack(fill="x", pady=(2, 4), **pad)
         ctk.CTkButton(
             sb,
             text="Пресет: корпус 1M+",
@@ -384,7 +387,16 @@ class NocturneApp(ctk.CTk):
         self._status_label = ctk.CTkLabel(
             main, text="Готов к работе", anchor="w", text_color="gray",
         )
-        self._status_label.pack(anchor="w", pady=(0, 8))
+        self._status_label.pack(anchor="w", pady=(0, 4))
+        self._preflight_label = ctk.CTkLabel(
+            main,
+            text="Preflight: выберите файл и модель",
+            anchor="w",
+            text_color="gray",
+            wraplength=820,
+            justify="left",
+        )
+        self._preflight_label.pack(anchor="w", pady=(0, 8))
         self._loaded_model_label = ctk.CTkLabel(
             main,
             text="Активная модель в LM Studio: неизвестно",
@@ -412,6 +424,17 @@ class NocturneApp(ctk.CTk):
         self._logs_tab = self._tabs.add("Логи")
         self._rag_tab = self._tabs.add("RAG")
         self._tabs.set("Результат")
+
+        result_toolbar = ctk.CTkFrame(self._result_tab, fg_color="transparent")
+        result_toolbar.pack(fill="x", pady=(0, 6))
+        ctk.CTkButton(result_toolbar, text="Сохранить…", width=100,
+                      command=self._on_save_result).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(result_toolbar, text="Экспорт MD", width=100,
+                      command=lambda: self._export_result(".md")).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(result_toolbar, text="Экспорт JSON evidence", width=150,
+                      command=self._on_export_evidence_json).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(result_toolbar, text="История запусков", width=130,
+                      command=self._on_show_run_history).pack(side="right")
 
         self._result_text = ctk.CTkTextbox(self._result_tab, wrap="word")
         self._result_text.pack(fill="both", expand=True)
@@ -764,11 +787,13 @@ class NocturneApp(ctk.CTk):
         self._composer_use_var.set(bool(state.get("composer_enabled", False)))
         self._api_mode_var.set("openai" if state.get("api_mode") == "openai" else "native")
         self._low_vram_var.set(bool(state.get("low_vram_mode", True)))
-        self._dual_instance_var.set(False)
         self._max_reduce_tokens_var.set(str(state.get("max_reduce_input_tokens", 24000)))
         self._max_chunk_tokens_var.set(str(state.get("max_chunk_tokens", 6000)))
         self._scout_var.set(bool(state.get("scout_mode", False)))
         self._scout_threshold_var.set(str(state.get("scout_threshold", 0.35)))
+        sm = str(state.get("selected_scout_model") or "").strip()
+        if sm:
+            self._scout_model_var.set(sm)
         self._rag_index_dir_var.set(str(state.get("rag_index_dir") or ".nocturne_index"))
         self._rag_top_k_var.set(str(state.get("rag_top_k", 8)))
         em = str(state.get("selected_embedding_model") or "").strip()
@@ -809,23 +834,26 @@ class NocturneApp(ctk.CTk):
             "workers": max(1, min(MAX_UI_WORKERS, workers_val)),
             "api_mode": self._api_mode_var.get().strip().lower(),
             "low_vram_mode": bool(self._low_vram_var.get()),
-            "dual_instance_mode": False,
             "base_url": self._url_var.get().strip(),
             "max_reduce_input_tokens": max_reduce_tokens,
             "max_chunk_tokens": max_chunk_tokens,
             "scout_mode": bool(self._scout_var.get()),
             "scout_threshold": self._scout_threshold_var.get().strip() or "0.35",
+            "selected_scout_model": self._scout_model_var.get().strip(),
             "rag_index_dir": self._rag_index_dir_var.get().strip() or ".nocturne_index",
             "rag_top_k": rag_top_k,
         }
 
     def _on_large_corpus_preset(self) -> None:
         """Пресет для анализа очень больших папок/архивов: scout + composer + меньшие чанки."""
-        self._scout_var.set(True)
-        self._scout_threshold_var.set("0.35")
-        self._workers_var.set("4")
-        self._max_chunk_tokens_var.set("4500")
-        self._composer_use_var.set(True)
+        from run_profiles import get_profile
+
+        prof = get_profile("large_corpus")
+        self._scout_var.set(bool(prof.get("scout_mode", True)))
+        self._scout_threshold_var.set(str(prof.get("scout_threshold", 0.35)))
+        self._workers_var.set(str(prof.get("workers", 4)))
+        self._max_chunk_tokens_var.set(str(prof.get("max_chunk_tokens", 4500)))
+        self._composer_use_var.set(bool(prof.get("composer_enabled", True)))
         self._on_composer_toggle()
         if not self._composer_model_var.get().strip() or self._composer_model_var.get().startswith("("):
             cm = self._model_var.get().strip()
@@ -917,8 +945,9 @@ class NocturneApp(ctk.CTk):
         def do_fetch() -> None:
             try:
                 models, ctx, sources = fetch_models_info(url, key)
+                by_kind = categorize_models(url, key)
                 cat_tokens = summarize_model_tokens_by_category(url, key)
-                self.after(0, lambda m=models, c=ctx, s=sources: self._set_models(m, c, s))
+                self.after(0, lambda m=models, c=ctx, s=sources, k=by_kind: self._set_models(m, c, s, k))
                 self.after(
                     0,
                     lambda t=cat_tokens: self._append_log_line(
@@ -938,14 +967,22 @@ class NocturneApp(ctk.CTk):
         models: list[str],
         ctx: dict[str, int],
         sources: dict[str, str],
+        by_kind: dict[str, list[str]] | None = None,
     ) -> None:
         self._model_ctx = ctx
         self._model_ctx_source = sources
+        if by_kind:
+            self._models_by_kind = by_kind
         vals = models if models else ["(модели не найдены)"]
-        self._model_menu.configure(values=vals)
-        self._vision_menu.configure(values=vals)
-        self._composer_menu.configure(values=vals)
-        self._embedding_menu.configure(values=vals)
+        chat_vals = self._models_by_kind.get("chat") or vals
+        vision_vals = self._models_by_kind.get("vision") or chat_vals
+        embed_vals = self._models_by_kind.get("embedding") or vals
+        self._model_menu.configure(values=chat_vals if chat_vals else vals)
+        self._vision_menu.configure(values=vision_vals if vision_vals else vals)
+        self._composer_menu.configure(values=chat_vals if chat_vals else vals)
+        self._embedding_menu.configure(values=embed_vals if embed_vals else vals)
+        scout_vals = ["(как MAP-модель)"] + (models if models else [])
+        self._scout_menu.configure(values=scout_vals)
         if models:
             persisted_main = str(self._runtime_state.get("selected_model") or "").strip()
             persisted_vision = str(self._runtime_state.get("selected_vision_model") or "").strip()
@@ -1023,7 +1060,16 @@ class NocturneApp(ctk.CTk):
         api_key  = self._api_key_var.get().strip() or API_KEY
 
         def do_test() -> None:
-            ok, msg = test_lmstudio_connection(base_url, api_key)
+            chat = self._model_var.get().strip()
+            emb = self._pick_embedding_model() or None
+            full = bool(chat and not chat.startswith("("))
+            ok, msg = test_lmstudio_connection(
+                base_url,
+                api_key,
+                embedding_model=emb,
+                full_smoke=full,
+                chat_model=chat if full else None,
+            )
             msg = sanitize_for_log(msg)
             color = "lightgreen" if ok else "#f87171"
             self.after(0, lambda: self._status_label.configure(
@@ -1060,7 +1106,7 @@ class NocturneApp(ctk.CTk):
         self._set_status(f"Проверка Vision: {vm}…")
         threading.Thread(target=do_test, daemon=True).start()
 
-    def _on_select_file(self) -> None:
+    def _on_select_file(self) -> None:  # noqa: D401 - updates preflight
         path = ctk.filedialog.askopenfilename(filetypes=FILE_TYPES)
         if path:
             self._file_path = Path(path)
@@ -1145,6 +1191,9 @@ class NocturneApp(ctk.CTk):
         except ValueError:
             scout_threshold = 0.35
         scout_threshold = max(0.0, min(1.0, scout_threshold))
+        scout_m = self._scout_model_var.get().strip()
+        if scout_m.startswith("(") or not scout_m:
+            scout_m = None
         set_runtime_modes(
             api_mode=api_mode,
             low_vram_mode=low_vram_mode,
@@ -1158,6 +1207,7 @@ class NocturneApp(ctk.CTk):
         except Exception:
             pass
         self._persist_runtime_state()
+        self._update_preflight_label()
         self._append_log_line(
             (
                 f"[START] model={model} vision={vm or model} composer={cm or model} "
@@ -1226,6 +1276,7 @@ class NocturneApp(ctk.CTk):
                     dual_instance_mode=dual_instance_mode,
                     scout_mode=scout_mode,
                     scout_relevance_threshold=scout_threshold,
+                    scout_model=scout_m,
                 )
             except Exception as exc:
                 logger.exception("Worker thread error: %s", sanitize_for_log(str(exc)))
@@ -1370,6 +1421,14 @@ class NocturneApp(ctk.CTk):
                         ok = msg.get("ok", 0)
                         elapsed_s = float(msg.get("elapsed_s", 0.0) or 0.0)
                         cpm = float(msg.get("chunks_per_min", 0.0) or 0.0)
+                        total_ch = int(msg.get("text_chunks", total) or total)
+                        deep_ch = int(msg.get("text_map_chunks", ok) or ok)
+                        if cpm > 0 and deep_ch > ok:
+                            remain = max(0, deep_ch - cur)
+                            eta_min = remain / cpm if cpm else 0
+                            self._set_status(
+                                f"MAP ~{eta_min:.0f} мин осталось (throughput {cpm:.1f} ch/min)",
+                            )
                         wk = msg.get("workers", "")
                         mm = msg.get("map_model", "")
                         vm = msg.get("vision_model", "")
@@ -1480,9 +1539,17 @@ class NocturneApp(ctk.CTk):
                     )
 
                 elif t == MSG_ERROR:
-                    err = sanitize_for_log(str(msg.get("message", "")))
+                    from errors import classify_exception
+
+                    raw = str(msg.get("message", ""))
+                    err = sanitize_for_log(raw)
+                    hint = ""
+                    try:
+                        hint = classify_exception(Exception(raw)).user_hint()
+                    except Exception:
+                        pass
                     self._result_text.delete("1.0", "end")
-                    self._result_text.insert("1.0", f"ОШИБКА:\n{err}")
+                    self._result_text.insert("1.0", f"ОШИБКА:\n{err}\n\n{hint}")
                     self._set_status(f"Ошибка: {err[:100]}", "#f87171")
                     self._append_log_line(f"[ERROR] {err}", "error")
 
@@ -1572,6 +1639,90 @@ class NocturneApp(ctk.CTk):
         html = f"<html><meta charset='utf-8'><body style='font-family: DejaVu Sans, Arial, sans-serif;'>{body}</body></html>"
         HTML(string=html).write_pdf(str(path))
 
+    def _update_preflight_label(self) -> None:
+        model = self._model_var.get().strip()
+        ctx = self._model_ctx.get(model, CONTEXT_FALLBACK)
+        reserve = self._get_response_reserve(ctx)
+        query = self._query_text.get("1.0", "end").strip() or "(запрос)"
+        try:
+            chunk = compute_dynamic_chunk_size(ctx, SYSTEM_PROMPT_MAP, query, response_reserve=reserve)
+        except Exception:
+            chunk = 0
+        scout = "on" if self._scout_var.get() else "off"
+        path = self._folder_path or self._file_path
+        path_s = str(path) if path else "—"
+        self._preflight_label.configure(
+            text=(
+                f"Preflight: ctx={ctx:,} chunk≈{chunk} scout={scout} "
+                f"workers={self._workers_var.get()} path={path_s}"
+            ).replace(",", " "),
+            text_color="gray",
+        )
+
+    def _maybe_first_run_wizard(self) -> None:
+        from first_run import is_first_run, mark_first_run_complete
+
+        if not is_first_run():
+            return
+        dlg = ctk.CTkToplevel(self)
+        dlg.title("Первый запуск")
+        dlg.geometry("420x220")
+        ctk.CTkLabel(dlg, text="Настройте LM Studio", font=ctk.CTkFont(size=14, weight="bold")).pack(pady=12)
+        ctk.CTkLabel(dlg, text="Укажите URL и API key, затем нажмите «Обновить модели».").pack(pady=6)
+
+        def done() -> None:
+            mark_first_run_complete({"base_url": self._url_var.get().strip()})
+            dlg.destroy()
+            self._on_fetch_models()
+
+        ctk.CTkButton(dlg, text="Понятно", command=done).pack(pady=12)
+
+    def _export_result(self, ext: str) -> None:
+        if not self._last_result_text:
+            self._set_status("Нет результата для экспорта", "#f59e0b")
+            return
+        p = ctk.filedialog.asksaveasfilename(defaultextension=ext, filetypes=[("All", "*.*")])
+        if p:
+            Path(p).write_text(self._last_result_text, encoding="utf-8")
+            self._set_status(f"Экспорт: {p}")
+
+    def _on_export_evidence_json(self) -> None:
+        import json
+        import re
+
+        text = self._last_result_text or ""
+        rows: list[dict[str, str]] = []
+        for line in text.splitlines():
+            if "|" in line and not line.strip().startswith("|--"):
+                parts = [p.strip() for p in line.split("|") if p.strip()]
+                if len(parts) >= 3:
+                    rows.append({"file": parts[0], "chunk": parts[1], "quote": parts[2]})
+        p = ctk.filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON", "*.json")])
+        if p:
+            Path(p).write_text(json.dumps({"evidence_matrix": rows}, ensure_ascii=False, indent=2), encoding="utf-8")
+            self._set_status(f"Evidence JSON: {p}")
+
+    def _on_show_run_history(self) -> None:
+        from metrics import list_recent_runs
+
+        runs = list_recent_runs(15)
+        dlg = ctk.CTkToplevel(self)
+        dlg.title("История запусков")
+        dlg.geometry("640x320")
+        tb = ctk.CTkTextbox(dlg, wrap="word")
+        tb.pack(fill="both", expand=True, padx=10, pady=10)
+        if not runs:
+            tb.insert("1.0", "Пока нет записей метрик.")
+        else:
+            for r in runs:
+                tb.insert(
+                    "end",
+                    f"#{r['id']} job={r.get('job_id','')} "
+                    f"ok={r.get('chunks_ok')} fail={r.get('chunks_failed')} "
+                    f"scout_skip={r.get('scout_skipped')} "
+                    f"t={r.get('duration_s')}s\n  {r.get('query_preview','')}\n\n",
+                )
+
     def _set_status(self, text: str, color: str = "gray") -> None:
         self._status_label.configure(text=text, text_color=color)
 
@@ -1599,6 +1750,7 @@ def _run_processing(
     dual_instance_mode: bool = False,
     scout_mode: bool = False,
     scout_relevance_threshold: float = 0.35,
+    scout_model: str | None = None,
 ) -> None:
     dynamic_chunk_size = compute_dynamic_chunk_size(
         context_budget, SYSTEM_PROMPT_MAP, query, response_reserve=response_reserve,
@@ -1653,6 +1805,7 @@ def _run_processing(
             dual_instance_mode=dual_instance_mode,
             scout_mode=scout_mode,
             scout_relevance_threshold=scout_relevance_threshold,
+            scout_model=scout_model,
         )
         return
 
@@ -1693,6 +1846,7 @@ def _run_processing(
                     dual_instance_mode=dual_instance_mode,
                     scout_mode=scout_mode,
                     scout_relevance_threshold=scout_relevance_threshold,
+                    scout_model=scout_model,
                 )
             )
             out_queue.put({"type": MSG_RESULT, "text": result})
@@ -1718,6 +1872,7 @@ def _run_processing(
                     dual_instance_mode=dual_instance_mode,
                     scout_mode=scout_mode,
                     scout_relevance_threshold=scout_relevance_threshold,
+                    scout_model=scout_model,
                 )
             )
             out_queue.put({"type": MSG_RESULT, "text": result})
@@ -1767,6 +1922,7 @@ def _run_folder_batch(
     dual_instance_mode: bool = True,
     scout_mode: bool = False,
     scout_relevance_threshold: float = 0.35,
+    scout_model: str | None = None,
 ) -> None:
     from pipeline import _iter_files, _to_chunks
 
@@ -1821,6 +1977,18 @@ def _run_folder_batch(
         return
 
     logger.info("Folder batch: files=%s chunks=%s extract_workers=%s", len(all_files), len(all_chunks), extract_workers)
+    try:
+        from corpus_manifest import build_corpus_manifest, manifest_to_json
+
+        manifest = build_corpus_manifest([folder_path])
+        manifest_path = folder_path / ".nocturne_manifest.json"
+        manifest_path.write_text(manifest_to_json(manifest), encoding="utf-8")
+        out_queue.put({
+            "type": MSG_TRACE,
+            "line": f"[MANIFEST] files={manifest.get('files_total')} bytes={manifest.get('total_bytes')}",
+        })
+    except Exception as exc:
+        logger.warning("Manifest build failed: %s", exc)
     job_id = compute_job_id(folder_path, query, file_paths=all_files)
 
     # Перехватываем relevant_count из фазы map_relevant для заголовка результата
@@ -1862,6 +2030,7 @@ def _run_folder_batch(
                 dual_instance_mode=dual_instance_mode,
                 scout_mode=scout_mode,
                 scout_relevance_threshold=scout_relevance_threshold,
+                scout_model=scout_model,
             )
         )
     finally:

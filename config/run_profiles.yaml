@@ -1,0 +1,21 @@
+# Run profiles for ForestOptiLM / Nocturne Data Forge
+large_corpus:
+  scout_mode: true
+  scout_threshold: 0.35
+  max_chunk_tokens: 4500
+  workers: 4
+  composer_enabled: true
+  low_vram_mode: true
+
+quick_scan:
+  scout_mode: true
+  scout_threshold: 0.5
+  max_chunk_tokens: 3500
+  workers: 4
+  composer_enabled: false
+
+deep_audit:
+  scout_mode: false
+  max_chunk_tokens: 6000
+  workers: 2
+  composer_enabled: true

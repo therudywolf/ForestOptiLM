@@ -462,6 +462,28 @@ def fetch_models(base_url: str, api_key: str) -> list[str]:
     return ids
 
 
+def categorize_models(base_url: str, api_key: str) -> dict[str, list[str]]:
+    """Разделить модели на chat / vision / embedding по каталогу LM Studio."""
+    catalog = fetch_models_catalog(base_url, api_key)
+    out: dict[str, list[str]] = {"chat": [], "vision": [], "embedding": []}
+    for m in catalog:
+        key = str(m.get("key") or m.get("id") or "").strip()
+        if not key:
+            continue
+        mtype = str(m.get("type") or "llm").strip().lower()
+        caps = m.get("capabilities")
+        if mtype == "embedding" or "embed" in key.lower():
+            out["embedding"].append(key)
+        elif isinstance(caps, dict) and caps.get("vision"):
+            out["vision"].append(key)
+            out["chat"].append(key)
+        else:
+            out["chat"].append(key)
+    if not out["chat"] and catalog:
+        out["chat"] = [str(m.get("key") or m.get("id") or "") for m in catalog if m.get("key") or m.get("id")]
+    return out
+
+
 def fetch_models_catalog(base_url: str, api_key: str) -> list[dict[str, Any]]:
     """Получить raw-каталог моделей (native /api/v1/models или fallback /v1/models)."""
     headers = _auth_headers(api_key)
@@ -1065,8 +1087,22 @@ def resolve_runtime_model_context(
     return None, "unavailable", last_state or "unknown"
 
 
-def test_lmstudio_connection(base_url: str, api_key: str, embedding_model: str | None = None) -> tuple[bool, str]:
-    """Проверить доступность LM Studio: GET /models."""
+def test_lmstudio_connection(
+    base_url: str,
+    api_key: str,
+    embedding_model: str | None = None,
+    *,
+    full_smoke: bool = False,
+    chat_model: str | None = None,
+) -> tuple[bool, str]:
+    """Проверить LM Studio: список моделей; при full_smoke — chat + embedding."""
+    if full_smoke:
+        return run_lmstudio_smoke_test(
+            base_url,
+            api_key,
+            chat_model=chat_model,
+            embedding_model=embedding_model,
+        )
     try:
         models = fetch_models(base_url, api_key)
         if not models:
@@ -1075,6 +1111,66 @@ def test_lmstudio_connection(base_url: str, api_key: str, embedding_model: str |
     except Exception as exc:
         logger.exception("LM Studio connection test failed: %s", sanitize_for_log(str(exc)))
         return (False, sanitize_for_log(str(exc)))
+
+
+def run_lmstudio_smoke_test(
+    base_url: str,
+    api_key: str,
+    *,
+    chat_model: str | None = None,
+    embedding_model: str | None = None,
+) -> tuple[bool, str]:
+    """Smoke: GET /models + короткий chat + embedding (если модель найдена)."""
+    steps: list[str] = []
+    try:
+        models = fetch_models(base_url, api_key)
+        if not models:
+            return False, "Список моделей пуст"
+        steps.append(f"models={len(models)}")
+        chat = chat_model or next((m for m in models if "embed" not in m.lower()), models[0])
+        embed = embedding_model or next((m for m in models if "embed" in m.lower()), "")
+        headers = {"Content-Type": "application/json", **_auth_headers(api_key)}
+        chat_url = _chat_endpoint(base_url, native=USE_LMSTUDIO_NATIVE_API)
+        payload: dict[str, Any]
+        if USE_LMSTUDIO_NATIVE_API:
+            payload = {
+                "model": chat,
+                "input": "Reply with exactly: OK",
+                "max_output_tokens": 16,
+                "temperature": 0,
+                "store": False,
+            }
+        else:
+            payload = {
+                "model": chat,
+                "messages": [{"role": "user", "content": "Reply with exactly: OK"}],
+                "max_tokens": 16,
+                "temperature": 0,
+            }
+        with httpx.Client(timeout=60.0) as client:
+            r = client.post(chat_url, json=payload, headers=headers)
+            r.raise_for_status()
+            data = r.json()
+            content, _ = _extract_chat_response_content(data)
+            if not (content or "").strip():
+                return False, "Chat вернул пустой ответ"
+            steps.append(f"chat={chat}")
+            if embed:
+                emb_url = _openai_base(base_url) + "/embeddings"
+                er = client.post(
+                    emb_url,
+                    json={"model": embed, "input": ["smoke test"]},
+                    headers=headers,
+                )
+                er.raise_for_status()
+                emb_data = er.json()
+                if not emb_data.get("data"):
+                    return False, "Embedding вернул пустой data"
+                steps.append(f"embed={embed}")
+        return True, "Smoke OK: " + ", ".join(steps)
+    except Exception as exc:
+        logger.exception("LM Studio smoke failed: %s", sanitize_for_log(str(exc)))
+        return False, sanitize_for_log(str(exc))
 
 
 async def call_llm(
@@ -2007,10 +2103,61 @@ def _validate_final_report(
     ev = metrics.get("evidence_refs_count", 0)
     if ev >= 3 and low.count("quote") < 1 and low.count("```") < 1:
         warnings.append("low_evidence_density")
+    # Duplicate heading lines (simple heuristic)
+    lines = [ln.strip() for ln in t.splitlines() if ln.strip().startswith("##")]
+    if len(lines) != len(set(lines)):
+        warnings.append("duplicate_sections")
+    findings_n = metrics.get("findings_count", 0)
+    if findings_n >= 5 and ev < max(1, findings_n // 3):
+        warnings.append("low_evidence_coverage")
     footer = ""
     if warnings:
         footer = "\n\n---\n*(Валидация отчёта: " + ", ".join(warnings) + ")*\n"
     return t + footer, warnings
+
+
+async def verify_report_with_evidence(
+    report: str,
+    evidence_index: list[dict[str, str]],
+    user_query: str,
+    base_url: str,
+    api_key: str,
+    model: str,
+    semaphore: Union[asyncio.Semaphore, AdaptiveSemaphore],
+    api_mode: str = "native",
+    client: httpx.AsyncClient | None = None,
+) -> tuple[str, list[str]]:
+    """Опциональный verifier: малая модель проверяет отчёт против индекса цитат."""
+    if not evidence_index or len(report) < 200:
+        return report, []
+    from parser import count_tokens
+
+    rows = "\n".join(
+        f"- {e.get('file','?')} chunk {e.get('chunk','?')}: {e.get('quote','')[:80]}"
+        for e in evidence_index[:35]
+    )
+    prompt = (
+        f"Запрос: {user_query}\n\nИндекс доказательств:\n{rows}\n\n"
+        f"Отчёт:\n{report[:12000]}\n\n"
+        "Верни в <results> краткий список проблем (или NO_ISSUES), если critical/high без цитат."
+    )
+    if count_tokens(prompt) > 6000:
+        prompt = prompt[:24000]
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": prompt},
+    ]
+    try:
+        out = await call_llm(
+            messages, model, base_url, api_key, semaphore,
+            max_tokens=512, max_retries=1, api_mode=api_mode, client=client,
+        )
+        note = _extract_results_tag(out).strip()
+        if note and "NO_ISSUES" not in note.upper():
+            return report + f"\n\n---\n*(Verifier)*\n{note}\n", ["verifier_notes"]
+    except Exception as exc:
+        logger.warning("Verifier skipped: %s", sanitize_for_log(str(exc)[:120]))
+    return report, []
 
 
 def _build_fallback_report(
@@ -2415,6 +2562,7 @@ async def run_map_reduce(
     scout_mode: bool = False,
     scout_relevance_threshold: float = 0.35,
     scout_min_chunks: int = 8,
+    scout_model: str | None = None,
 ) -> str:
     """
     MAP с кэшем по job_id; адаптивный семафор; иерархический merge MAP JSON и финальный REDUCE.
@@ -2425,6 +2573,24 @@ async def run_map_reduce(
     """
     if not chunks:
         return ""
+
+    metrics_row_id = 0
+    if job_id:
+        try:
+            from metrics import record_run_start
+
+            metrics_row_id = record_run_start(
+                job_id,
+                user_query,
+                {
+                    "map": model,
+                    "scout": scout_model or model,
+                    "composer": composer_model or model,
+                    "vision": vision_model or model,
+                },
+            )
+        except Exception:
+            metrics_row_id = 0
 
     _claimed_ctx = max_context_tokens if max_context_tokens is not None else CONTEXT_FALLBACK
     max_context_tokens = _server_safe_context_limit(_claimed_ctx)
@@ -2439,6 +2605,7 @@ async def run_map_reduce(
     workers = max(1, min(4, workers))
     reduce_model = (composer_model or model).strip() or model
     vision_llm = (vision_model or model).strip() or model
+    scout_llm = (scout_model or model).strip() or model
     # language_hint is derived from the ORIGINAL user_query so meta-prompt generation doesn't break it
     language_hint = "Ответь строго на русском языке." if _prefer_russian(user_query) else ""
     api_mode = api_mode.strip().lower()
@@ -2989,7 +3156,7 @@ async def run_map_reduce(
                     0, len(text_indices), "scout", from_cache_count,
                     scout_total=len(text_indices),
                 )
-            await _ensure_model_ready(model, "scout")
+            await _ensure_model_ready(scout_llm, "scout")
 
             async def _scout_one(i: int) -> tuple[int, float]:
                 chunk = chunks[i]
@@ -3023,7 +3190,7 @@ async def run_map_reduce(
                 try:
                     out = await call_llm(
                         messages,
-                        model,
+                        scout_llm,
                         base_url,
                         api_key,
                         semaphore,
@@ -3184,9 +3351,15 @@ async def run_map_reduce(
         refine_used = False
         draft: str = ""
 
+        use_hierarchical = os.getenv("NOCTURNE_HIERARCHICAL_MERGE", "1").strip() != "0"
         if n_file_groups <= 1:
             # ── ОДНА ГРУППА: классический путь (одиночный reduce) ────────────────
-            aggregated = _merge_map_json_deterministic(merge_inputs)
+            if use_hierarchical and len(merge_inputs) > 5:
+                from merge_hierarchy import hierarchical_merge_map_results
+
+                aggregated, _merge_tree = hierarchical_merge_map_results(merge_inputs, chunks)
+            else:
+                aggregated = _merge_map_json_deterministic(merge_inputs)
             if on_progress:
                 try:
                     on_progress(1, 1, "reduce", from_cache_count)
@@ -3270,6 +3443,29 @@ async def run_map_reduce(
 
         sections_n = _count_report_sections(draft)
         final_report, val_warnings = _validate_final_report(draft, metrics)
+        if os.getenv("NOCTURNE_ENABLE_VERIFIER", "").strip() == "1":
+            from merge_hierarchy import hierarchical_merge_map_results, top_evidence_from_tree
+
+            ev_index: list[dict[str, str]] = []
+            if use_hierarchical and len(merge_inputs) > 5:
+                try:
+                    _, merge_tree = hierarchical_merge_map_results(merge_inputs, chunks)
+                    ev_index = top_evidence_from_tree(merge_tree, limit=40)
+                except Exception:
+                    ev_index = []
+            verifier_model = scout_llm
+            final_report, v_warn = await verify_report_with_evidence(
+                final_report,
+                ev_index,
+                user_query,
+                base_url,
+                api_key,
+                verifier_model,
+                semaphore,
+                api_mode=api_mode,
+                client=shared_client,
+            )
+            val_warnings = list(val_warnings) + v_warn
         if on_progress:
             on_progress(
                 1,
@@ -3282,6 +3478,22 @@ async def run_map_reduce(
                 refine_used=refine_used,
                 validation_warnings=val_warnings,
             )
+        if metrics_row_id:
+            try:
+                from metrics import record_run_finish
+
+                record_run_finish(
+                    metrics_row_id,
+                    duration_s=time.monotonic() - started_at,
+                    chunks_total=len(chunks),
+                    chunks_ok=len(map_results),
+                    chunks_failed=failed_count,
+                    scout_skipped=scout_skipped,
+                    retries=retry_count,
+                    warnings=val_warnings,
+                )
+            except Exception:
+                pass
         _cleanup_models_after_run()
         return final_report
 

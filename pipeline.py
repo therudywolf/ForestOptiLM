@@ -27,15 +27,13 @@ from embeddings import EmbeddingClient
 from file_extractors import (
     ARCHIVE_EXTENSIONS,
     IMAGE_EXTENSIONS,
-    ParseError,
     TABLE_EXTRACTORS,
     TEXT_EXTRACTORS,
     _SKIP_EXTENSIONS,
-    extract_content,
-    extract_file_metadata,
 )
 from models import DocumentChunk, IndexStats, RetrievalHit
-from parser import chunk_text_for_map_file, count_tokens
+from chunking import build_document_chunks
+from parser import count_tokens
 from retrieval import LocalFaissStore
 
 logger = logging.getLogger("nocturne")
@@ -78,111 +76,13 @@ def _to_chunks(
     root_dir: Path | None = None,
     extract_meta: bool = True,
 ) -> list[DocumentChunk]:
-    try:
-        kind, content = extract_content(path)
-    except ParseError:
-        return []
-    except PermissionError as e:
-        logger.info("skip locked file %s: %s", path, e)
-        return []
-    except Exception as e:
-        logger.warning("extract failed %s: %s", path, e)
-        return []
-
-    # Compute display path: relative to root_dir when available.
-    if root_dir is not None:
-        try:
-            display_path = str(path.relative_to(root_dir)).replace("\\", "/")
-        except ValueError:
-            display_path = path.name
-    else:
-        display_path = path.name
-
-    # Fast metadata sampling (title, labels, format) for chunk header enrichment.
-    file_meta: dict[str, str] | None = None
-    if extract_meta:
-        try:
-            file_meta = extract_file_metadata(path, root_dir=root_dir)
-        except Exception as exc:
-            logger.debug("extract_file_metadata failed for %s: %s", path, exc)
-
-    chunks: list[DocumentChunk] = []
-    if kind == "vision":
-        img_path = Path(str(content))
-        if not img_path.is_file():
-            return []
-        meta_line = ""
-        if file_meta:
-            parts: list[str] = []
-            if file_meta.get("title"):
-                parts.append(f"[FILE_TITLE: {file_meta['title']}]")
-            if file_meta.get("labels"):
-                parts.append(f"[FILE_LABELS: {file_meta['labels']}]")
-            if file_meta.get("format"):
-                parts.append(f"[FILE_FORMAT: {file_meta['format']}]")
-            if parts:
-                meta_line = "".join(parts) + "\n"
-        t = (
-            f"[FILE_PATH: {display_path}]\n"
-            f"{meta_line}"
-            f"[Файл: {display_path}]\n"
-            f"[VISION_FILE: {img_path.resolve()}]\n"
-        )
-        cid = hashlib.sha256(f"{path}:vision".encode("utf-8")).hexdigest()[:24]
-        base_meta: dict = {"kind": "vision", "chunk_index": 0}
-        if file_meta:
-            base_meta.update(file_meta)
-        chunks.append(
-            DocumentChunk(
-                chunk_id=cid,
-                source_path=str(path),
-                text=t,
-                tokens=count_tokens(t),
-                metadata=base_meta,
-            )
-        )
-    elif kind == "text":
-        text = str(content).strip()
-        if not text:
-            return []
-        chunk_texts = chunk_text_for_map_file(
-            path, text, chunk_size_tokens, overlap_tokens,
-            root_dir=root_dir, file_meta=file_meta,
-        )
-        for idx, c in enumerate(chunk_texts):
-            cid = hashlib.sha256(f"{path}:{idx}:{c[:200]}".encode("utf-8")).hexdigest()[:24]
-            chunk_meta: dict = {"chunk_index": idx}
-            if file_meta:
-                chunk_meta.update(file_meta)
-            chunks.append(
-                DocumentChunk(
-                    chunk_id=cid,
-                    source_path=str(path),
-                    text=c,
-                    tokens=count_tokens(c),
-                    metadata=chunk_meta,
-                )
-            )
-    else:
-        import pandas as pd
-
-        if not isinstance(content, pd.DataFrame) or content.empty:
-            return []
-        text = content.to_csv(index=False)
-        cid = hashlib.sha256(f"{path}:table".encode("utf-8")).hexdigest()[:24]
-        table_meta: dict = {"kind": "table"}
-        if file_meta:
-            table_meta.update(file_meta)
-        chunks.append(
-            DocumentChunk(
-                chunk_id=cid,
-                source_path=str(path),
-                text=text,
-                tokens=count_tokens(text),
-                metadata=table_meta,
-            )
-        )
-    return chunks
+    return build_document_chunks(
+        path,
+        chunk_size_tokens,
+        overlap_tokens,
+        root_dir=root_dir,
+        extract_meta=extract_meta,
+    )
 
 
 def build_index(

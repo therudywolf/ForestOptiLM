@@ -1,6 +1,6 @@
 [project]
 name = "forestoptilm"
-version = "0.5.0-alpha.1"
+version = "0.6.0-alpha.1"
 description = "Bulk async file processing through local LLMs (LM Studio)"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
@@ -29,3 +29,14 @@ classifiers = [
 Homepage = "https://github.com/therudywolf/ForestOptiLM"
 Repository = "https://github.com/therudywolf/ForestOptiLM"
 Issues = "https://github.com/therudywolf/ForestOptiLM/issues"
+
+[project.scripts]
+forestoptilm = "forestoptilm.cli:main"
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: tests requiring live LM Studio",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.4"]

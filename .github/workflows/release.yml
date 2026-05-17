@@ -1,29 +1,35 @@
-name: Tests
+name: Release
 
 on:
   push:
-    branches: [main, master]
-  pull_request:
+    tags:
+      - "v*"
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  pytest:
-    runs-on: ubuntu-latest
+  build:
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt pytest
-
       - name: Run unit tests
         run: python -m pytest tests/ -q -m "not integration"
         env:
           NOCTURNE_SKIP_INTEGRATION: "1"
+      - name: Build source archive
+        run: |
+          python -m pip install build
+          python -m build --sdist
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: forestoptilm-sdist
+          path: dist/*.tar.gz
