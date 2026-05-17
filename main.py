@@ -15,8 +15,10 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with ForestOptiLM. If not, see <https://www.gnu.org/licenses/>.
 """
-Nocturne Data Forge — точка входа.
-Массовая асинхронная обработка больших файлов (TXT, PDF, DOCX, CSV, XLSX) через локальные LLM.
+Nocturne Data Forge (ForestOptiLM) — точка входа GUI.
+
+Массовая асинхронная обработка файлов и папок через локальные LLM (LM Studio):
+текст, PDF, Office, архивы, код, изображения (vision), таблицы, RAG.
 """
 import logging
 import sys

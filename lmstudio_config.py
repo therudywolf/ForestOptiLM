@@ -346,3 +346,16 @@ def invalidate_cache() -> None:
     """Для тестов: сбросить кэш после смены файла."""
     global _cached
     _cached = None
+
+
+def validate_lmstudio_url(url: str) -> tuple[bool, str]:
+    """Проверить Base URL до сетевых запросов (GUI/CLI)."""
+    u = str(url or "").strip()
+    if not u:
+        return (
+            False,
+            "Укажите API Base URL или создайте .local/lmstudio.json (см. README).",
+        )
+    if not re.match(r"^https?://", u, re.I):
+        return False, "API Base URL должен начинаться с http:// или https://"
+    return True, ""

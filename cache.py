@@ -27,7 +27,14 @@ from pathlib import Path
 
 logger = logging.getLogger("nocturne")
 
-CACHE_DIR = Path(__file__).resolve().parent / ".nocturne_cache"
+def _default_cache_dir() -> Path:
+    override = os.getenv("NOCTURNE_CACHE_DIR", "").strip()
+    if override:
+        return Path(override).expanduser()
+    return Path(__file__).resolve().parent / ".nocturne_cache"
+
+
+CACHE_DIR = _default_cache_dir()
 DB_PATH = CACHE_DIR / "cache.db"
 
 _SCHEMA = """
@@ -79,6 +86,17 @@ def build_job_id(
     if corpus_fingerprint:
         payload = f"{payload}|corpus:{corpus_fingerprint}"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
+
+
+def reset_cache_connection() -> None:
+    """Закрыть SQLite-соединение (тесты, смена NOCTURNE_CACHE_DIR)."""
+    global _conn
+    if _conn is not None:
+        try:
+            _conn.close()
+        except Exception:
+            pass
+    _conn = None
 
 
 def _ensure_db() -> sqlite3.Connection | None:

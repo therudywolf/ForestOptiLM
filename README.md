@@ -3,15 +3,20 @@
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-brightgreen.svg)](https://www.python.org/)
 
-Desktop application for bulk asynchronous processing of large files and
-folders (including multi‑hundred‑thousand‑token corpora) through local LLMs
-(LM Studio and other OpenAI-compatible APIs). Uses Map‑Reduce with an optional
-**scout pass** (fast relevance filter) and a **composer** model for merge/reduce.
+**ForestOptiLM** is the repository name; the product UI is **Nocturne Data Forge** —
+a desktop app for bulk asynchronous processing of large files and folders
+(including multi‑hundred‑thousand‑token corpora) through **local LLMs**
+(LM Studio REST API v1 and OpenAI-compatible endpoints).
 
-AGPL v3 Copyleft applies to reuse, modification, and network deployment of derived versions.
+Core idea: **Map‑Reduce over documents** with structured JSON evidence, optional
+**scout pass** (fast relevance filter), **reasoning-model control** (`reasoning: off`
+for qwen3 / deepseek-r1 etc.), and an optional **composer** model for merge/reduce.
 
-Десктопное приложение на Python для массовой асинхронной обработки больших файлов
-через локальные LLM (LM Studio и другие OpenAI-совместимые API).
+Licensed under **AGPL-3.0-or-later** — see [LICENSE](LICENSE), [NOTICE](NOTICE),
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+Десктопное приложение на Python: массовая обработка файлов через локальные LLM
+без отправки данных в облако (при использовании локального LM Studio).
 
 ## Features
 
@@ -25,6 +30,8 @@ AGPL v3 Copyleft applies to reuse, modification, and network deployment of deriv
 - **Composer model** — optional separate model for merge/reduce/refine phases.
 - **SQLite cache** for MAP checkpoint resumption.
 - **Dark theme GUI** (CustomTkinter).
+- **Reasoning models** — auto-detected from LM Studio catalog; CoT disabled for MAP/REDUCE.
+- **Headless CLI** — `python -m forestoptilm.cli analyze`.
 
 ## Installation
 
@@ -43,8 +50,17 @@ docker run --rm -it forestoptilm
 
 ## Quick Start
 
+### GUI
+
 ```bash
 python main.py
+```
+
+### CLI (headless)
+
+```bash
+python -m forestoptilm.cli analyze ./docs -q "Summarize security findings"
+python -m forestoptilm.cli analyze ./docs -q "..." --profile large_corpus -o report.md
 ```
 
 ### Windows: one-click launch
@@ -67,10 +83,11 @@ cp config/lmstudio.example.json .local/lmstudio.json
 
 ```json
 {
-  "base_url": "http://127.0.0.1:1234/v1",
-  "api_key": "your-api-key",
+  "base_url": "http://127.0.0.1:1234",
+  "api_key": "sk-lm-xxxxxxxx:yyyyyyyy",
   "timeout": 600,
-  "default_model": ""
+  "default_model": "",
+  "api_mode": "native"
 }
 ```
 
@@ -149,19 +166,20 @@ automatically downgraded to **medium**.
 
 ## Project Structure
 
-| File | Purpose |
-|------|---------|
-| `main.py` | Entry point |
+| File / dir | Purpose |
+|------------|---------|
+| `main.py` | GUI entry point |
 | `gui.py` | CustomTkinter interface (dark theme) |
-| `processor.py` | LLM calls, Map-Reduce, batching, backoff |
-| `parser.py` | File parsing, tiktoken, chunking |
-| `file_extractors.py` | Format routing, archive extraction |
+| `forestoptilm/cli.py` | Headless `analyze` command |
+| `processor.py` | LLM calls, Map-Reduce, scout, batching |
+| `parser.py`, `chunking.py`, `file_extractors.py` | Parsing and chunking |
 | `cache.py` | SQLite MAP checkpoint cache |
-| `embeddings.py` | LM Studio `/v1/embeddings` client |
-| `retrieval.py` | Local FAISS index and search |
-| `pipeline.py` | Ingestion / index / query pipeline |
-| `models.py` | Dataclass models for chunks and retrieval |
-| `lmstudio_config.py` | Local JSON config loading, secret masking |
+| `pipeline.py`, `embeddings.py`, `retrieval.py` | RAG (FAISS) |
+| `lmstudio_config.py`, `lm_client.py`, `lm_studio_api.py` | LM Studio connection |
+| `reasoning_models.py` | Reasoning / thinking model detection |
+| `merge_hierarchy.py`, `conflict_resolve.py` | Merge helpers |
+| `config/run_profiles.yaml` | Presets: `large_corpus`, `quick_scan`, `deep_audit` |
+| `tests/` | Unit tests (`pytest`; integration opt-in) |
 
 ## Environment Variables
 
@@ -175,17 +193,20 @@ automatically downgraded to **medium**.
 | `NOCTURNE_CACHE_TTL_DAYS` | `7` | MAP cache TTL in days (`0` = no expiry) |
 | `NOCTURNE_CONTEXT_SAFETY_MARGIN` | *(adaptive)* | Fixed token margin; default is ~15% of model context (512–8192) |
 | `NOCTURNE_SCOUT_THRESHOLD` | `0.35` | Default relevance threshold when scout is enabled from env |
-| `NOCTURNE_SKIP_INTEGRATION` | — | Set `1` to skip integration tests |
+| `NOCTURNE_RUN_INTEGRATION` | — | Set `1` to run live LM Studio integration tests |
+| `NOCTURNE_SKIP_INTEGRATION` | — | Documented alias; CI uses `-m "not integration"` |
+| `NOCTURNE_CACHE_DIR` | `.nocturne_cache` | Override MAP SQLite cache directory |
 | `NOCTURNE_SMOKE_CHAT_MODEL` | — | Override chat model for integration smoke |
 | `NOCTURNE_SMOKE_EMBED_MODEL` | — | Override embedding model for integration smoke |
 
-### Integration smoke (local)
+### Tests
 
 ```bash
 # Unit tests only (CI default)
 python -m pytest tests/ -q -m "not integration"
 
-# Full smoke against running LM Studio
+# Live LM Studio (server must be running; uses .local/lmstudio.json)
+set NOCTURNE_RUN_INTEGRATION=1
 python -m pytest tests/test_lmstudio_integration.py -m integration -q
 ```
 
@@ -212,4 +233,5 @@ the terms of the **GNU Affero General Public License** as published by the Free
 Software Foundation, either version 3 of the License, or (at your option) any
 later version.
 
-See [LICENSE](LICENSE) for the full text.
+See [LICENSE](LICENSE) for the full text. Third-party dependency licenses:
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Project attribution: [NOTICE](NOTICE).
