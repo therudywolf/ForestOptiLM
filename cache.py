@@ -281,6 +281,7 @@ def list_resumable_jobs(limit: int = 15) -> list[dict[str, object]]:
                       (SELECT COUNT(*) FROM map_chunks mc WHERE mc.job_id = js.job_id) AS cached
                FROM job_state js
                WHERE js.status IN ('running', 'paused')
+                 AND (SELECT COUNT(*) FROM map_chunks mc WHERE mc.job_id = js.job_id) < js.chunks_total
                ORDER BY js.updated_at DESC
                LIMIT ?""",
             (limit,),
@@ -304,6 +305,23 @@ def list_resumable_jobs(limit: int = 15) -> list[dict[str, object]]:
         return out
     except Exception:
         return []
+
+
+def mark_job_paused(job_id: str) -> None:
+    try:
+        import time
+
+        conn = _ensure_db()
+        if conn is None:
+            return
+        conn.execute(
+            "UPDATE job_state SET status='paused', updated_at=? WHERE job_id=?",
+            (int(time.time()), job_id),
+        )
+        conn.commit()
+        persist_last_job_pointer(job_id)
+    except Exception as e:
+        logger.warning("mark_job_paused failed: %s", e)
 
 
 def mark_job_complete(job_id: str) -> None:
