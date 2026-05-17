@@ -304,6 +304,13 @@ def save_ui_runtime_state(state: dict[str, object]) -> None:
         "rag_index_dir": str(state.get("rag_index_dir") or ".nocturne_index").strip() or ".nocturne_index",
         "rag_top_k": _to_int_in_range(state.get("rag_top_k"), 8, 1, 100),
     }
+    mcc = state.get("model_context_cache")
+    if isinstance(mcc, dict) and mcc:
+        data["model_context_cache"] = {
+            str(k): _to_int_in_range(v, 0, 0, 2_000_000)
+            for k, v in mcc.items()
+            if str(k).strip()
+        }
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
