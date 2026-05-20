@@ -62,6 +62,7 @@ from processor import (
     test_lmstudio_connection,
 )
 from pipeline import build_index, query_index
+from run_config import RunConfig
 
 logger = logging.getLogger("nocturne")
 
@@ -1480,31 +1481,38 @@ class NocturneApp(ctk.CTk):
         self._persist_runtime_state()
         self._update_preflight_label()
         try:
-            from run_config import RunConfig
+            mct = int(self._max_chunk_tokens_var.get() or "6000")
+        except ValueError:
+            mct = 6000
+        try:
+            mrt = int(self._max_reduce_tokens_var.get() or "24000")
+        except ValueError:
+            mrt = 24000
 
-            rc = RunConfig.from_gui(
-                base_url=base_url,
-                api_key=api_key,
-                chat_model=model,
-                vision_model=vm,
-                composer_model=cm,
-                scout_model=scout_m,
-                embedding_model=self._embedding_model_var.get().strip(),
-                api_mode=api_mode,
-                low_vram=low_vram_mode,
-                workers=workers,
-                context_budget=context_budget,
-                max_chunk_tokens=int(self._max_chunk_tokens_var.get() or "6000"),
-                max_reduce_input_tokens=int(self._max_reduce_tokens_var.get() or "24000"),
-                scout_mode=scout_mode,
-                scout_threshold=scout_threshold,
-            )
-            self._append_log_line(
-                f"[RUN_CONFIG] scout={rc.scout_mode} workers={rc.workers} chunk_max={rc.max_chunk_tokens}",
-                "preflight",
-            )
-        except Exception:
-            pass
+        # Единая неизменяемая конфигурация прогона — носитель настроек GUI
+        # для processing-слоя (после preflight уточняется через replace()).
+        rc = RunConfig.from_gui(
+            base_url=base_url,
+            api_key=api_key,
+            chat_model=model,
+            vision_model=vm,
+            composer_model=cm,
+            scout_model=scout_m,
+            embedding_model=self._embedding_model_var.get().strip(),
+            api_mode=api_mode,
+            low_vram=low_vram_mode,
+            workers=workers,
+            context_budget=context_budget,
+            response_reserve=response_reserve,
+            max_chunk_tokens=mct,
+            max_reduce_input_tokens=mrt,
+            scout_mode=scout_mode,
+            scout_threshold=scout_threshold,
+        )
+        self._append_log_line(
+            f"[RUN_CONFIG] scout={rc.scout_mode} workers={rc.workers} chunk_max={rc.max_chunk_tokens}",
+            "preflight",
+        )
         self._append_log_line(
             (
                 f"[START] model={model} vision={vm or model} composer={cm or model} "
@@ -1537,6 +1545,14 @@ class NocturneApp(ctk.CTk):
                 )
                 effective_context = runtime_ctx or context_budget
                 effective_reserve = self._get_response_reserve(effective_context)
+                # Уточняем конфиг реальным runtime-контекстом из preflight.
+                from dataclasses import replace as _dc_replace
+
+                rc_effective = _dc_replace(
+                    rc,
+                    context_budget=effective_context,
+                    response_reserve=effective_reserve,
+                )
                 self._queue.put({
                     "type": MSG_PROGRESS,
                     "current": 0,
@@ -1558,22 +1574,9 @@ class NocturneApp(ctk.CTk):
                     file_path=self._file_path,
                     folder_path=self._folder_path,
                     query=query,
-                    model=model,
-                    base_url=base_url,
-                    api_key=api_key,
-                    context_budget=effective_context,
-                    response_reserve=effective_reserve,
-                    workers=workers,
+                    rc=rc_effective,
                     out_queue=self._queue,
                     stop_flag=lambda: self._stop_requested,
-                    vision_model=vm,
-                    composer_model=cm,
-                    api_mode=api_mode,
-                    low_vram_mode=low_vram_mode,
-                    dual_instance_mode=dual_instance_mode,
-                    scout_mode=scout_mode,
-                    scout_relevance_threshold=scout_threshold,
-                    scout_model=scout_m,
                 )
             except Exception as exc:
                 logger.exception("Worker thread error: %s", sanitize_for_log(str(exc)))
@@ -2074,23 +2077,27 @@ def _run_processing(
     file_path: Path | None,
     folder_path: Path | None,
     query: str,
-    model: str,
-    base_url: str,
-    api_key: str,
-    context_budget: int,
-    response_reserve: int,
-    workers: int,
+    rc: RunConfig,
     out_queue: queue.Queue[dict[str, Any]],
     stop_flag: Any = None,
-    vision_model: str | None = None,
-    composer_model: str | None = None,
-    api_mode: str = "native",
-    low_vram_mode: bool = True,
-    dual_instance_mode: bool = False,
-    scout_mode: bool = False,
-    scout_relevance_threshold: float = 0.35,
-    scout_model: str | None = None,
 ) -> None:
+    # Распаковка единой конфигурации прогона в локальные имена —
+    # тело функции ниже работает с ними как прежде.
+    model = rc.chat_model
+    base_url = rc.base_url
+    api_key = rc.api_key
+    context_budget = rc.context_budget
+    response_reserve = rc.response_reserve
+    workers = rc.workers
+    vision_model = rc.vision_model
+    composer_model = rc.composer_model
+    api_mode = rc.api_mode
+    low_vram_mode = rc.low_vram_mode
+    dual_instance_mode = False
+    scout_mode = rc.scout_mode
+    scout_relevance_threshold = rc.scout_threshold
+    scout_model = rc.scout_model
+
     source_path = str(file_path or folder_path or "")
     dynamic_chunk_size = compute_dynamic_chunk_size(
         context_budget, SYSTEM_PROMPT_MAP, query, response_reserve=response_reserve,
@@ -2134,23 +2141,11 @@ def _run_processing(
                     _run_folder_batch(
                         folder_path=archive_root,
                         query=query,
-                        model=model,
-                        base_url=base_url,
-                        api_key=api_key,
-                        context_budget=context_budget,
+                        rc=rc,
                         dynamic_chunk_size=dynamic_chunk_size,
-                        workers=workers,
                         out_queue=out_queue,
                         put_progress=put_progress,
                         stop_flag=stop_flag,
-                        vision_model=vision_model,
-                        composer_model=composer_model,
-                        api_mode=api_mode,
-                        low_vram_mode=low_vram_mode,
-                        dual_instance_mode=dual_instance_mode,
-                        scout_mode=scout_mode,
-                        scout_relevance_threshold=scout_relevance_threshold,
-                        scout_model=scout_model,
                         job_id_root=file_path,
                         source_path=source_path,
                     )
@@ -2163,23 +2158,11 @@ def _run_processing(
         _run_folder_batch(
             folder_path=folder_path,
             query=query,
-            model=model,
-            base_url=base_url,
-            api_key=api_key,
-            context_budget=context_budget,
+            rc=rc,
             dynamic_chunk_size=dynamic_chunk_size,
-            workers=workers,
             out_queue=out_queue,
             put_progress=put_progress,
             stop_flag=stop_flag,
-            vision_model=vision_model,
-            composer_model=composer_model,
-            api_mode=api_mode,
-            low_vram_mode=low_vram_mode,
-            dual_instance_mode=dual_instance_mode,
-            scout_mode=scout_mode,
-            scout_relevance_threshold=scout_relevance_threshold,
-            scout_model=scout_model,
             job_id_root=folder_path,
             source_path=source_path,
         )
@@ -2298,29 +2281,32 @@ def _run_processing(
 def _run_folder_batch(
     folder_path: Path,
     query: str,
-    model: str,
-    base_url: str,
-    api_key: str,
-    context_budget: int,
+    rc: RunConfig,
     dynamic_chunk_size: int,
-    workers: int,
     out_queue: queue.Queue[dict[str, Any]],
     put_progress: Any,
     stop_flag: Any,
-    vision_model: str | None = None,
-    composer_model: str | None = None,
-    api_mode: str = "native",
-    low_vram_mode: bool = True,
-    dual_instance_mode: bool = True,
-    scout_mode: bool = False,
-    scout_relevance_threshold: float = 0.35,
-    scout_model: str | None = None,
     job_id_root: Path | None = None,
     source_path: str = "",
 ) -> None:
     from pipeline import _iter_files, _to_chunks
     from corpus_planner import filter_files_by_relevance
     from chunk_store import ChunkStore
+
+    # Распаковка конфигурации прогона в локальные имена.
+    model = rc.chat_model
+    base_url = rc.base_url
+    api_key = rc.api_key
+    context_budget = rc.context_budget
+    workers = rc.workers
+    vision_model = rc.vision_model
+    composer_model = rc.composer_model
+    api_mode = rc.api_mode
+    low_vram_mode = rc.low_vram_mode
+    dual_instance_mode = False
+    scout_mode = rc.scout_mode
+    scout_relevance_threshold = rc.scout_threshold
+    scout_model = rc.scout_model
 
     all_files = _iter_files([folder_path])
     if not all_files:

@@ -12,6 +12,31 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from large_corpus_io import is_large_corpus_input, large_corpus_profile_kwargs
 from gui import MSG_TRACE, _run_processing
+from run_config import RunConfig
+
+
+def _mk_rc(**overrides: object) -> RunConfig:
+    """Build a RunConfig for worker tests with sensible defaults."""
+    base: dict = dict(
+        base_url="http://127.0.0.1:1234",
+        api_key="k",
+        chat_model="test-model",
+        vision_model=None,
+        composer_model=None,
+        scout_model=None,
+        embedding_model="",
+        api_mode="native",
+        low_vram=True,
+        workers=2,
+        context_budget=8096,
+        response_reserve=2048,
+        max_chunk_tokens=6000,
+        max_reduce_input_tokens=24000,
+        scout_mode=False,
+        scout_threshold=0.35,
+    )
+    base.update(overrides)
+    return RunConfig.from_gui(**base)
 
 
 class TestLargeCorpusDetection(unittest.TestCase):
@@ -50,14 +75,8 @@ class TestRunProcessingWorker(unittest.TestCase):
                 file_path=z,
                 folder_path=None,
                 query=user_query,
-                model="test-model",
-                base_url="http://127.0.0.1:1234",
-                api_key="k",
-                context_budget=8096,
-                response_reserve=2048,
-                workers=2,
+                rc=_mk_rc(chat_model="test-model", workers=2, scout_mode=True),
                 out_queue=q,
-                scout_mode=True,
             )
             folder_batch.assert_called_once()
             self.assertEqual(folder_batch.call_args.kwargs["query"], user_query)
@@ -77,14 +96,8 @@ class TestRunProcessingWorker(unittest.TestCase):
                 file_path=log,
                 folder_path=None,
                 query="Summarize errors in log",
-                model="m",
-                base_url="http://127.0.0.1:1234",
-                api_key="k",
-                context_budget=8096,
-                response_reserve=2048,
-                workers=2,
+                rc=_mk_rc(chat_model="m", workers=2, scout_mode=True),
                 out_queue=q,
-                scout_mode=True,
             )
             map_reduce.assert_called_once()
             self.assertEqual(map_reduce.call_args.kwargs["user_query"], "Summarize errors in log")
@@ -103,12 +116,7 @@ class TestRunProcessingWorker(unittest.TestCase):
                 file_path=z,
                 folder_path=None,
                 query="проверь утечки памяти",
-                model="m",
-                base_url="http://127.0.0.1:1234",
-                api_key="k",
-                context_budget=4096,
-                response_reserve=1024,
-                workers=1,
+                rc=_mk_rc(chat_model="m", workers=1, context_budget=4096, response_reserve=1024),
                 out_queue=q,
             )
             traces = []
