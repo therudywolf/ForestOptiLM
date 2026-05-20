@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, patch
 import cache
 from gui import MSG_JOB_ID, _run_folder_batch
 from processor import compute_job_id  # used in archive root test
+from run_config import RunConfig
 
 
 class TestJobPointer(unittest.TestCase):
@@ -83,15 +84,29 @@ class TestFolderBatchJobId(unittest.TestCase):
             (root / "a.py").write_text("print(1)\n", encoding="utf-8")
             q: queue.Queue = queue.Queue()
 
+            rc = RunConfig.from_gui(
+                base_url="http://127.0.0.1:1234",
+                api_key="k",
+                chat_model="m",
+                vision_model=None,
+                composer_model=None,
+                scout_model=None,
+                embedding_model="",
+                api_mode="native",
+                low_vram=True,
+                workers=2,
+                context_budget=8096,
+                response_reserve=2048,
+                max_chunk_tokens=6000,
+                max_reduce_input_tokens=24000,
+                scout_mode=False,
+                scout_threshold=0.35,
+            )
             _run_folder_batch(
                 folder_path=root,
                 query="find issues",
-                model="m",
-                base_url="http://127.0.0.1:1234",
-                api_key="k",
-                context_budget=8096,
+                rc=rc,
                 dynamic_chunk_size=2000,
-                workers=2,
                 out_queue=q,
                 put_progress=lambda *_a, **_k: None,
                 stop_flag=lambda: False,
