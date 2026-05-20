@@ -1147,7 +1147,7 @@ async def call_llm(
     """
     headers = {"Content-Type": "application/json", **_auth_headers(api_key)}
     use_native = api_mode.strip().lower() != "openai"
-    endpoint = _chat_endpoint(base_url, native=use_native)
+    openai_fallback_tried = False
 
     def _build_payload(native: bool, include_reasoning_control: bool = True) -> dict[str, Any]:
         if native:
@@ -1176,49 +1176,75 @@ async def call_llm(
             "temperature": 0,
         }
 
+    async def _post_chat(http_client: httpx.AsyncClient) -> httpx.Response:
+        """Один POST в чат с двумя fallback'ами: reasoning-param и транспорт.
+
+        1. native + HTTP 400 «reasoning не поддерживается» → повтор без reasoning.
+        2. native + HTTP 400 со схемой payload (payload_mismatch) → разовый
+           переход на OpenAI-совместимый эндпоинт (use_native становится False
+           «липко» — последующие ретраи тоже идут по openai-транспорту).
+        """
+        nonlocal use_native, openai_fallback_tried
+        from lm_client import is_unsupported_reasoning_response
+        from reasoning_models import is_no_reasoning_param, mark_no_reasoning_param
+
+        endpoint = _chat_endpoint(base_url, native=use_native)
+        r = await http_client.post(
+            endpoint, json=_build_payload(use_native), headers=headers,
+        )
+
+        if (
+            r.status_code == 400
+            and use_native
+            and not is_no_reasoning_param(model)
+            and is_unsupported_reasoning_response(r)
+        ):
+            mark_no_reasoning_param(model)
+            logger.info(
+                "Model %s does not support reasoning param; retrying without it.", model
+            )
+            r = await http_client.post(
+                endpoint,
+                json=_build_payload(use_native, include_reasoning_control=False),
+                headers=headers,
+            )
+
+        if (
+            r.status_code == 400
+            and use_native
+            and not openai_fallback_tried
+            and _classify_http_400(r.text) == "payload_mismatch"
+        ):
+            openai_fallback_tried = True
+            use_native = False
+            logger.warning(
+                "Native chat schema rejected (HTTP 400) for model %s; "
+                "falling back to OpenAI-compatible endpoint.",
+                model,
+            )
+            r = await http_client.post(
+                _chat_endpoint(base_url, native=False),
+                json=_build_payload(False),
+                headers=headers,
+            )
+
+        return r
+
     for attempt in range(max_retries):
         await semaphore.acquire()
         delay = 0.0
         try:
-            payload = _build_payload(use_native)
             timeout_cfg = httpx.Timeout(
                 connect=15.0,
                 read=DEFAULT_TIMEOUT,
                 write=30.0,
                 pool=15.0,
             )
-            from lm_client import is_unsupported_reasoning_response
-            from reasoning_models import is_no_reasoning_param, mark_no_reasoning_param
-
             if client is None:
                 async with httpx.AsyncClient(timeout=timeout_cfg) as local_client:
-                    r = await local_client.post(endpoint, json=payload, headers=headers)
-                    if (
-                        r.status_code == 400
-                        and use_native
-                        and not is_no_reasoning_param(model)
-                        and is_unsupported_reasoning_response(r)
-                    ):
-                        mark_no_reasoning_param(model)
-                        logger.info(
-                            "Model %s does not support reasoning param; retrying without it.", model
-                        )
-                        fallback_payload = _build_payload(use_native, include_reasoning_control=False)
-                        r = await local_client.post(endpoint, json=fallback_payload, headers=headers)
+                    r = await _post_chat(local_client)
             else:
-                r = await client.post(endpoint, json=payload, headers=headers)
-                if (
-                    r.status_code == 400
-                    and use_native
-                    and not is_no_reasoning_param(model)
-                    and is_unsupported_reasoning_response(r)
-                ):
-                    mark_no_reasoning_param(model)
-                    logger.info(
-                        "Model %s does not support reasoning param; retrying without it.", model
-                    )
-                    fallback_payload = _build_payload(use_native, include_reasoning_control=False)
-                    r = await client.post(endpoint, json=fallback_payload, headers=headers)
+                r = await _post_chat(client)
             if r.status_code in (500, 502, 503):
                 raise httpx.HTTPStatusError(
                     f"Server error {r.status_code}",
@@ -3564,6 +3590,7 @@ async def run_map_reduce(
 
         refine_used = False
         draft: str = ""
+        cached_merge_tree: dict[str, Any] | None = None
 
         use_hierarchical = os.getenv("NOCTURNE_HIERARCHICAL_MERGE", "1").strip() != "0"
         if n_file_groups <= 1:
@@ -3571,7 +3598,7 @@ async def run_map_reduce(
             if use_hierarchical and len(merge_inputs) > 5:
                 from merge_hierarchy import hierarchical_merge_map_results
 
-                aggregated, _merge_tree = hierarchical_merge_map_results(merge_inputs, chunks)
+                aggregated, cached_merge_tree = hierarchical_merge_map_results(merge_inputs, chunks)
             else:
                 aggregated = _merge_map_json_deterministic(merge_inputs)
             if on_progress:
@@ -3677,7 +3704,11 @@ async def run_map_reduce(
             ev_index: list[dict[str, str]] = []
             if use_hierarchical and len(merge_inputs) > 5:
                 try:
-                    _, merge_tree = hierarchical_merge_map_results(merge_inputs, chunks)
+                    # Переиспользуем дерево слияния из фазы reduce, если оно уже
+                    # построено (одиночная группа) — иначе строим один раз здесь.
+                    merge_tree = cached_merge_tree
+                    if merge_tree is None:
+                        _, merge_tree = hierarchical_merge_map_results(merge_inputs, chunks)
                     ev_index = top_evidence_from_tree(merge_tree, limit=40)
                 except Exception:
                     ev_index = []
