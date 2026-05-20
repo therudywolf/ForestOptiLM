@@ -3,12 +3,21 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
 _FILE_PATH_RE = re.compile(r"\[FILE_PATH:\s*([^\]]+)\]", re.I)
+
+
+def _merge_findings_cap() -> int:
+    """Верхний предел числа находок на уровне merge (env NOCTURNE_MERGE_FINDINGS_CAP)."""
+    raw = os.getenv("NOCTURNE_MERGE_FINDINGS_CAP", "").strip()
+    if raw.isdigit() and int(raw) > 0:
+        return int(raw)
+    return 1000
 
 
 def _extract_file_path(chunk_text: str, fallback: str = "") -> str:
@@ -28,7 +37,10 @@ def _parse_map_item(raw: str) -> dict[str, Any] | None:
     return obj if isinstance(obj, dict) else None
 
 
-def _merge_findings(items: list[dict[str, Any]], max_findings: int = 200) -> list[dict[str, Any]]:
+def _merge_findings(
+    items: list[dict[str, Any]], max_findings: int | None = None,
+) -> list[dict[str, Any]]:
+    cap = max_findings if max_findings is not None else _merge_findings_cap()
     out: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str]] = set()
     for obj in items:
@@ -44,7 +56,7 @@ def _merge_findings(items: list[dict[str, Any]], max_findings: int = 200) -> lis
                 continue
             seen.add(key)
             out.append(f)
-            if len(out) >= max_findings:
+            if len(out) >= cap:
                 return out
     return out
 
@@ -114,7 +126,7 @@ def hierarchical_merge_map_results(
 
     dir_rollups = _rollup_level(by_dir, "directory")
 
-    corpus_findings = _merge_findings(list(file_rollups.values()), max_findings=300)
+    corpus_findings = _merge_findings(list(file_rollups.values()))
     corpus: dict[str, Any] = {
         "level": "corpus",
         "file": "CORPUS",

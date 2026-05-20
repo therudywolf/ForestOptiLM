@@ -164,7 +164,8 @@ depends on LM Studio throughput, scout threshold, and hardware. Use **scout** +
 | Variable | Default | Meaning |
 |----------|---------|---------|
 | `NOCTURNE_STREAMING_FILE_BYTES` | `52428800` (50 MiB) | Stream plain files at or above this size (`0` = always load whole file) |
-| `NOCTURNE_MAX_ARCHIVE_BYTES` | `8589934592` (8 GiB) | Refuse to extract larger archives |
+| `NOCTURNE_MAX_ARCHIVE_BYTES` | `8589934592` (8 GiB) | Refuse to extract larger (compressed) archives |
+| `NOCTURNE_MAX_UNCOMPRESSED_BYTES` | `8589934592` (8 GiB) | Refuse to extract if total **uncompressed** size exceeds this (zip/tar/gz bomb guard; `0` = off) |
 | `NOCTURNE_MAX_CHUNKS_IN_RAM` | `12000` | Spill MAP chunks to SQLite above this count |
 | `NOCTURNE_MAP_BATCH_SIZE` | `workers × 4` | MAP concurrency batch size (limits peak in-flight tasks) |
 | `NOCTURNE_MAP_NORMALIZE_SPILL` | `2500` | Spill normalized MAP JSON to SQLite before merge (`0` = keep all in RAM) |
@@ -175,7 +176,9 @@ depends on LM Studio throughput, scout threshold, and hardware. Use **scout** +
 - **Быстро / Глубоко / 1M+** — run profiles in one click.
 - **Оценка (dry-run)** — chunk/file estimates and rough ETA without LLM calls.
 - **История** — recent runs from metrics DB.
-- **Продолжить** — resume an interrupted MAP job from SQLite cache (same file/folder + query).
+- **Продолжить** — resume an interrupted MAP job from SQLite cache. Resume matches
+  on file/folder + query **and** run parameters (chunk size, MAP model, composer):
+  changing the model or profile starts a fresh job rather than reusing stale chunks.
 - Large file / ZIP / folder → **auto** large_corpus preset on Start.
 
 MAP checkpoints and job metadata live under `.nocturne_cache/` (or `NOCTURNE_CACHE_DIR`).
@@ -194,6 +197,10 @@ The last incomplete job pointer is stored in `.local/last_job.json` next to your
 
 Critical/high findings without `file + quote` in `evidence_refs` are
 automatically downgraded to **medium**.
+
+Findings are deduplicated by `(severity, type, explanation)` and capped per chunk
+and per merge level — see `NOCTURNE_MAX_FINDINGS_PER_CHUNK` and
+`NOCTURNE_MERGE_FINDINGS_CAP` to raise the limits for very large corpora.
 
 ## RAG
 
@@ -233,6 +240,8 @@ automatically downgraded to **medium**.
 | `NOCTURNE_MEGA_FILE_TOKEN_THRESHOLD` | `80000` | Mega-file part splitting threshold |
 | `NOCTURNE_MEGA_PART_FACTOR` | `6` | Coarse part multiplier for mega files |
 | `NOCTURNE_CACHE_TTL_DAYS` | `7` | MAP cache TTL in days (`0` = no expiry) |
+| `NOCTURNE_MAX_FINDINGS_PER_CHUNK` | `60` | Cap on deduplicated findings kept per MAP chunk |
+| `NOCTURNE_MERGE_FINDINGS_CAP` | `1000` | Cap on deduplicated findings per merge level (file/dir/corpus) |
 | `NOCTURNE_CONTEXT_SAFETY_MARGIN` | *(adaptive)* | Fixed token margin; default is ~15% of model context (512–8192) |
 | `NOCTURNE_SCOUT_THRESHOLD` | `0.35` | Default relevance threshold when scout is enabled from env |
 | `NOCTURNE_RUN_INTEGRATION` | — | Set `1` to run live LM Studio integration tests |

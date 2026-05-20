@@ -61,6 +61,11 @@ def _iter_files(paths: Iterable[Path]) -> list[Path]:
                 dirnames[:] = [d for d in dirnames if not _is_hidden_or_system(Path(d))]
                 root_path = Path(root)
                 for fname in filenames:
+                    # Пропускаем служебные файлы инструмента (в т.ч. устаревший
+                    # .nocturne_manifest.json), чтобы не засорять корпус и не
+                    # дестабилизировать corpus_fingerprint / job_id.
+                    if fname.lower().startswith(".nocturne"):
+                        continue
                     file_path = root_path / fname
                     suffix = ".tar.gz" if fname.lower().endswith(".tar.gz") else file_path.suffix.lower()
                     if suffix in _ALLOWED_SUFFIXES:

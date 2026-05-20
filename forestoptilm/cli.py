@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import sys
 from pathlib import Path
 
@@ -72,10 +73,29 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         model = next((m for m in models if "embed" not in m.lower()), models[0])
 
-    chunk_size = compute_dynamic_chunk_size(8096, SYSTEM_PROMPT_MAP, args.query)
+    # Кап чанка ставим в env ДО вычисления chunk_size, иначе профильный
+    # max_chunk_tokens не применился бы (compute_dynamic_chunk_size читает env).
     if max_chunk:
-        import os
         os.environ["NOCTURNE_MAX_CHUNK_TOKENS"] = str(max_chunk)
+
+    # Реальный контекст модели из LM Studio вместо хардкода 8096.
+    from processor import CONTEXT_FALLBACK, resolve_runtime_model_context
+
+    model_context = CONTEXT_FALLBACK
+    try:
+        ctx, ctx_source, _state = resolve_runtime_model_context(
+            base_url, api_key, model,
+            wait_for_loaded=True, max_wait_seconds=180.0,
+        )
+        if ctx:
+            model_context = ctx
+            print(f"Model context: {ctx} (source={ctx_source})")
+        else:
+            print(f"Model context unavailable, fallback {CONTEXT_FALLBACK}", file=sys.stderr)
+    except Exception as exc:
+        print(f"Context detection failed, fallback {CONTEXT_FALLBACK}: {exc}", file=sys.stderr)
+
+    chunk_size = compute_dynamic_chunk_size(model_context, SYSTEM_PROMPT_MAP, args.query)
 
     composer = args.composer.strip() or (model if profile.get("composer_enabled") else None)
     scout_m = args.scout_model.strip() or None
@@ -90,6 +110,9 @@ def main(argv: list[str] | None = None) -> int:
             args.path,
             args.query,
             file_paths=_iter_files([corpus_root]) if corpus_root.is_dir() else None,
+            chunk_size=chunk_size,
+            model=model,
+            composer_model=composer,
         )
         result = asyncio.run(
             run_map_reduce(
@@ -101,6 +124,7 @@ def main(argv: list[str] | None = None) -> int:
                 workers=workers,
                 dynamic_chunk_size=chunk_size,
                 job_id=job_id,
+                max_context_tokens=model_context,
                 composer_model=composer,
                 scout_mode=scout_mode,
                 scout_relevance_threshold=scout_threshold,
