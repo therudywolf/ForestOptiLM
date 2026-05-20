@@ -93,6 +93,19 @@ def max_archive_extract_bytes() -> int:
         return 8 * 1024 * 1024 * 1024
 
 
+def max_uncompressed_bytes() -> int:
+    """Cap on the total *uncompressed* payload of an archive (decompression-bomb guard).
+
+    Reads ``NOCTURNE_MAX_UNCOMPRESSED_BYTES`` (default 8 GiB). A value of 0
+    disables the limit.
+    """
+    raw = os.getenv("NOCTURNE_MAX_UNCOMPRESSED_BYTES", "8589934592").strip()  # 8 GiB
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 8 * 1024 * 1024 * 1024
+
+
 def should_stream_plain_file(path: Path) -> bool:
     """Plain-text-like files over threshold are read line-by-line (bounded RAM)."""
     th = streaming_threshold_bytes()

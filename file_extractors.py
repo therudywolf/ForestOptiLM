@@ -24,6 +24,7 @@ import gzip
 import io
 import json
 import logging
+import os
 import re
 import tarfile
 import zipfile
@@ -321,6 +322,8 @@ TEXT_EXTRACTORS: dict[str, Callable[[Path], str]] = {
     ".r":    _read_plain_text,
     ".lua":  _read_plain_text,
     ".dart": _read_plain_text,
+    # Markup data — kept consistent with large_corpus_io.STREAMING_PLAIN_SUFFIXES
+    ".xml":  _read_plain_text,
 }
 
 TABLE_EXTRACTORS: dict[str, Callable[[Path], pd.DataFrame]] = {
@@ -336,7 +339,7 @@ ARCHIVE_EXTENSIONS = {".zip", ".tar", ".gz", ".tgz"}
 
 # Extensions to skip silently (binary artifacts, noise)
 _SKIP_EXTENSIONS = {
-    ".xml", ".class", ".jar", ".war", ".ear",
+    ".class", ".jar", ".war", ".ear",
     ".pyc", ".pyo", ".pyd",
     ".exe", ".dll", ".so", ".dylib",
     ".ico", ".svg",
@@ -421,30 +424,115 @@ def _extract_single_file(path: Path) -> tuple[ContentKind, str | pd.DataFrame]:
         raise ParseError(f"Cannot read unknown file: {exc}") from exc
 
 
+# Streaming copy chunk size for .gz extraction.
+_GZ_CHUNK = 1024 * 1024  # 1 MiB
+
+
+def _max_uncompressed_bytes() -> int:
+    """Cap on total uncompressed archive payload (decompression-bomb guard).
+
+    Read directly from the environment to avoid a circular import with
+    large_corpus_io (which imports this module). A value of 0 disables the limit.
+    """
+    raw = os.getenv("NOCTURNE_MAX_UNCOMPRESSED_BYTES", "8589934592").strip()  # 8 GiB
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 8 * 1024 * 1024 * 1024
+
+
+def _is_within(base: Path, target: Path) -> bool:
+    """True iff ``target`` is ``base`` itself or nested inside it.
+
+    Uses os.path.commonpath on resolved, normalized paths so that a sibling
+    such as ``/tmp/foobar`` is NOT considered inside ``/tmp/foo``. Works on
+    Windows (case-insensitive, drive-aware): commonpath raises ValueError for
+    paths on different drives, which is treated as "not within".
+    """
+    try:
+        base_r = base.resolve()
+        target_r = target.resolve()
+    except (OSError, RuntimeError):
+        return False
+    try:
+        return os.path.commonpath([str(base_r), str(target_r)]) == str(base_r)
+    except ValueError:
+        # Different drives / mix of absolute and relative — cannot be within.
+        return False
+
+
 def _extract_archive_to_dir(archive_path: Path, destination: Path) -> None:
     name = archive_path.name.lower()
     suf = archive_path.suffix.lower()
+    dest_root = destination.resolve()
+    limit = _max_uncompressed_bytes()
     try:
         if suf == ".zip":
             with zipfile.ZipFile(archive_path, "r") as zf:
+                total = 0
                 for member in zf.infolist():
-                    target = (destination / member.filename).resolve()
-                    if not str(target).startswith(str(destination.resolve())):
-                        logger.warning("Skip suspicious zip member outside target dir: %s", member.filename)
+                    target = destination / member.filename
+                    if not _is_within(dest_root, target):
+                        logger.warning(
+                            "Skip suspicious zip member outside target dir: %s",
+                            member.filename,
+                        )
                         continue
+                    total += int(member.file_size)
+                    if limit and total > limit:
+                        raise ParseError(
+                            f"Archive uncompressed size exceeds "
+                            f"NOCTURNE_MAX_UNCOMPRESSED_BYTES ({limit}): {archive_path}",
+                        )
                     zf.extract(member, destination)
         elif name.endswith(".tar.gz") or suf in {".tar", ".tgz"}:
             with tarfile.open(archive_path, "r:*") as tf:
+                total = 0
                 for member in tf.getmembers():
-                    target = (destination / member.name).resolve()
-                    if not str(target).startswith(str(destination.resolve())):
-                        logger.warning("Skip suspicious tar member outside target dir: %s", member.name)
+                    if member.issym() or member.islnk():
+                        logger.warning(
+                            "Skip link member in tar (potential escape): %s",
+                            member.name,
+                        )
                         continue
+                    if member.isdev():
+                        logger.warning("Skip device member in tar: %s", member.name)
+                        continue
+                    member_name = member.name
+                    if os.path.isabs(member_name) or member_name.startswith(("/", "\\")):
+                        logger.warning(
+                            "Skip tar member with absolute name: %s", member_name,
+                        )
+                        continue
+                    target = destination / member_name
+                    if not _is_within(dest_root, target):
+                        logger.warning(
+                            "Skip suspicious tar member outside target dir: %s",
+                            member_name,
+                        )
+                        continue
+                    total += int(member.size)
+                    if limit and total > limit:
+                        raise ParseError(
+                            f"Archive uncompressed size exceeds "
+                            f"NOCTURNE_MAX_UNCOMPRESSED_BYTES ({limit}): {archive_path}",
+                        )
                     tf.extract(member, destination)
         elif suf == ".gz":
             out_file = destination / archive_path.stem
+            written = 0
             with gzip.open(archive_path, "rb") as gz, out_file.open("wb") as out:
-                out.write(gz.read())
+                while True:
+                    chunk = gz.read(_GZ_CHUNK)
+                    if not chunk:
+                        break
+                    written += len(chunk)
+                    if limit and written > limit:
+                        raise ParseError(
+                            f"Gzip uncompressed size exceeds "
+                            f"NOCTURNE_MAX_UNCOMPRESSED_BYTES ({limit}): {archive_path}",
+                        )
+                    out.write(chunk)
         else:
             raise ParseError(f"Unsupported archive type: {archive_path}")
     except ParseError:
