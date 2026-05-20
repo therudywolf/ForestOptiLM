@@ -86,8 +86,14 @@ def build_job_id(
     user_query: str,
     *,
     corpus_fingerprint: str | None = None,
+    params: str | None = None,
 ) -> str:
-    """job_id = hash(file_path + mtime + user_query [+ corpus fingerprint])."""
+    """job_id = hash(file_path + mtime + user_query [+ corpus fingerprint] [+ run params]).
+
+    params кодирует параметры прогона, влияющие на состав/текст чанков и MAP-результат
+    (размер чанка, модель, composer). Без них кэш по chunk_index мог бы вернуть ответ,
+    посчитанный для другого текста того же индекса при смене модели/контекста.
+    """
     try:
         stat = file_path.stat()
         payload = f"{file_path!s}{stat.st_mtime}{user_query}"
@@ -95,6 +101,8 @@ def build_job_id(
         payload = f"{file_path!s}{user_query}"
     if corpus_fingerprint:
         payload = f"{payload}|corpus:{corpus_fingerprint}"
+    if params:
+        payload = f"{payload}|params:{params}"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
 
 

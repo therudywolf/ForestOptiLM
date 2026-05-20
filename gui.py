@@ -1429,16 +1429,10 @@ class NocturneApp(ctk.CTk):
         self._last_result_text = ""
         self._last_result_df   = None
         self._stop_requested   = False
+        # job_id вычисляется внутри обработки (учитывает chunk_size/model/composer)
+        # и приходит в GUI через MSG_JOB_ID. Здесь не предугадываем, иначе «Стоп»
+        # до прихода MSG_JOB_ID пометил бы несуществующий job.
         self._active_job_id = None
-        try:
-            from processor import compute_job_id
-
-            if self._file_path is not None:
-                self._active_job_id = compute_job_id(self._file_path, query)
-            elif self._folder_path is not None:
-                self._active_job_id = compute_job_id(self._folder_path, query)
-        except Exception:
-            self._active_job_id = None
         self._result_text.delete("1.0", "end")
         self._progress_bar.set(0)
         self._running = True
@@ -1831,6 +1825,15 @@ class NocturneApp(ctk.CTk):
                     elif phase == "batch":
                         self._set_status(f"Батч: {cur} / {total}…")
                         self._append_log_line(f"[BATCH] {cur}/{total}", "batch")
+                    elif phase == "stopped":
+                        self._set_status(
+                            f"Остановлено: {cur}/{total} чанков в кэше — "
+                            "нажмите «Продолжить» для возобновления",
+                            "#f59e0b",
+                        )
+                        self._append_log_line(
+                            f"[STOPPED] map {cur}/{total} cached", "preflight",
+                        )
 
                 elif t == MSG_RESULT:
                     text = msg.get("text", "")
@@ -2199,7 +2202,12 @@ def _run_processing(
     try:
         if kind == "text":
             chunks: list[str] = payload  # type: ignore[assignment]
-            job_id = compute_job_id(file_path, query)
+            job_id = compute_job_id(
+                file_path, query,
+                chunk_size=dynamic_chunk_size,
+                model=model,
+                composer_model=composer_model,
+            )
             out_queue.put({"type": MSG_JOB_ID, "job_id": job_id})
             result = loop.run_until_complete(
                 run_map_reduce(
@@ -2222,12 +2230,18 @@ def _run_processing(
                     scout_relevance_threshold=scout_relevance_threshold,
                     scout_model=scout_model,
                     source_path=source_path,
+                    stop_flag=stop_flag,
                 )
             )
             out_queue.put({"type": MSG_RESULT, "text": result})
         elif kind == "vision":
             vchunks: list[str] = payload  # type: ignore[assignment]
-            job_id = compute_job_id(file_path, query)
+            job_id = compute_job_id(
+                file_path, query,
+                chunk_size=dynamic_chunk_size,
+                model=model,
+                composer_model=composer_model,
+            )
             out_queue.put({"type": MSG_JOB_ID, "job_id": job_id})
             result = loop.run_until_complete(
                 run_map_reduce(
@@ -2250,6 +2264,7 @@ def _run_processing(
                     scout_relevance_threshold=scout_relevance_threshold,
                     scout_model=scout_model,
                     source_path=source_path,
+                    stop_flag=stop_flag,
                 )
             )
             out_queue.put({"type": MSG_RESULT, "text": result})
@@ -2326,7 +2341,13 @@ def _run_folder_batch(
         })
 
     id_root = job_id_root or folder_path
-    job_id = compute_job_id(id_root, query, file_paths=filtered_files)
+    job_id = compute_job_id(
+        id_root, query,
+        file_paths=filtered_files,
+        chunk_size=dynamic_chunk_size,
+        model=model,
+        composer_model=composer_model,
+    )
     corpus_src = source_path or str(id_root)
     out_queue.put({"type": MSG_JOB_ID, "job_id": job_id})
     chunk_store = ChunkStore(job_id)
@@ -2385,7 +2406,14 @@ def _run_folder_batch(
             from corpus_manifest import build_corpus_manifest, manifest_to_json
 
             manifest = build_corpus_manifest([folder_path])
-            manifest_path = folder_path / ".nocturne_manifest.json"
+            # Манифест пишем в кэш-директорию, а НЕ в исходную папку:
+            # иначе файл попадёт в корпус на следующем прогоне и сдвинет
+            # corpus_fingerprint → нестабильный job_id → resume не работает.
+            from cache import CACHE_DIR
+
+            manifest_dir = CACHE_DIR / "manifests"
+            manifest_dir.mkdir(parents=True, exist_ok=True)
+            manifest_path = manifest_dir / f"{job_id}.json"
             manifest_path.write_text(manifest_to_json(manifest), encoding="utf-8")
             out_queue.put({
                 "type": MSG_TRACE,
@@ -2432,6 +2460,7 @@ def _run_folder_batch(
                     scout_relevance_threshold=scout_relevance_threshold,
                     scout_model=scout_model,
                     source_path=corpus_src,
+                    stop_flag=stop_flag,
                 )
             )
         finally:

@@ -146,19 +146,6 @@ SYSTEM_PROMPT_REDUCE = (
     "8. Do NOT list Critical/High items in Comprehensive Findings unless they appear in Evidence Matrix.\n"
 )
 
-# Промежуточное слияние MAP JSON (не финальный markdown)
-SYSTEM_PROMPT_MERGE_MAP = (
-    "YOU MUST FOLLOW THESE RULES WITHOUT EXCEPTION:\n"
-    "1. DO NOT write thinking or reasoning text.\n"
-    "2. Wrap your entire response in <results> and </results> tags.\n"
-    "3. Inside <results> write ONE valid JSON object (no markdown fences) with this schema:\n"
-    "   { chunk_index: number, file: string, query_alignment: string,\n"
-    "     no_relevant_data: boolean, findings: [...], recommendations: [...] }\n"
-    "4. Merge all input MAP JSON objects: union findings, deduplicate similar items, preserve all evidence_refs.\n"
-    "5. If all inputs have no_relevant_data=true, set no_relevant_data=true and use empty arrays.\n"
-    "6. JSON must be valid UTF-8.\n"
-)
-
 # Финальный синтез: объединяет готовые markdown-секции по файлам в единый отчёт
 SYSTEM_PROMPT_SYNTHESIZE = (
     "YOU MUST FOLLOW THESE RULES WITHOUT EXCEPTION:\n"
@@ -1490,6 +1477,14 @@ def _extract_results_tag(text: str) -> str:
     if _THINKING_PATTERNS.match(first_line):
         return ""
 
+    # Unwrapped JSON / fenced output: many local models emit a valid JSON object
+    # (or ```json fence) without the <results> wrapper. Keep it — downstream
+    # parsers (_parse_map_json_payload / _parse_scout_json_payload) handle it.
+    # Without this, a valid MAP result >500 chars would be silently discarded.
+    stripped = text.strip()
+    if stripped[:1] in ("{", "[") or stripped.startswith("```"):
+        return stripped
+
     # If text is long and never gets to <results>, it's unformatted reasoning
     if len(text) > 500 and not re.search(r"<results>", text, re.IGNORECASE):
         # Last-resort: try to salvage if there's a clear answer-like block after "---" or heading
@@ -1796,13 +1791,23 @@ def _dedupe_map_findings(obj: dict[str, Any], max_findings: int = 30) -> dict[st
     return out
 
 
+def _max_findings_per_chunk() -> int:
+    """Лимит находок на один MAP-чанк (env NOCTURNE_MAX_FINDINGS_PER_CHUNK)."""
+    raw = os.getenv("NOCTURNE_MAX_FINDINGS_PER_CHUNK", "").strip()
+    if raw.isdigit() and int(raw) > 0:
+        return int(raw)
+    return 60
+
+
 def _to_normalized_map_json_text(
     raw: str,
     chunk_text: str = "",
-    max_findings_per_chunk: int = 30,
+    max_findings_per_chunk: int | None = None,
 ) -> str | None:
     if not raw or not raw.strip():
         return None
+    if max_findings_per_chunk is None:
+        max_findings_per_chunk = _max_findings_per_chunk()
     inner = _extract_results_tag(raw) if "<results>" in raw.lower() else raw
     parsed = _parse_map_json_payload(inner)
     if not parsed:
@@ -1856,14 +1861,32 @@ def compute_job_id(
     user_query: str,
     *,
     file_paths: list[Path] | None = None,
+    chunk_size: int | None = None,
+    model: str | None = None,
+    composer_model: str | None = None,
 ) -> str:
-    """job_id для кэша: инвалидация при смене файла, запроса или состава корпуса."""
+    """job_id для кэша: инвалидация при смене файла, запроса, состава корпуса
+    или параметров прогона (размер чанка, модель, composer).
+
+    chunk_size/model влияют на текст чанка под данным chunk_index — без них
+    закэшированный MAP-ответ мог быть посчитан для другого фрагмента.
+    """
     fingerprint: str | None = None
     if file_paths:
         from cache import corpus_fingerprint_from_paths
 
         fingerprint = corpus_fingerprint_from_paths(file_paths)
-    return build_job_id(file_path, user_query, corpus_fingerprint=fingerprint)
+    params_bits: list[str] = []
+    if chunk_size is not None:
+        params_bits.append(f"cs={int(chunk_size)}")
+    if model:
+        params_bits.append(f"m={model}")
+    if composer_model:
+        params_bits.append(f"c={composer_model}")
+    params = "|".join(params_bits) if params_bits else None
+    return build_job_id(
+        file_path, user_query, corpus_fingerprint=fingerprint, params=params,
+    )
 
 
 def _parse_scout_json_payload(raw: str) -> dict[str, Any] | None:
@@ -1959,53 +1982,6 @@ def _merge_map_json_deterministic(map_results: list[str]) -> str:
         normalized_single = _to_normalized_map_json_text(map_results[0].strip())
         return normalized_single or map_results[0].strip()
     return _fallback_merge_map_json(map_results)
-
-
-async def _merge_map_json_recursive(
-    map_results: list[str],
-    user_query: str,
-    max_context_tokens: int,
-    base_url: str,
-    api_key: str,
-    reduce_model: str,
-    semaphore: Union[asyncio.Semaphore, AdaptiveSemaphore],
-    on_progress: Callable[..., None] | None,
-    api_mode: str = "native",
-    client: httpx.AsyncClient | None = None,
-    language_hint: str = "",
-) -> str:
-    """
-    Иерархическое детерминированное слияние MAP JSON в один JSON.
-    LLM не используется — только deterministic union через _fallback_merge_map_json.
-    Это гарантирует сохранность всех findings из всех файлов.
-    """
-    from parser import count_tokens
-
-    if not map_results:
-        return ""
-    if len(map_results) == 1:
-        normalized_single = _to_normalized_map_json_text(map_results[0].strip())
-        return normalized_single or map_results[0].strip()
-
-    # Оцениваем средний размер одного результата и подбираем размер группы merge
-    sample_n = min(10, len(map_results))
-    sample_tokens = count_tokens("\n\n---\n\n".join(map_results[:sample_n]))
-    tokens_per = max(1, sample_tokens // sample_n)
-    merge_token_budget = 12000
-    group_size = max(2, min(32, len(map_results), merge_token_budget // tokens_per))
-    next_level: list[str] = []
-    total_groups = (len(map_results) + group_size - 1) // group_size
-    for i in range(0, len(map_results), group_size):
-        group = map_results[i : i + group_size]
-        if on_progress:
-            try:
-                on_progress(i // group_size + 1, total_groups, "reduce_merge", 0, merge_level=1)
-            except TypeError:
-                on_progress(i // group_size + 1, total_groups, "reduce_merge")
-        next_level.append(_fallback_merge_map_json(group))
-    if len(next_level) == 1:
-        return next_level[0]
-    return _fallback_merge_map_json(next_level)
 
 
 def _count_report_sections(text: str) -> int:
@@ -2275,6 +2251,62 @@ def _concatenate_sections_fallback(sections: list[str], user_query: str, languag
     )
 
 
+def _coalesce_file_groups(
+    file_groups: dict[str, list[str]],
+    max_tokens_per_group: int,
+) -> dict[str, list[str]]:
+    """
+    Упаковать мелкие файловые группы в более крупные по бюджету токенов.
+
+    Без этого посекционный REDUCE делает один LLM-вызов на каждый файл —
+    для корпуса в тысячи файлов это тысячи вызовов REDUCE поверх MAP.
+    После упаковки число REDUCE-вызовов масштабируется по объёму данных.
+    """
+    from parser import count_tokens
+
+    if len(file_groups) <= 1:
+        return dict(file_groups)
+
+    sized: list[tuple[str, list[str], int]] = []
+    for key, items in file_groups.items():
+        toks = sum(count_tokens(s) for s in items)
+        sized.append((key, items, toks))
+    # По возрастанию: мелкие группы пакуются вместе, крупные уходят отдельно.
+    sized.sort(key=lambda t: t[2])
+
+    out: dict[str, list[str]] = {}
+    cur_keys: list[str] = []
+    cur_items: list[str] = []
+    cur_toks = 0
+    budget = max(2000, max_tokens_per_group)
+
+    def _flush() -> None:
+        nonlocal cur_keys, cur_items, cur_toks
+        if not cur_items:
+            return
+        label = cur_keys[0] if len(cur_keys) == 1 else f"{cur_keys[0]} (+{len(cur_keys) - 1})"
+        base = label
+        n = 2
+        while label in out:
+            label = f"{base} #{n}"
+            n += 1
+        out[label] = list(cur_items)
+        cur_keys = []
+        cur_items = []
+        cur_toks = 0
+
+    for key, items, toks in sized:
+        if cur_items and cur_toks + toks > budget:
+            _flush()
+        cur_keys.append(key)
+        cur_items.extend(items)
+        cur_toks += toks
+        if cur_toks >= budget:
+            _flush()
+    _flush()
+    return out
+
+
 async def _section_reduce_groups(
     file_groups: dict[str, list[str]],
     user_query: str,
@@ -2541,6 +2573,7 @@ async def run_map_reduce(
     scout_min_chunks: int = 8,
     scout_model: str | None = None,
     source_path: str = "",
+    stop_flag: Callable[[], bool] | None = None,
 ) -> str:
     """
     MAP с кэшем по job_id; адаптивный семафор; иерархический merge MAP JSON и финальный REDUCE.
@@ -2548,6 +2581,8 @@ async def run_map_reduce(
     max_context_tokens — бюджет контекста модели для merge (по умолчанию CONTEXT_FALLBACK).
     composer_model — отдельная модель для merge/reduce/refine (иначе model).
     vision_model — модель для чанков с [VISION_FILE:...] (иначе model).
+    stop_flag — кооперативная отмена: проверяется между батчами MAP. При остановке
+    прогресс остаётся в кэше, job помечается paused, REDUCE не запускается.
     """
     if not chunks:
         return ""
@@ -2645,6 +2680,15 @@ async def run_map_reduce(
     retrying_chunks: set[int] = set()
     server_5xx_count = 0
     pause_until = 0.0
+    stop_triggered = False
+
+    def _stopped() -> bool:
+        if stop_flag is None:
+            return False
+        try:
+            return bool(stop_flag())
+        except Exception:
+            return False
     current_loaded_model: str | None = None
     model_instance_pool: dict[str, list[str]] = {}
     dual_instance_active = False
@@ -3152,8 +3196,12 @@ async def run_map_reduce(
             return max(1, workers) * 4
 
         async def _run_phase(indices: list[int], *, phase_name: str, phase_model: str, is_vision: bool) -> None:
+            nonlocal stop_triggered
             pending = [i for i in indices if i not in map_results_by_index]
             if not pending:
+                return
+            if _stopped():
+                stop_triggered = True
                 return
             if on_progress:
                 active, in_flight, retrying, effective_workers = _counts_snapshot()
@@ -3173,6 +3221,9 @@ async def run_map_reduce(
             await _ensure_model_ready(phase_model, phase_name)
             batch_sz = _map_batch_size()
             for offset in range(0, len(pending), batch_sz):
+                if _stopped():
+                    stop_triggered = True
+                    return
                 batch = pending[offset : offset + batch_sz]
                 phase_results = await asyncio.gather(
                     *[
@@ -3320,6 +3371,9 @@ async def run_map_reduce(
                 text_indices, score_map, scout_relevance_threshold,
             )
             scout_skipped = len(skipped_list)
+            # Пропущенные scout'ом чанки засчитываем как завершённые, иначе
+            # прогресс-бар MAP никогда не дойдёт до 100% при включённом scout.
+            completed_count += scout_skipped
             if on_progress:
                 on_progress(
                     len(map_text_indices),
@@ -3340,6 +3394,35 @@ async def run_map_reduce(
 
         await _run_phase(map_text_indices, phase_name="text_map", phase_model=model, is_vision=False)
         await _run_phase(vision_indices, phase_name="vision_map", phase_model=vision_llm, is_vision=True)
+
+        if stop_triggered or _stopped():
+            # Кооперативная остановка: каждый завершённый чанк уже в SQLite-кэше
+            # (set_cached_response). REDUCE не запускаем, job помечаем paused —
+            # на «Продолжить» прогон возобновится с того же job_id.
+            if job_id:
+                try:
+                    from cache import mark_job_paused
+
+                    mark_job_paused(job_id)
+                except Exception:
+                    pass
+            if on_progress:
+                try:
+                    on_progress(completed_count, len(chunks), "stopped", from_cache_count)
+                except TypeError:
+                    pass
+            _cleanup_models_after_run()
+            logger.info(
+                "run_map_reduce stopped by user: %s/%s chunks done",
+                completed_count,
+                len(chunks),
+            )
+            return (
+                f"(Остановлено пользователем. MAP-чанков обработано: "
+                f"{completed_count}/{len(chunks)}. Прогресс сохранён в кэше — "
+                "нажмите «Продолжить» для возобновления.)"
+            )
+
         from map_result_store import MapResultStore, normalize_spill_threshold
 
         use_result_store = bool(job_id) and len(chunks) >= normalize_spill_threshold()
@@ -3468,7 +3551,13 @@ async def run_map_reduce(
                 pass
 
         ctx_limit = max_context_tokens if max_context_tokens is not None else CONTEXT_FALLBACK
-        reduce_max_tokens = min(8192, max(4096, dynamic_chunk_size + 2048))
+        # Резерв под ответ REDUCE не должен съедать всё окно: на моделях ~8k
+        # фикс 4096–8192 не оставлял места под входной JSON. Ограничиваем ~1/3
+        # контекста, оставляя ~2/3 под входные данные.
+        reduce_max_tokens = min(
+            8192,
+            max(1024, min(dynamic_chunk_size + 2048, ctx_limit // 3)),
+        )
         await _ensure_model_ready(reduce_model, "reduce")
         n_file_groups = len(file_groups)
         logger.info("File groups for reduce: %s", n_file_groups)
@@ -3535,10 +3624,19 @@ async def run_map_reduce(
                 )
         else:
             # ── НЕСКОЛЬКО ГРУПП: посекционный reduce + синтез ───────────────────
-            # Для каждой файловой группы — независимый параллельный reduce-вызов,
+            # Сначала пакуем мелкие файловые группы по бюджету токенов, чтобы
+            # число REDUCE-вызовов росло по объёму данных, а не по числу файлов.
+            reduce_groups = _coalesce_file_groups(file_groups, max(4000, ctx_limit // 2))
+            if len(reduce_groups) < n_file_groups:
+                logger.info(
+                    "REDUCE groups coalesced: %s files -> %s groups",
+                    n_file_groups,
+                    len(reduce_groups),
+                )
+            # Для каждой группы — независимый параллельный reduce-вызов,
             # затем финальный синтез секций в единый отчёт.
             sections = await _section_reduce_groups(
-                file_groups=file_groups,
+                file_groups=reduce_groups,
                 user_query=effective_query,
                 base_url=base_url,
                 api_key=api_key,
