@@ -167,6 +167,24 @@ def _to_int_in_range(value: object, default: int, lo: int, hi: int) -> int:
     return default
 
 
+def _to_float_in_range(value: object, default: float, lo: float, hi: float) -> float:
+    """Распарсить число (или строку) во float и обрезать в [lo, hi]."""
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, (int, float)):
+        f = float(value)
+        return max(lo, min(hi, f))
+    if isinstance(value, str):
+        s = value.strip().replace(",", ".")
+        if s:
+            try:
+                f = float(s)
+                return max(lo, min(hi, f))
+            except ValueError:
+                return default
+    return default
+
+
 def _load_all() -> dict[str, object]:
     global _cached
     if _cached is not None:
@@ -251,6 +269,9 @@ def load_ui_runtime_state() -> dict[str, object]:
         "max_chunk_tokens": 6000,
         "rag_index_dir": ".nocturne_index",
         "rag_top_k": 8,
+        "scout_mode": False,
+        "scout_threshold": 0.35,
+        "selected_scout_model": "",
         "model_context_cache": {},
     }
     path = _runtime_ui_path()
@@ -276,6 +297,9 @@ def load_ui_runtime_state() -> dict[str, object]:
         out["max_chunk_tokens"] = _to_int_in_range(data.get("max_chunk_tokens"), 6000, 500, 50000)
         out["rag_index_dir"] = str(data.get("rag_index_dir") or ".nocturne_index").strip() or ".nocturne_index"
         out["rag_top_k"] = _to_int_in_range(data.get("rag_top_k"), 8, 1, 100)
+        out["scout_mode"] = _to_bool(data.get("scout_mode"), False)
+        out["scout_threshold"] = _to_float_in_range(data.get("scout_threshold"), 0.35, 0.0, 1.0)
+        out["selected_scout_model"] = str(data.get("selected_scout_model") or "").strip()
         mcc = data.get("model_context_cache")
         out["model_context_cache"] = dict(mcc) if isinstance(mcc, dict) else {}
         return out
@@ -303,6 +327,9 @@ def save_ui_runtime_state(state: dict[str, object]) -> None:
         "max_chunk_tokens": _to_int_in_range(state.get("max_chunk_tokens"), 6000, 500, 50000),
         "rag_index_dir": str(state.get("rag_index_dir") or ".nocturne_index").strip() or ".nocturne_index",
         "rag_top_k": _to_int_in_range(state.get("rag_top_k"), 8, 1, 100),
+        "scout_mode": bool(state.get("scout_mode", False)),
+        "scout_threshold": _to_float_in_range(state.get("scout_threshold"), 0.35, 0.0, 1.0),
+        "selected_scout_model": str(state.get("selected_scout_model") or "").strip(),
     }
     mcc = state.get("model_context_cache")
     if isinstance(mcc, dict) and mcc:
