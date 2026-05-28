@@ -210,6 +210,11 @@ and per merge level — see `NOCTURNE_MAX_FINDINGS_PER_CHUNK` and
 2. Choose a file or folder, open the **RAG** tab, click **Build Index**.
 3. Enter a question and click **Ask**.
 
+Retrieval is **hybrid**: dense vectors (FAISS) for semantics + BM25 for exact
+tokens (`CVE-2024-3094`, hostnames, `pkg@version`), fused with Reciprocal Rank
+Fusion. If the embedding model/server is unavailable, BM25-only search still
+works — exact lookups don't depend on the embedder.
+
 ## Project Structure
 
 | File / dir | Purpose |
