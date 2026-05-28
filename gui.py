@@ -1826,6 +1826,10 @@ class NocturneApp(ctk.CTk):
                         preview = str(msg.get("preview", ""))[:200]
                         self._set_status("Категорирование (детерминированное)…", "lightgreen")
                         self._append_log_line(f"[CATEGORIZE] {preview}", "map_metrics")
+                    elif phase == "scan_diff":
+                        preview = str(msg.get("preview", ""))[:200]
+                        self._set_status("Сравнение с прошлым сканом…", "lightgreen")
+                        self._append_log_line(f"[SCAN DIFF] {preview}", "map_metrics")
                     elif phase == "reduce":
                         self._set_status(f"REDUCE: группа {cur} / {total}…")
                         self._append_log_line(f"[REDUCE] {cur}/{total}", "reduce")
