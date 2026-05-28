@@ -312,6 +312,29 @@ def parse_file(
     if not path.exists():
         raise ParseError(f"File not found: {path}")
 
+    # Record-aware: структурированные отчёты (JSON/JSONL/XML) разбиваем по
+    # записям (одна запись неделима между чанками), без хардкода форматов.
+    # Срабатывает раньше потокового текста, чтобы не рвать структуру по токенам.
+    from record_chunking import build_record_chunks, record_aware_enabled
+
+    if record_aware_enabled():
+        try:
+            from file_extractors import extract_file_metadata
+
+            rec_meta = extract_file_metadata(path, root_dir=root_dir)
+        except Exception:
+            rec_meta = None
+        try:
+            rec_chunks = build_record_chunks(
+                path, dynamic_chunk_size, root_dir=root_dir, file_meta=rec_meta,
+            )
+        except Exception as exc:
+            logger.debug("record-aware chunking skipped for %s: %s", path, exc)
+            rec_chunks = None
+        if rec_chunks:
+            logger.info("Parsed structured report (record-aware): %s chunks", len(rec_chunks))
+            return ("text", rec_chunks, None)
+
     from large_corpus_io import should_stream_plain_file, chunk_plain_file_streaming
 
     if should_stream_plain_file(path):
