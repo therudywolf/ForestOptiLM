@@ -2660,8 +2660,17 @@ async def run_map_reduce(
     reduce_model = (composer_model or model).strip() or model
     vision_llm = (vision_model or model).strip() or model
     scout_llm = (scout_model or model).strip() or model
+    # QueryPlan: понимание запроса (intent, ось группировки, контракт ответа).
+    from query_plan import build_query_plan, output_style_directive
+
+    query_plan = build_query_plan(user_query)
+    logger.info("QueryPlan: %s", query_plan.summary())
     # language_hint is derived from the ORIGINAL user_query so meta-prompt generation doesn't break it
     language_hint = "Ответь строго на русском языке." if _prefer_russian(user_query) else ""
+    # REDUCE/синтез получают доп. контракт ответа под intent запроса
+    # (diff-таблица для сравнения, ранжированный список для приоритизации и т.п.).
+    _out_directive = output_style_directive(query_plan)
+    reduce_hint = (language_hint + ("\n" + _out_directive if _out_directive else "")).strip()
     api_mode = api_mode.strip().lower()
     if api_mode not in {"native", "openai"}:
         api_mode = "native"
@@ -3615,7 +3624,7 @@ async def run_map_reduce(
                 semaphore,
                 reduce_max_tokens,
                 api_mode,
-                language_hint,
+                reduce_hint,
                 shared_client,
                 max_context_tokens=ctx_limit,
             )
@@ -3632,7 +3641,7 @@ async def run_map_reduce(
                     semaphore,
                     reduce_max_tokens,
                     api_mode,
-                    language_hint,
+                    reduce_hint,
                     shared_client,
                     max_context_tokens=ctx_limit,
                 )
@@ -3671,7 +3680,7 @@ async def run_map_reduce(
                 semaphore=semaphore,
                 reduce_max_tokens=reduce_max_tokens,
                 api_mode=api_mode,
-                language_hint=language_hint,
+                language_hint=reduce_hint,
                 client=shared_client,
                 max_context_tokens=ctx_limit,
                 on_progress=on_progress,
@@ -3685,7 +3694,7 @@ async def run_map_reduce(
                 semaphore=semaphore,
                 reduce_max_tokens=reduce_max_tokens,
                 api_mode=api_mode,
-                language_hint=language_hint,
+                language_hint=reduce_hint,
                 client=shared_client,
                 max_context_tokens=ctx_limit,
                 on_progress=on_progress,
