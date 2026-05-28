@@ -167,6 +167,7 @@ depends on LM Studio throughput, scout threshold, and hardware. Use **scout** +
 | `NOCTURNE_MAX_ARCHIVE_BYTES` | `8589934592` (8 GiB) | Refuse to extract larger (compressed) archives |
 | `NOCTURNE_MAX_UNCOMPRESSED_BYTES` | `8589934592` (8 GiB) | Refuse to extract if total **uncompressed** size exceeds this (zip/tar/gz bomb guard; `0` = off) |
 | `NOCTURNE_RECORD_AWARE` | `1` | Structure-preserving ingestion for JSON/JSONL/XML reports — records never split across chunks (`0` = legacy text/table path) |
+| `NOCTURNE_FINDINGS_MEMORY` | `1` | Persist normalized findings per run and show a diff (new/fixed/persistent) vs the previous scan of the same source (`0` = off) |
 | `NOCTURNE_RECORD_AWARE_MAX_BYTES` | `209715200` (200 MiB) | Above this, large JSON/XML falls back to streaming text (JSONL still streamed per record) |
 | `NOCTURNE_MAX_CHUNKS_IN_RAM` | `12000` | Spill MAP chunks to SQLite above this count |
 | `NOCTURNE_MAP_BATCH_SIZE` | `workers × 4` | MAP concurrency batch size (limits peak in-flight tasks) |

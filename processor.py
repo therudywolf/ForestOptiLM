@@ -3597,26 +3597,55 @@ async def run_map_reduce(
         n_file_groups = len(file_groups)
         logger.info("File groups for reduce: %s", n_file_groups)
 
-        # Детерминированное категорирование (Столп 3): считаем counts/топы в коде
-        # по dedup-ключу из QueryPlan и передаём REDUCE как «истину».
+        # Детерминированное категорирование (Столп 3) + память находок (Столп 5).
+        # Находки парсим один раз и переиспользуем для counts и для диффа сканов.
         reduce_hint_full = reduce_hint
         try:
-            from findings_aggregate import build_category_block
-
-            cat_block = build_category_block(
-                merge_inputs,
-                dedup_keys=query_plan.dedup_keys(),
-                axis=query_plan.group_by,
-                language=query_plan.language,
+            from findings_aggregate import (
+                categorize,
+                iter_findings_from_map,
+                summary_markdown,
             )
-            if cat_block:
-                reduce_hint_full = (reduce_hint + "\n\n" + cat_block).strip()
-                logger.info("Category block built (%d chars) for REDUCE", len(cat_block))
-                if on_progress:
-                    try:
-                        on_progress(1, 1, "categorize", from_cache_count, preview=cat_block[:300])
-                    except TypeError:
-                        pass
+
+            agg_findings = list(iter_findings_from_map(merge_inputs))
+            if agg_findings:
+                summ = categorize(
+                    agg_findings,
+                    dedup_keys=query_plan.dedup_keys(),
+                    axis=query_plan.group_by,
+                )
+                cat_block = summary_markdown(summ, language=query_plan.language)
+                if cat_block:
+                    reduce_hint_full = (reduce_hint + "\n\n" + cat_block).strip()
+                    logger.info("Category block built (%d chars) for REDUCE", len(cat_block))
+                    if on_progress:
+                        try:
+                            on_progress(1, 1, "categorize", from_cache_count, preview=cat_block[:300])
+                        except TypeError:
+                            pass
+                # Память находок: сохранить скан и сравнить с прошлым по тому же источнику.
+                try:
+                    from findings_store import findings_memory_enabled, record_and_diff
+
+                    if job_id and source_path and findings_memory_enabled():
+                        diff_block = record_and_diff(
+                            job_id=job_id,
+                            source_path=source_path,
+                            query=user_query,
+                            findings=agg_findings,
+                            totals=dict(summ.by_severity),
+                            language=query_plan.language,
+                        )
+                        if diff_block:
+                            reduce_hint_full = (reduce_hint_full + "\n\n" + diff_block).strip()
+                            logger.info("Scan diff vs previous appended for source")
+                            if on_progress:
+                                try:
+                                    on_progress(1, 1, "scan_diff", from_cache_count, preview=diff_block[:300])
+                                except TypeError:
+                                    pass
+                except Exception as exc:
+                    logger.warning("Findings memory skipped: %s", sanitize_for_log(str(exc)[:160]))
         except Exception as exc:
             logger.warning("Category aggregation skipped: %s", sanitize_for_log(str(exc)[:160]))
 
