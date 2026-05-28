@@ -3597,6 +3597,29 @@ async def run_map_reduce(
         n_file_groups = len(file_groups)
         logger.info("File groups for reduce: %s", n_file_groups)
 
+        # Детерминированное категорирование (Столп 3): считаем counts/топы в коде
+        # по dedup-ключу из QueryPlan и передаём REDUCE как «истину».
+        reduce_hint_full = reduce_hint
+        try:
+            from findings_aggregate import build_category_block
+
+            cat_block = build_category_block(
+                merge_inputs,
+                dedup_keys=query_plan.dedup_keys(),
+                axis=query_plan.group_by,
+                language=query_plan.language,
+            )
+            if cat_block:
+                reduce_hint_full = (reduce_hint + "\n\n" + cat_block).strip()
+                logger.info("Category block built (%d chars) for REDUCE", len(cat_block))
+                if on_progress:
+                    try:
+                        on_progress(1, 1, "categorize", from_cache_count, preview=cat_block[:300])
+                    except TypeError:
+                        pass
+        except Exception as exc:
+            logger.warning("Category aggregation skipped: %s", sanitize_for_log(str(exc)[:160]))
+
         refine_used = False
         draft: str = ""
         cached_merge_tree: dict[str, Any] | None = None
@@ -3624,7 +3647,7 @@ async def run_map_reduce(
                 semaphore,
                 reduce_max_tokens,
                 api_mode,
-                reduce_hint,
+                reduce_hint_full,
                 shared_client,
                 max_context_tokens=ctx_limit,
             )
@@ -3641,7 +3664,7 @@ async def run_map_reduce(
                     semaphore,
                     reduce_max_tokens,
                     api_mode,
-                    reduce_hint,
+                    reduce_hint_full,
                     shared_client,
                     max_context_tokens=ctx_limit,
                 )
@@ -3694,7 +3717,7 @@ async def run_map_reduce(
                 semaphore=semaphore,
                 reduce_max_tokens=reduce_max_tokens,
                 api_mode=api_mode,
-                language_hint=reduce_hint,
+                language_hint=reduce_hint_full,
                 client=shared_client,
                 max_context_tokens=ctx_limit,
                 on_progress=on_progress,

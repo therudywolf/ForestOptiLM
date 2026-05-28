@@ -1822,6 +1822,10 @@ class NocturneApp(ctk.CTk):
                         label = "Индексирую файлы" if phase == "index_extract" else "Генерирую эмбеддинги"
                         self._set_status(f"RAG: {label}: {cur}/{total}…")
                         self._append_log_line(f"[RAG {phase}] {cur}/{total}", "general")
+                    elif phase == "categorize":
+                        preview = str(msg.get("preview", ""))[:200]
+                        self._set_status("Категорирование (детерминированное)…", "lightgreen")
+                        self._append_log_line(f"[CATEGORIZE] {preview}", "map_metrics")
                     elif phase == "reduce":
                         self._set_status(f"REDUCE: группа {cur} / {total}…")
                         self._append_log_line(f"[REDUCE] {cur}/{total}", "reduce")
