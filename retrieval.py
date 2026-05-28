@@ -23,6 +23,7 @@ from pathlib import Path
 import faiss
 import numpy as np
 
+from bm25 import BM25Index, reciprocal_rank_fusion
 from models import DocumentChunk, RetrievalHit, IndexStats
 
 logger = logging.getLogger("nocturne")
@@ -39,6 +40,8 @@ class LocalFaissStore:
         self._cached_meta: list[dict] | None = None
         self._cached_mtime_ns: int = -1
         self._cached_dim: int | None = None
+        self._cached_bm25: BM25Index | None = None
+        self._cached_bm25_sig: int = -1
 
     def build(self, chunks: list[DocumentChunk], vectors: list[list[float]], embedding_model: str) -> IndexStats:
         if not chunks:
@@ -100,6 +103,70 @@ class LocalFaissStore:
             if i < 0 or i >= len(meta):
                 continue
             m = meta[i]
+            hits.append(
+                RetrievalHit(
+                    chunk_id=m["chunk_id"],
+                    score=float(score),
+                    source_path=m["source_path"],
+                    text=m["text"],
+                    metadata=m.get("metadata", {}),
+                )
+            )
+        return hits
+
+    @staticmethod
+    def _meta_id(pos: int, m: dict) -> str:
+        return str(m.get("chunk_id") or pos)
+
+    def _ensure_bm25(self, meta: list[dict]) -> BM25Index:
+        if self._cached_bm25 is not None and self._cached_bm25_sig == self._cached_mtime_ns:
+            return self._cached_bm25
+        ids = [self._meta_id(i, m) for i, m in enumerate(meta)]
+        texts = [str(m.get("text") or "") for m in meta]
+        bm = BM25Index().fit(ids, texts)
+        self._cached_bm25 = bm
+        self._cached_bm25_sig = self._cached_mtime_ns
+        return bm
+
+    def hybrid_search(
+        self,
+        query_text: str,
+        query_vector: list[float] | None,
+        top_k: int = 8,
+        candidate_k: int | None = None,
+    ) -> list[RetrievalHit]:
+        """FAISS (вектор) + BM25 (лексика) → слияние RRF. Точные CVE/хосты/пакеты
+        ловит BM25, семантику — вектор."""
+        if not self.index_file.exists() or not self.meta_file.exists():
+            return []
+        index, meta, dim = self._load_cached_index_meta()
+        if not meta:
+            return []
+        cand = candidate_k or max(top_k * 5, top_k)
+        cand = min(cand, len(meta))
+
+        vec_ids: list[str] = []
+        if query_vector and dim is not None and len(query_vector) == dim:
+            q = np.asarray([query_vector], dtype="float32")
+            faiss.normalize_L2(q)
+            _scores, idx = index.search(q, cand)
+            vec_ids = [
+                self._meta_id(i, meta[i]) for i in idx[0] if 0 <= i < len(meta)
+            ]
+
+        bm = self._ensure_bm25(meta)
+        bm_ids = [cid for cid, _ in bm.search(query_text, top_k=cand)]
+
+        rankings = [r for r in (vec_ids, bm_ids) if r]
+        if not rankings:
+            return []
+        fused = reciprocal_rank_fusion(rankings, top_k=top_k)
+        by_id = {self._meta_id(pos, m): m for pos, m in enumerate(meta)}
+        hits: list[RetrievalHit] = []
+        for cid, score in fused:
+            m = by_id.get(cid)
+            if not m:
+                continue
             hits.append(
                 RetrievalHit(
                     chunk_id=m["chunk_id"],

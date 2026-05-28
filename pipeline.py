@@ -163,10 +163,26 @@ def query_index(
     api_key: str,
     embedding_model: str,
     top_k: int = 8,
+    hybrid: bool = True,
 ) -> list[RetrievalHit]:
-    emb_client = EmbeddingClient(base_url=base_url, api_key=api_key, model=embedding_model)
-    qvecs = emb_client.embed_texts([question], batch_size=1)
-    if not qvecs:
-        return []
+    """Гибридный поиск (вектор + BM25, RRF) по умолчанию; вектор как fallback.
+
+    Если эмбеддинги недоступны (нет модели/сервера), всё равно работает чистый
+    BM25 — точный поиск по CVE/хостам/пакетам не зависит от эмбеддера.
+    """
     store = LocalFaissStore(index_dir=index_dir)
-    return store.search(qvecs[0], top_k=top_k)
+    qvec: list[float] | None = None
+    try:
+        emb_client = EmbeddingClient(base_url=base_url, api_key=api_key, model=embedding_model)
+        qvecs = emb_client.embed_texts([question], batch_size=1)
+        qvec = qvecs[0] if qvecs else None
+    except Exception as exc:
+        logger.warning("Embedding query failed, falling back to BM25 only: %s", exc)
+        qvec = None
+    if hybrid:
+        hits = store.hybrid_search(question, qvec, top_k=top_k)
+        if hits:
+            return hits
+    if qvec is None:
+        return []
+    return store.search(qvec, top_k=top_k)
