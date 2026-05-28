@@ -50,6 +50,32 @@ def build_document_chunks(
         except Exception:
             file_meta = None
 
+    # Record-aware: структурированные отчёты (JSON/JSONL/XML) → записи как чанки,
+    # без хардкода форматов. Делаем до общего text/table-роутинга.
+    try:
+        from record_chunking import build_record_chunks, record_aware_enabled
+
+        if record_aware_enabled():
+            rec_chunks = build_record_chunks(
+                path, chunk_size_tokens, root_dir=root_dir, file_meta=file_meta,
+            )
+            if rec_chunks:
+                out: list[DocumentChunk] = []
+                for idx, c in enumerate(rec_chunks):
+                    cid = hashlib.sha256(f"{path}:rec:{idx}".encode()).hexdigest()[:24]
+                    rmeta: dict = {"chunk_index": idx, "kind": "record"}
+                    if file_meta:
+                        rmeta.update(file_meta)
+                    out.append(
+                        DocumentChunk(
+                            chunk_id=cid, source_path=str(path), text=c,
+                            tokens=count_tokens(c), metadata=rmeta,
+                        )
+                    )
+                return out
+    except Exception:
+        pass
+
     chunks: list[DocumentChunk] = []
     if kind == "vision":
         img_path = Path(str(content))
