@@ -1,0 +1,91 @@
+# -*- mode: python ; coding: utf-8 -*-
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# PyInstaller spec for Nocturne Data Forge (ForestOptiLM) GUI.
+# Build:  pyinstaller --noconfirm --clean nocturne.spec
+# Output: dist/NocturneDataForge/NocturneDataForge.exe  (one-dir, reliable)
+#
+# One-dir is used intentionally: faiss/pandas/tcl-tk ship native libraries that
+# are far more robust un-packed than inside a single self-extracting .exe.
+import os
+
+from PyInstaller.utils.hooks import collect_all, collect_submodules, copy_metadata
+
+datas: list = []
+binaries: list = []
+hiddenimports: list = []
+
+# Packages that carry data files / native libs / plugins PyInstaller can miss.
+for pkg in (
+    "customtkinter",   # theme assets
+    "faiss",           # native libs
+    "pdfminer",        # cmap data (pdfplumber backend)
+    "pdfplumber",
+    "odf",             # odfpy (ODT)
+    "ebooklib",        # EPUB
+    "striprtf",        # RTF
+    "openpyxl",        # XLSX
+    "bs4",             # HTML
+    "yaml",            # run profiles fallback parser
+):
+    try:
+        d, b, h = collect_all(pkg)
+        datas += d
+        binaries += b
+        hiddenimports += h
+    except Exception:
+        pass
+
+# tiktoken registers encodings via the tiktoken_ext namespace + package metadata.
+hiddenimports += collect_submodules("tiktoken_ext")
+hiddenimports += ["tiktoken_ext.openai_public"]
+try:
+    datas += copy_metadata("tiktoken")
+except Exception:
+    pass
+
+# Bundle a prefetched tiktoken encoding so tokenization works fully offline.
+_tk_cache = os.path.join(os.getcwd(), ".build", "tiktoken_cache")
+if os.path.isdir(_tk_cache):
+    datas += [(_tk_cache, "tiktoken_cache")]
+
+# Run profiles (config/run_profiles.yaml) read relative to the package dir.
+if os.path.isdir("config"):
+    datas += [("config", "config")]
+
+a = Analysis(
+    ["main.py"],
+    pathex=["."],
+    binaries=binaries,
+    datas=datas,
+    hiddenimports=hiddenimports,
+    hookspath=[],
+    runtime_hooks=[],
+    excludes=["tkinter.test", "test", "pytest", "_pytest"],
+    noarchive=False,
+)
+pyz = PYZ(a.pure)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    [],
+    exclude_binaries=True,
+    name="NocturneDataForge",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    console=False,            # GUI app — no console window
+    disable_windowed_traceback=False,
+    icon=None,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    name="NocturneDataForge",
+)

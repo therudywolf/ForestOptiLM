@@ -16,6 +16,10 @@ dist/
 build/
 .eggs/
 
+# PyInstaller / packaging build artifacts
+.build/
+*.manifest
+
 # Virtual environments
 .venv/
 venv/

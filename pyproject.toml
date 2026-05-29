@@ -35,6 +35,7 @@ forestoptilm = "forestoptilm.cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.4"]
+build = ["pyinstaller>=6.0"]
 
 [tool.ruff.lint]
 select = ["E", "F"]

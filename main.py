@@ -21,9 +21,31 @@ Nocturne Data Forge (ForestOptiLM) — точка входа GUI.
 текст, PDF, Office, архивы, код, изображения (vision), таблицы, RAG.
 """
 import logging
+import os
 import sys
+from pathlib import Path
 
-from lmstudio_config import get_connection_defaults, mask_secret
+
+def _frozen_bootstrap() -> None:
+    """Настройка путей при запуске из собранного .exe (PyInstaller).
+
+    - кэш токенайзера tiktoken берём из бандла (offline, без скачивания);
+    - кэш/индексы/логи пишем рядом с .exe (в NocturneData), а не внутрь бандла.
+    """
+    if not getattr(sys, "frozen", False):
+        return
+    exe_dir = Path(sys.executable).resolve().parent
+    data_dir = exe_dir / "NocturneData"
+    try:
+        data_dir.mkdir(parents=True, exist_ok=True)
+        os.environ.setdefault("NOCTURNE_CACHE_DIR", str(data_dir / ".nocturne_cache"))
+    except Exception:
+        pass
+    meipass = Path(getattr(sys, "_MEIPASS", exe_dir))
+    tk_cache = meipass / "tiktoken_cache"
+    if tk_cache.is_dir():
+        os.environ.setdefault("TIKTOKEN_CACHE_DIR", str(tk_cache))
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -33,6 +55,10 @@ logging.basicConfig(
 
 
 def main() -> None:
+    _frozen_bootstrap()
+
+    from lmstudio_config import get_connection_defaults, mask_secret
+
     bu, ak, src = get_connection_defaults()
     logging.getLogger("nocturne").info(
         "LM Studio config: base_url=%s api_key=%s source=%s",
