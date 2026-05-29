@@ -34,6 +34,18 @@ class TestFacets(unittest.TestCase):
         self.assertIn("INV-2024-7", f["entities"])
         self.assertTrue(f["has_source"])
 
+    def test_query_adaptive_fields(self) -> None:
+        # query-adaptive MAP puts task-specific data under "fields"
+        f = extract_facets({
+            "type": "row",
+            "explanation": "счёт",
+            "fields": {"category": "invoice", "value": "100", "item": "Acme INV-7"},
+        })
+        self.assertEqual(f["category"], "invoice")
+        self.assertEqual(f["value"], "100")
+        self.assertEqual(f["item"], "acme inv-7")
+        self.assertIn("INV-7", f["entities"])
+
     def test_legacy_finding_record(self) -> None:
         # current MAP schema still works
         f = extract_facets({

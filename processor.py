@@ -69,36 +69,57 @@ SYSTEM_PROMPT_TABLE = (
     "5. No text outside the <results> tags."
 )
 
-# MAP: структурированный JSON для последующего REDUCE без потери источников
-SYSTEM_PROMPT_MAP = (
-    "YOU MUST FOLLOW THESE RULES WITHOUT EXCEPTION:\n"
-    "1. DO NOT write thinking, reasoning, or text outside <results>.\n"
-    "2. Your ENTIRE response must be wrapped in <results> and </results> tags.\n"
-    "3. Inside <results> write ONE valid JSON object (no markdown fences).\n"
-    "4. Base your analysis ONLY on the fragment and metadata in the user message.\n"
-    "5. If the fragment is not relevant to the user query, set no_relevant_data to true "
-    "and use empty arrays for findings/evidence/recommendations.\n"
-    "6. Every finding in findings[] MUST include at least one entry in evidence_refs:\n"
-    "   - file: MUST equal the [FILE_PATH:...] tag from the chunk header EXACTLY.\n"
-    "     Example: if header is [FILE_PATH: reports/sonar/scan.json], "
-    "then file = \"reports/sonar/scan.json\"\n"
-    "   - DO NOT use IDs, keys, or values from the file content as the \"file\" field.\n"
-    "   - chunk: CHUNK_INDEX value from the chunk header (as string)\n"
-    "   - quote: a short verbatim substring from the fragment (max 80 chars)\n"
-    "7. The outer JSON 'file' field must also equal the FILE_PATH from the chunk header.\n"
-    "8. Do NOT invent vulnerabilities or issues not supported by the fragment text.\n"
-    "9. If the chunk header contains [FILE_TITLE:], use that title to identify the component/service "
-    "in finding explanations (e.g. 'В сервисе <FILE_TITLE> обнаружена...').\n"
-    "10. If the chunk header contains [FILE_LABELS:], include those labels as context in query_alignment "
-    "to identify which subsystem/module this fragment belongs to.\n"
-    "JSON schema:\n"
-    '{ "chunk_index": number, "file": "FILE_PATH string", "query_alignment": string, '
-    '"no_relevant_data": boolean, '
-    '"findings": [ { "severity": "critical"|"high"|"medium"|"low"|"info", '
-    '"type": string, "explanation": string, '
-    '"evidence_refs": [ { "file": "FILE_PATH string", "chunk": "CHUNK_INDEX string", "quote": string } ] } ], '
-    '"recommendations": [ string ] }\n'
-)
+# MAP: доменно-нейтральное извлечение под задачу пользователя.
+# Промпт строится из QueryPlan (что извлекать), но JSON-конверт стабилен
+# (findings/evidence_refs/file) — на него опираются merge/aggregate/валидация.
+def build_map_system_prompt(plan: Any | None = None) -> str:
+    """Собрать system-prompt MAP под конкретную задачу (или нейтральный дефолт).
+
+    `findings[]` — это извлечённые ЭЛЕМЕНТЫ, релевантные задаче (не обязательно
+    «проблемы»): `type` = вид элемента, `explanation` = конкретное содержание,
+    `fields` = поля под задачу (опц.), `severity` = только если задача про
+    проблемы/качество/риск (иначе опускается). `evidence_refs` — обоснование.
+    """
+    fields = list(getattr(plan, "extraction_fields", None) or
+                  ["item", "category", "value", "context", "source"])
+    directive = str(getattr(plan, "extraction_directive", "") or "")
+    task_line = (f"TASK (what to extract from each fragment): {directive}\n" if directive else "")
+    fields_line = "Suggested per-item fields for \"fields\": " + ", ".join(fields) + ".\n"
+    return (
+        "YOU MUST FOLLOW THESE RULES WITHOUT EXCEPTION:\n"
+        "1. DO NOT write thinking, reasoning, or text outside <results>.\n"
+        "2. Your ENTIRE response must be wrapped in <results> and </results> tags.\n"
+        "3. Inside <results> write ONE valid JSON object (no markdown fences).\n"
+        "4. Base your output ONLY on the fragment and metadata in the user message.\n"
+        "5. If the fragment is not relevant to the task, set no_relevant_data=true "
+        "and use empty arrays.\n"
+        "6. Every item in findings[] MUST include at least one entry in evidence_refs:\n"
+        "   - file: MUST equal the [FILE_PATH:...] tag from the chunk header EXACTLY.\n"
+        "     Example: if header is [FILE_PATH: data/report.json], then file = \"data/report.json\"\n"
+        "   - DO NOT use IDs, keys, or values from the file content as the \"file\" field.\n"
+        "   - chunk: CHUNK_INDEX value from the chunk header (as string)\n"
+        "   - quote: a short verbatim substring from the fragment (max 80 chars)\n"
+        "7. The outer JSON 'file' field must also equal the FILE_PATH from the chunk header.\n"
+        "8. Do NOT invent anything not supported by the fragment text.\n"
+        "9. If the chunk header has [FILE_TITLE:], use it to identify the document/source in explanation.\n"
+        "10. If the chunk header has [FILE_LABELS:], include them as context in query_alignment.\n"
+        "11. Each finding is one extracted element relevant to the task: put its kind in 'type', "
+        "the concrete content in 'explanation', task-specific fields in 'fields' (object), and add "
+        "'severity' ONLY if the task concerns issues/quality/risk (otherwise omit it).\n"
+        + task_line
+        + fields_line
+        + "JSON schema:\n"
+        '{ "chunk_index": number, "file": "FILE_PATH string", "query_alignment": string, '
+        '"no_relevant_data": boolean, '
+        '"findings": [ { "type": string, "explanation": string, '
+        '"severity": "critical"|"high"|"medium"|"low"|"info" (optional), '
+        '"fields": object (optional), '
+        '"evidence_refs": [ { "file": "FILE_PATH string", "chunk": "CHUNK_INDEX string", "quote": string } ] } ], '
+        '"recommendations": [ string ] }\n'
+    )
+
+
+SYSTEM_PROMPT_MAP = build_map_system_prompt(None)
 
 # SCOUT: быстрый проход релевантности перед тяжёлым MAP (большие корпуса)
 SYSTEM_PROMPT_SCOUT = (
@@ -121,10 +142,10 @@ SYSTEM_PROMPT_META_PLANNER = (
     "3. Inside <results> write a SINGLE precise analysis directive (plain text, no JSON, no markdown headers).\n"
     "4. The directive will be used as the user query for analysing EACH individual document fragment.\n"
     "5. The directive MUST:\n"
-    "   a) Name the specific data entities, fields, and patterns to extract from THIS type of data.\n"
-    "   b) List what constitutes Critical / High / Medium severity for THIS data type.\n"
-    "   c) State what identifying information (service names, file paths, issue keys, IDs) must be preserved.\n"
-    "   d) Instruct the model to use FILE_TITLE and FILE_LABELS from the chunk header to identify the component.\n"
+    "   a) Name the specific data entities, fields, and patterns to extract for THIS task and data.\n"
+    "   b) State how to judge importance/priority of an item for THIS task (only mention severity if the task is about issues/quality/risk).\n"
+    "   c) State what identifying information (names, file paths, keys, IDs, dates) must be preserved.\n"
+    "   d) Instruct the model to use FILE_TITLE and FILE_LABELS from the chunk header to identify the source.\n"
     "   e) Be written in the SAME language as the user goal.\n"
     "6. Keep the directive under 400 words. No preamble, no meta-commentary.\n"
 )
@@ -143,7 +164,8 @@ SYSTEM_PROMPT_REDUCE = (
     "5. Merge all input data; do not drop findings.\n"
     "6. Address the user's original query directly.\n"
     "7. Write in the same language as the user's query.\n"
-    "8. Do NOT list Critical/High items in Comprehensive Findings unless they appear in Evidence Matrix.\n"
+    "8. Do NOT state conclusions in Comprehensive Findings that lack support in the Evidence Matrix.\n"
+    "9. If a specific output form is requested in the user message (table/list/comparison/summary), follow it.\n"
 )
 
 # Финальный синтез: объединяет готовые markdown-секции по файлам в единый отчёт
@@ -157,12 +179,13 @@ SYSTEM_PROMPT_SYNTHESIZE = (
     "   ## Evidence Matrix\n"
     "   ## Action Plan\n"
     "4. The input contains separate per-file/per-service report sections.\n"
-    "5. Merge ALL findings and evidence from ALL input sections — do NOT drop any.\n"
-    "6. In Comprehensive Findings: group by severity (Critical > High > Medium > Low > Info).\n"
+    "5. Merge ALL items and evidence from ALL input sections — do NOT drop any.\n"
+    "6. In Comprehensive Findings: group logically (by category/importance); if items have a "
+    "severity, order Critical > High > Medium > Low > Info.\n"
     "7. In Evidence Matrix: include ALL evidence entries from every section as a Markdown table.\n"
-    "8. In Action Plan: consolidate recommendations without duplication, ordered by priority.\n"
+    "8. In Action Plan: consolidate recommendations/next steps without duplication, ordered by priority.\n"
     "9. Write in the same language as the user's query.\n"
-    "10. Do NOT invent findings not present in the input sections.\n"
+    "10. Do NOT invent items not present in the input sections.\n"
 )
 
 # Минимальный PNG 1×1 для проверки vision
@@ -1444,6 +1467,7 @@ def _build_vision_map_messages(
     file_label: str,
     image_path: Path,
     language_hint: str = "",
+    system_prompt: str | None = None,
 ) -> list[dict[str, Any]]:
     mime = mimetypes.guess_type(str(image_path))[0] or "application/octet-stream"
     raw = image_path.read_bytes()
@@ -1457,7 +1481,7 @@ def _build_vision_map_messages(
         "В evidence_refs.quote опиши кратко, что видно на изображении (не выдумывай текста, которых нет).\n"
     )
     return [
-        {"role": "system", "content": SYSTEM_PROMPT_MAP},
+        {"role": "system", "content": system_prompt or SYSTEM_PROMPT_MAP},
         {
             "role": "user",
             "content": [
@@ -2665,6 +2689,8 @@ async def run_map_reduce(
 
     query_plan = build_query_plan(user_query)
     logger.info("QueryPlan: %s", query_plan.summary())
+    # Промпт MAP подстраивается под задачу (что извлекать), конверт JSON стабилен.
+    map_system_prompt = build_map_system_prompt(query_plan)
     # language_hint is derived from the ORIGINAL user_query so meta-prompt generation doesn't break it
     language_hint = "Ответь строго на русском языке." if _prefer_russian(user_query) else ""
     # REDUCE/синтез получают доп. контракт ответа под intent запроса
@@ -2966,6 +2992,7 @@ async def run_map_reduce(
                     return ""
                 messages = _build_vision_map_messages(
                     user_query, i + 1, file_name, vpath, language_hint=language_hint,
+                    system_prompt=map_system_prompt,
                 )
                 if on_progress:
                     active, in_flight, retrying, effective_workers = _counts_snapshot()
@@ -3000,7 +3027,7 @@ async def run_map_reduce(
                 # Reserve: system_prompt tokens + prefix tokens + 512 overhead + 4096 output budget.
                 if max_context_tokens and max_context_tokens > 0:
                     _map_output_reserve = 4096
-                    overhead = _ct(SYSTEM_PROMPT_MAP) + _ct(prompt_prefix) + 512 + _map_output_reserve
+                    overhead = _ct(map_system_prompt) + _ct(prompt_prefix) + 512 + _map_output_reserve
                     chunk_budget = max(200, max_context_tokens - overhead)
                     if _ct(labeled) > chunk_budget:
                         labeled = _truncate_text_to_tokens(labeled, chunk_budget)
@@ -3010,7 +3037,7 @@ async def run_map_reduce(
                         )
                 prompt = prompt_prefix + labeled
                 messages = [
-                    {"role": "system", "content": SYSTEM_PROMPT_MAP},
+                    {"role": "system", "content": map_system_prompt},
                     {"role": "user", "content": prompt},
                 ]
 
