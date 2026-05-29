@@ -8,13 +8,24 @@ a desktop app for bulk asynchronous processing of large files and folders
 (including multi‑hundred‑thousand‑token corpora) through **local LLMs**
 (LM Studio REST API v1 and OpenAI-compatible endpoints).
 
-Core idea: **Map‑Reduce over documents** with structured JSON evidence, optional
-**scout pass** (fast relevance filter), **reasoning-model control** (`reasoning: off`
-for qwen3 / deepseek-r1 etc.), and an optional **composer** model for merge/reduce.
+**Core idea:** drop one huge file or a pile of large mixed-format files, type
+what you need in plain language, get a precise result — optimized. The engine is
+**domain-agnostic**: it understands the task, derives *what to extract* per
+fragment, runs Map‑Reduce over the corpus on local models, and assembles the
+answer in the form the task implies. No built-in assumptions about any domain
+(logs, code, contracts, reports — all the same to the core).
+
+Built on: **query understanding** (intent + per-task extraction schema),
+**Map‑Reduce** with evidence-grounding, optional **scout pass** (fast relevance
+filter), **reasoning-model control** (`reasoning: off` for qwen3 / deepseek-r1),
+an optional **composer** model for merge/reduce, **hybrid retrieval**
+(BM25 + vectors), and **deterministic aggregation** (counts/grouping computed in
+code, not hallucinated).
 
 **Target workloads (by design):** multi‑GB logs, huge line-oriented dumps, ZIP/TAR
-trees with thousands of source files, and folder corpora in the **~1M+ token** range
-with scout + hierarchical merge — not “one tiny PDF only”.
+trees with thousands of source files, structured JSON/XML/CSV reports, and folder
+corpora in the **~1M+ token** range with scout + hierarchical merge — not
+“one tiny PDF only”.
 
 Licensed under **AGPL-3.0-or-later** — see [LICENSE](LICENSE), [NOTICE](NOTICE),
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
@@ -24,15 +35,19 @@ Licensed under **AGPL-3.0-or-later** — see [LICENSE](LICENSE), [NOTICE](NOTICE
 
 ## Features
 
-- **Map-Reduce pipeline** for text documents with structured JSON evidence.
+- **Query-adaptive extraction** — the MAP schema is derived from your task, not fixed.
+- **Map-Reduce pipeline** with evidence-grounding and faithful merge.
+- **Record-aware ingestion** — JSON/JSONL/XML reports split by *records* (one record never split across chunks), no per-format parsers.
+- **Deterministic aggregation** — counts/grouping/dedup computed in code and handed to the report as ground truth.
+- **Hybrid retrieval (RAG)** — BM25 + local FAISS vectors fused with RRF for exact + semantic search.
+- **Run memory** — diff a corpus against its previous run (added/removed/unchanged).
 - **Scout pass** — quick relevance scoring before full MAP (for huge folders).
 - **Large corpus preset** — scout + smaller chunks + composer in one click.
 - **Vision support** for image analysis via multimodal models.
-- **RAG** — local FAISS-based retrieval-augmented generation.
-- **Batch table processing** for CSV/XLSX with JSON responses.
+- **Batch table processing** for CSV/XLSX.
 - **Low VRAM mode** — sequential model loading for constrained hardware.
 - **Composer model** — optional separate model for merge/reduce/refine phases.
-- **SQLite cache** for MAP checkpoint resumption.
+- **SQLite cache** for MAP checkpoint resumption + cooperative stop/resume.
 - **Dark theme GUI** (CustomTkinter).
 - **Reasoning models** — auto-detected from LM Studio catalog; CoT disabled for MAP/REDUCE.
 - **Headless CLI** — `python -m forestoptilm.cli analyze`.
@@ -187,21 +202,29 @@ depends on LM Studio throughput, scout threshold, and hardware. Use **scout** +
 MAP checkpoints and job metadata live under `.nocturne_cache/` (or `NOCTURNE_CACHE_DIR`).
 The last incomplete job pointer is stored in `.local/last_job.json` next to your LM Studio config.
 
-## Map-Reduce Pipeline
+## Pipeline
 
-1. **MAP** — each chunk produces structured JSON with `findings[]`,
-   `evidence_refs[]` (`file`, `chunk`, `quote`), and `recommendations[]`.
-2. **Merge** — hierarchical JSON merge for large document sets.
-3. **REDUCE** — final markdown report with required sections:
-   *Executive Summary*, *Comprehensive Findings*, *Evidence Matrix*, *Action Plan*.
-4. **Refine** — second pass if the report is too short or missing sections.
-5. **Validation** — warnings appended for short text, missing sections, or low
-   evidence density.
+1. **Understand** — the query is parsed into a `QueryPlan` (intent, key terms,
+   group-by axis, output style) and a **per-task extraction schema** (what to pull
+   from each fragment). Domain-agnostic — security severity is just one optional
+   field, used only when the task is about issues/quality/risk.
+2. **MAP** — each chunk produces structured JSON: extracted items with
+   `type`, content, optional task-specific `fields`, and `evidence_refs`
+   (`file`, `chunk`, `quote`) for grounding.
+3. **Merge** — hierarchical, deterministic JSON merge for large corpora.
+4. **Aggregate** — counts / grouping / dedup computed **in code** (by the
+   QueryPlan key) and handed to REDUCE as ground truth, so numbers are correct
+   at any volume.
+5. **REDUCE** — final Markdown answer; an intent-driven output contract shapes
+   the form (table / ranked list / comparison / summary / report).
+6. **Refine** — second pass if the answer is too short or incomplete.
+7. **Validation** — warnings appended for short output, missing structure, or
+   low evidence density.
 
-Critical/high findings without `file + quote` in `evidence_refs` are
-automatically downgraded to **medium**.
+Items claimed at high importance without `file + quote` evidence are
+automatically downgraded — conclusions must be grounded in the source.
 
-Findings are deduplicated by `(severity, type, explanation)` and capped per chunk
+Extracted items are deduplicated (by a query-derived key) and capped per chunk
 and per merge level — see `NOCTURNE_MAX_FINDINGS_PER_CHUNK` and
 `NOCTURNE_MERGE_FINDINGS_CAP` to raise the limits for very large corpora.
 
@@ -223,18 +246,24 @@ works — exact lookups don't depend on the embedder.
 | `main.py` | GUI entry point |
 | `gui.py` | CustomTkinter interface (dark theme) |
 | `forestoptilm/cli.py` | Headless `analyze` command |
+| `query_plan.py` | Query understanding: intent, entities, per-task extraction schema |
+| `processor.py` | LLM calls, query-adaptive Map-Reduce, scout, batching |
+| `record_chunking.py` | Format-agnostic record-aware ingestion (JSON/JSONL/XML) |
+| `aggregate.py` | Deterministic neutral aggregation (counts/grouping/dedup) |
+| `run_memory.py` | Persistent run memory + cross-run diff |
+| `bm25.py` | Lexical BM25 index + Reciprocal Rank Fusion (hybrid search) |
 | `large_corpus_io.py` | Streaming huge text files; archive → folder expansion |
 | `corpus_planner.py` | Dry-run estimates; file-level relevance heuristic |
 | `chunk_store.py` | On-disk MAP chunk spill (bounded RAM) |
 | `map_result_store.py` | On-disk normalized MAP JSON before merge (large jobs) |
 | `conflict_resolve.py` | Pick richer MAP JSON when dual-instance resolve is on |
-| `processor.py` | LLM calls, Map-Reduce, scout, batching |
 | `parser.py`, `chunking.py`, `file_extractors.py` | Parsing and chunking |
-| `cache.py` | SQLite MAP checkpoint cache |
-| `pipeline.py`, `embeddings.py`, `retrieval.py` | RAG (FAISS) |
+| `cache.py` | SQLite MAP checkpoint cache (resume) |
+| `pipeline.py`, `embeddings.py`, `retrieval.py` | Hybrid retrieval (BM25 + FAISS) |
 | `lmstudio_config.py`, `lm_client.py`, `lm_studio_api.py` | LM Studio connection |
 | `reasoning_models.py` | Reasoning / thinking model detection |
-| `merge_hierarchy.py`, `conflict_resolve.py` | Merge helpers |
+| `merge_hierarchy.py` | Hierarchical merge helpers |
+| `run_config.py` | Immutable per-run configuration |
 | `config/run_profiles.yaml` | Presets: `large_corpus`, `quick_scan`, `deep_audit` |
 | `tests/` | Unit tests (`pytest`; integration opt-in) |
 
