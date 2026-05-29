@@ -89,3 +89,6 @@ credentials.json
 *credentials*.json
 !*credentials*.example.json
 
+
+# Claude Code local worktrees/agent state
+.claude/
