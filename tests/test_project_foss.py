@@ -29,10 +29,15 @@ class TestProjectFoss(unittest.TestCase):
         self.assertIn("AGPL", pyproject)
 
     def test_spdx_on_python_sources(self) -> None:
-        py_files = [
-            p for p in ROOT.rglob("*.py")
-            if ".venv" not in p.parts and "__pycache__" not in p.parts
-        ]
+        # Only project sources — skip build artifacts (build/, dist/, .build/),
+        # dot-dirs (.venv, .git, .claude, .eggs) and caches.
+        _skip = {"build", "dist", "__pycache__", "node_modules", "venv", "env"}
+
+        def _is_source(p: Path) -> bool:
+            rel_parts = p.relative_to(ROOT).parts
+            return not any(part in _skip or part.startswith(".") for part in rel_parts)
+
+        py_files = [p for p in ROOT.rglob("*.py") if _is_source(p)]
         self.assertGreater(len(py_files), 20)
         missing = [
             p.relative_to(ROOT)

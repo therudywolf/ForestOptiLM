@@ -90,6 +90,26 @@ Double-click **`start.bat`** in the project directory. The script will:
 - install dependencies from `requirements.txt`;
 - launch the application.
 
+### Windows: build a standalone .exe
+
+No Python needed on the target machine. From a checkout with deps installed:
+
+```powershell
+pip install -r requirements.txt pyinstaller
+pwsh -File scripts/build_exe.ps1      # or double-click scripts\build_exe.bat
+```
+
+The script prefetches the tokenizer (so the app works **offline**) and runs
+PyInstaller against [`nocturne.spec`](nocturne.spec). Output is a one-dir app:
+
+```
+dist/NocturneDataForge/NocturneDataForge.exe   (+ _internal/)
+```
+
+Ship the **whole `dist/NocturneDataForge` folder** (zip it). On first run the app
+creates a `NocturneData/` folder next to the `.exe` for cache and indexes. Build
+artifacts (`build/`, `dist/`, `.build/`) are git-ignored.
+
 ## Configuration
 
 ### LM Studio connection (recommended)
