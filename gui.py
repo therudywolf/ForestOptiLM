@@ -1822,14 +1822,14 @@ class NocturneApp(ctk.CTk):
                         label = "Индексирую файлы" if phase == "index_extract" else "Генерирую эмбеддинги"
                         self._set_status(f"RAG: {label}: {cur}/{total}…")
                         self._append_log_line(f"[RAG {phase}] {cur}/{total}", "general")
-                    elif phase == "categorize":
+                    elif phase == "aggregate":
                         preview = str(msg.get("preview", ""))[:200]
-                        self._set_status("Категорирование (детерминированное)…", "lightgreen")
-                        self._append_log_line(f"[CATEGORIZE] {preview}", "map_metrics")
-                    elif phase == "scan_diff":
+                        self._set_status("Агрегация (детерминированная)…", "lightgreen")
+                        self._append_log_line(f"[AGGREGATE] {preview}", "map_metrics")
+                    elif phase == "run_diff":
                         preview = str(msg.get("preview", ""))[:200]
-                        self._set_status("Сравнение с прошлым сканом…", "lightgreen")
-                        self._append_log_line(f"[SCAN DIFF] {preview}", "map_metrics")
+                        self._set_status("Сравнение с прошлым прогоном…", "lightgreen")
+                        self._append_log_line(f"[RUN DIFF] {preview}", "map_metrics")
                     elif phase == "reduce":
                         self._set_status(f"REDUCE: группа {cur} / {total}…")
                         self._append_log_line(f"[REDUCE] {cur}/{total}", "reduce")
