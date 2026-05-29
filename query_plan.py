@@ -15,140 +15,158 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with ForestOptiLM. If not, see <https://www.gnu.org/licenses/>.
 """
-QueryPlan — понимание запроса пользователя (Столп 1).
+QueryPlan — понимание задачи пользователя (доменно-нейтральное).
 
-Строит из произвольного запроса (ru/en) структурный план прогона: намерение
-(intent), ключевые сущности для scout/поиска, фильтр severity, ось группировки
-и стиль ответа. Ядро детерминированное (правила), тестируется без LLM; опционально
-обогащается composer-моделью (extraction_focus).
+Концепт продукта: «дал большой файл / кучу разных файлов → вбил задачу →
+получил итог, оптимизированно». Поэтому ядро ничего не знает про конкретный
+домен (безопасность, юр-доки, логи, код — что угодно). Из запроса выводится:
+- intent (что вообще нужно сделать),
+- схема извлечения (ЧТО тащить из каждого фрагмента под эту задачу),
+- ключевые термины/сущности (для scout и точного поиска),
+- ось группировки и форма ответа.
 
-План — единый носитель «что хочет пользователь» для MAP/merge/REDUCE: им
-управляются дедуп-ключ агрегации, контракт ответа и приоритеты scout.
+Ядро детерминированное (правила), тестируется без LLM; схема извлечения может
+дополнительно обогащаться composer-моделью.
 """
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
 
-# ── Severity нормализация (ru/en) ───────────────────────────────────
-_SEVERITY_TERMS: dict[str, tuple[str, ...]] = {
-    "critical": ("critical", "критич", "критическ"),
-    "high": ("high", "высок", "важн"),
-    "medium": ("medium", "средн", "умерен"),
-    "low": ("low", "низк", "незначительн"),
-    "info": ("info", "informational", "информац", "информационн"),
-}
-
-# ── Намерения (intent). Порядок = приоритет при множественном совпадении ──
+# ── Намерения (нейтральные). Порядок = приоритет при множественном совпадении ──
 _INTENT_PATTERNS: list[tuple[str, tuple[str, ...]]] = [
     ("compare", (
         "сравн", "сравнен", "diff", "различ", "разниц", "было стало", "было/стало",
-        "новые", "новых", "появил", "regress", "регресс", "что изменил", "since last",
-        "по сравнению", "fixed", "исправлен", "устранен",
+        "что изменил", "по сравнению", "versus", " vs ", "сопостав",
     )),
-    ("prioritize", (
-        "приорит", "что чинить", "что исправл", "в первую очередь", "самые",
-        "наиболее", "top", "топ", "ранжир", "rank", "prioriti", "важнейш",
-        "критичн", "по риску", "by risk", "exploitab", "эксплуатируем",
-    )),
-    ("rootcause", (
-        "почему", "причин", "root cause", "первопричин", "из-за", "как эксплуат",
-        "exploit", "вектор атак", "attack vector", "как использ",
-    )),
-    ("map_standard", (
-        "owasp", "cwe", "mitre", "att&ck", "attack", "pci", "complian",
-        "соответств", "стандарт", "gost", "гост", "категори",
+    ("classify", (
+        "классифиц", "категориз", "по типам", "по категори", "сгруппируй по тип",
+        "таксоном", "classify", "categor", "разбей на", "распредели по",
     )),
     ("count", (
-        "сколько", "количеств", "count", "статистик", "распределен",
-        "how many", "breakdown", "по числу",
+        "сколько", "количеств", "посчитай", "подсчитай", "count", "статистик",
+        "распределен", "how many", "breakdown", "по числу", "частот",
+    )),
+    ("prioritize", (
+        "приорит", "что важн", "в первую очередь", "самые", "наиболее", "top",
+        "топ", "ранжир", "rank", "prioriti", "важнейш", "ключев",
+    )),
+    ("explain", (
+        "почему", "причин", "объясни", "как работает", "как устроен", "explain",
+        "why", "обоснуй", "root cause", "первопричин",
+    )),
+    ("extract", (
+        "извлеки", "собери", "вытащи", "выпиши", "найди все", "перечисл", "список",
+        "extract", "collect", "list all", "выгрузи", "достань", "все упоминан",
     )),
     ("filter", (
-        "только", "лишь", "исключ", "where", "фильтр", "отбери", "выбери все",
-        "по хост", "по сервис", "по пакет", "на хосте",
-    )),
-    ("enumerate", (
-        "перечисл", "список", "все находк", "все уязвим", "list ", "enumerate",
-        "выведи все", "покажи все", "каждую",
+        "только", "лишь", "исключ", "где ", "where", "фильтр", "отбери", "с услови",
+        "содержащие", "у которых",
     )),
     ("summarize", (
-        "кратко", "резюме", "summary", "обзор", "вкратце", "summarize",
-        "общая картина", "overview", "tl;dr", "саммари",
+        "кратко", "резюме", "summary", "обзор", "вкратце", "summarize", "саммари",
+        "tl;dr", "общая картина", "overview", "о чём", "суть",
     )),
 ]
 
-# ── Ось группировки ─────────────────────────────────────────────────
-_GROUP_BY_PATTERNS: list[tuple[str, tuple[str, ...]]] = [
-    ("asset", ("по хост", "по узл", "по актив", "по серверам", "by host", "by asset", "per host")),
-    ("cve", ("по cve", "by cve", "по уязвим", "per cve")),
-    ("cwe", ("по cwe", "by cwe", "по типу слабост")),
-    ("severity", ("по severity", "по уровн", "по критичн", "by severity", "по степен")),
-    ("component", ("по сервис", "по компонент", "по пакет", "by service", "by component", "by package")),
-    ("file", ("по файл", "by file", "per file")),
-    ("tool", ("по сканер", "по инструмент", "by tool", "по источник")),
-]
+# Нейтральные оси группировки. group_by хранит «сырое» слово после «по/by»;
+# facet_axis() приводит его к доступному фасету агрегации.
+_GROUP_BY_RE = re.compile(
+    r"(?:сгруппир\w*\s+по|группир\w*\s+по|по\s+кажд\w*|разбей\s+по|по|by|per|group\s+by)\s+"
+    r"([\wа-яё/.\-]{3,40})",
+    re.I,
+)
+
+_AXIS_SYNONYMS: dict[str, tuple[str, ...]] = {
+    "source": ("файл", "файлам", "файлу", "источник", "источникам", "file", "files",
+               "source", "хост", "хостам", "узел", "узлам", "host", "asset", "сервер"),
+    "category": ("тип", "типам", "типу", "категори", "type", "category", "класс", "kind"),
+    "level": ("уровн", "степен", "level", "severity", "priorit", "критичн", "важност"),
+    "entity": ("сущност", "id", "идентификатор", "ключ", "entity", "code", "номер"),
+    "date": ("дат", "дате", "датам", "date", "день", "месяц", "year", "год"),
+}
 
 _INTENT_OUTPUT_STYLE: dict[str, str] = {
-    "compare": "diff_table",
-    "prioritize": "ranked_list",
-    "enumerate": "matrix",
+    "compare": "comparison",
+    "classify": "matrix",
     "count": "stats",
+    "prioritize": "ranked_list",
+    "extract": "table",
+    "filter": "table",
     "summarize": "brief",
-    "rootcause": "report",
-    "map_standard": "matrix",
+    "explain": "narrative",
     "analyze": "report",
 }
 
-# Дедуп-ключ агрегации по оси группировки (для Столпа 3).
-_GROUP_DEDUP_KEY: dict[str, tuple[str, ...]] = {
-    "asset": ("asset", "cve"),
-    "cve": ("cve",),
-    "cwe": ("cwe",),
-    "component": ("component", "cve"),
-    "file": ("file", "type"),
-    "severity": ("severity", "type", "explanation"),
-    "tool": ("tool", "cve"),
+# Схема извлечения под задачу (нейтральные поля записи MAP).
+_INTENT_EXTRACTION_FIELDS: dict[str, list[str]] = {
+    "compare":    ["item", "category", "state", "context", "source"],
+    "classify":   ["item", "category", "rationale", "source"],
+    "count":      ["item", "category", "source"],
+    "prioritize": ["item", "category", "importance", "rationale", "source"],
+    "extract":    ["item", "category", "value", "context", "source"],
+    "filter":     ["item", "category", "value", "context", "source"],
+    "summarize":  ["point", "category", "source"],
+    "explain":    ["claim", "reason", "evidence", "source"],
+    "analyze":    ["item", "category", "observation", "context", "source"],
 }
 
-_CVE_RE = re.compile(r"\bCVE-\d{4}-\d{4,7}\b", re.I)
-_CWE_RE = re.compile(r"\bCWE-\d{1,6}\b", re.I)
-_IPV4_RE = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
-_HOST_RE = re.compile(r"\b(?:[a-z0-9-]+\.)+[a-z]{2,}\b", re.I)
+# Универсальные детекторы сущностей (нейтральные, не доменные).
+_ENTITY_PATTERNS: dict[str, re.Pattern[str]] = {
+    "email": re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b"),
+    "url": re.compile(r"\bhttps?://[^\s)]+", re.I),
+    "ip": re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b"),
+    # код/идентификатор: буквы+цифры с разделителями (CVE-…, INV-2024-7, A1B2-C3)
+    "id": re.compile(r"\b(?=[\w-]*\d)[A-Za-z][\w]*(?:-[\w]+){1,5}\b"),
+    "number": re.compile(r"\b\d[\d.,]{2,}\b"),
+    "date": re.compile(r"\b\d{4}-\d{2}-\d{2}\b|\b\d{2}\.\d{2}\.\d{4}\b"),
+}
+
 _QUOTED_RE = re.compile(r"[\"'«»“”]([^\"'«»“”]{2,60})[\"'«»“”]")
 
 _STOPWORDS: frozenset[str] = frozenset({
     "the", "and", "for", "all", "any", "with", "from", "this", "that", "find",
-    "show", "list", "what", "which", "report", "scan", "analyze", "analysis",
+    "show", "list", "what", "which", "into", "each",
     "найди", "покажи", "выведи", "это", "для", "все", "всех", "что", "как",
-    "отчет", "отчёт", "отчете", "анализ", "проанализируй", "сделай", "дай",
-    "есть", "по", "на", "из", "при", "или", "так", "там", "над",
+    "сделай", "дай", "есть", "или", "так", "там", "над", "мне", "нужно",
+    "собери", "извлеки", "посчитай", "сгруппируй",
 })
 
 
 @dataclass(slots=True)
 class QueryPlan:
-    """Структурный план прогона, выведенный из запроса пользователя."""
+    """Структурный план задачи, выведенный из запроса пользователя."""
 
     query: str
     language: str = "en"                 # "ru" | "en"
-    intent: str = "analyze"             # основной intent
+    intent: str = "analyze"
     intents: list[str] = field(default_factory=list)
     key_terms: list[str] = field(default_factory=list)
-    cve_ids: list[str] = field(default_factory=list)
-    cwe_ids: list[str] = field(default_factory=list)
-    hosts: list[str] = field(default_factory=list)
-    severity_filter: list[str] = field(default_factory=list)
-    group_by: str | None = None
+    entities: dict[str, list[str]] = field(default_factory=dict)
+    group_by: str | None = None          # «сырое» слово оси из запроса
     output_style: str = "report"
-    extraction_focus: str = ""          # обогащается composer-моделью (опц.)
+    extraction_fields: list[str] = field(default_factory=list)
+    extraction_directive: str = ""
+
+    # ── derived helpers ────────────────────────────────────────────
+    def facet_axis(self) -> str | None:
+        """Привести group_by к доступному фасету агрегации (source/category/level/...)."""
+        if not self.group_by:
+            return None
+        g = self.group_by.lower()
+        for facet, syns in _AXIS_SYNONYMS.items():
+            if any(g.startswith(s) or s in g for s in syns):
+                return facet
+        return "category"
 
     def dedup_keys(self) -> tuple[str, ...]:
-        """Поля для дедупликации/агрегации находок под этот запрос."""
-        if self.group_by and self.group_by in _GROUP_DEDUP_KEY:
-            return _GROUP_DEDUP_KEY[self.group_by]
-        if self.cve_ids or self.intent in ("compare", "prioritize"):
-            return ("cve", "asset")
-        return ("severity", "type", "explanation")
+        """Нейтральные фасеты для дедупликации/агрегации под эту задачу."""
+        axis = self.facet_axis()
+        if axis:
+            return (axis, "item")
+        if self.intent in ("compare", "prioritize"):
+            return ("item", "source")
+        return ("category", "item")
 
     def language_hint(self) -> str:
         return "Ответь строго на русском языке." if self.language == "ru" else ""
@@ -156,13 +174,14 @@ class QueryPlan:
     def summary(self) -> str:
         bits = [f"intent={self.intent}", f"out={self.output_style}"]
         if self.group_by:
-            bits.append(f"group_by={self.group_by}")
-        if self.severity_filter:
-            bits.append("sev=" + "/".join(self.severity_filter))
-        if self.cve_ids:
-            bits.append(f"cve={len(self.cve_ids)}")
+            bits.append(f"group_by={self.group_by}->{self.facet_axis()}")
+        if self.extraction_fields:
+            bits.append("fields=" + ",".join(self.extraction_fields))
         if self.key_terms:
             bits.append("terms=" + ",".join(self.key_terms[:6]))
+        n_ent = sum(len(v) for v in self.entities.values())
+        if n_ent:
+            bits.append(f"entities={n_ent}")
         return " ".join(bits)
 
 
@@ -173,29 +192,31 @@ def _detect_language(query: str) -> str:
 def _detect_intents(low: str) -> list[str]:
     found: list[str] = []
     for intent, pats in _INTENT_PATTERNS:
-        if not pats:
-            continue
         if any(p in low for p in pats):
             found.append(intent)
     return found
 
 
-def _detect_group_by(low: str) -> str | None:
-    for axis, pats in _GROUP_BY_PATTERNS:
-        if any(p in low for p in pats):
-            return axis
-    return None
+def _detect_group_by(query: str) -> str | None:
+    m = _GROUP_BY_RE.search(query or "")
+    if not m:
+        return None
+    token = m.group(1).strip().strip(".,")
+    if token.lower() in _STOPWORDS or len(token) < 3:
+        return None
+    return token
 
 
-def _detect_severity(low: str) -> list[str]:
-    out: list[str] = []
-    for sev, terms in _SEVERITY_TERMS.items():
-        if any(t in low for t in terms):
-            out.append(sev)
+def _extract_entities(query: str) -> dict[str, list[str]]:
+    out: dict[str, list[str]] = {}
+    for name, pat in _ENTITY_PATTERNS.items():
+        vals = sorted({m if isinstance(m, str) else m[0] for m in pat.findall(query)})
+        if vals:
+            out[name] = vals[:20]
     return out
 
 
-def _extract_key_terms(query: str, cve: list[str], cwe: list[str], hosts: list[str]) -> list[str]:
+def _extract_key_terms(query: str, entities: dict[str, list[str]]) -> list[str]:
     terms: list[str] = []
     seen: set[str] = set()
 
@@ -207,69 +228,84 @@ def _extract_key_terms(query: str, cve: list[str], cwe: list[str], hosts: list[s
 
     for m in _QUOTED_RE.findall(query):
         _add(m.strip())
-    for t in cve + cwe + hosts:
-        _add(t)
-    # Технические токены: с разделителями (lodash@1.2, log4j-core, payment_service)
-    for tok in re.findall(r"[A-Za-z][\w.\-/@]{2,}", query):
+    for vals in entities.values():
+        for v in vals:
+            _add(v)
+    # Технические токены: с разделителями или цифрами (lodash@1.2, payment_service)
+    for tok in re.findall(r"[A-Za-zА-Яа-яЁё][\w.\-/@]{2,}", query):
         tok = tok.rstrip(".,/")
         if any(c in tok for c in "._-/@") or any(ch.isdigit() for ch in tok):
             _add(tok)
+    # Содержательные слова длиной 4+ (без стоп-слов) — для scout/поиска
+    for tok in re.findall(r"[A-Za-zА-Яа-яЁё]{4,}", query):
+        if tok.lower() not in _STOPWORDS:
+            _add(tok)
+        if len(terms) >= 24:
+            break
     return terms[:24]
 
 
+def _derive_extraction(intent: str, group_by: str | None, language: str) -> tuple[list[str], str]:
+    fields = list(_INTENT_EXTRACTION_FIELDS.get(intent, _INTENT_EXTRACTION_FIELDS["analyze"]))
+    if language == "ru":
+        directive = (
+            "Извлеки из фрагмента элементы, относящиеся к задаче пользователя. "
+            "Для каждого элемента заполни поля: " + ", ".join(fields) + ". "
+            "Опирайся только на текст фрагмента, ничего не выдумывай."
+        )
+        if group_by:
+            directive += f" По возможности укажи значение для группировки по «{group_by}»."
+    else:
+        directive = (
+            "Extract items from the fragment relevant to the user's task. "
+            "For each item fill the fields: " + ", ".join(fields) + ". "
+            "Rely only on the fragment text; do not invent anything."
+        )
+        if group_by:
+            directive += f" Where possible, include a value to group by '{group_by}'."
+    return fields, directive
+
+
 def build_query_plan(query: str) -> QueryPlan:
-    """Детерминированный разбор запроса в QueryPlan (без LLM)."""
+    """Детерминированный разбор запроса в нейтральный QueryPlan (без LLM)."""
     q = (query or "").strip()
     low = q.lower()
     language = _detect_language(q)
-
-    cve_ids = sorted({m.upper() for m in _CVE_RE.findall(q)})
-    cwe_ids = sorted({m.upper() for m in _CWE_RE.findall(q)})
-    hosts = sorted({*(_IPV4_RE.findall(q)), *(_HOST_RE.findall(q))})
-
+    entities = _extract_entities(q)
     intents = _detect_intents(low)
     intent = intents[0] if intents else "analyze"
-    group_by = _detect_group_by(low)
-    severity_filter = _detect_severity(low)
-    key_terms = _extract_key_terms(q, cve_ids, cwe_ids, hosts)
+    group_by = _detect_group_by(q)
+    key_terms = _extract_key_terms(q, entities)
     output_style = _INTENT_OUTPUT_STYLE.get(intent, "report")
-
+    fields, directive = _derive_extraction(intent, group_by, language)
     return QueryPlan(
         query=q,
         language=language,
         intent=intent,
         intents=intents or ["analyze"],
         key_terms=key_terms,
-        cve_ids=cve_ids,
-        cwe_ids=cwe_ids,
-        hosts=hosts,
-        severity_filter=severity_filter,
+        entities=entities,
         group_by=group_by,
         output_style=output_style,
-        extraction_focus="",
+        extraction_fields=fields,
+        extraction_directive=directive,
     )
 
 
-# Человекочитаемые инструкции под стиль ответа — для REDUCE-контракта (Столп 3).
+# Контракт ответа под форму (нейтральный) — для REDUCE.
 _OUTPUT_STYLE_DIRECTIVE: dict[str, str] = {
-    "diff_table": (
-        "Сформируй сравнение в виде таблицы: что появилось (NEW), что исправлено "
-        "(FIXED), что осталось (PERSISTENT). Подсвети изменения по severity."
+    "comparison": (
+        "Сформируй ответ как сравнение: что появилось, что пропало, что совпадает; "
+        "подсвети различия."
     ),
     "ranked_list": (
-        "Выведи находки ранжированным списком по приоритету (severity + "
-        "эксплуатируемость + наличие фикса), сверху — что чинить первым."
+        "Выведи результат ранжированным списком по важности/приоритету, сверху — самое значимое."
     ),
-    "matrix": (
-        "Сгруппируй находки в матрицу/таблицу по запрошенной оси; не теряй ни одной."
-    ),
-    "stats": (
-        "Дай количественную сводку: распределение по severity и по запрошенной оси, "
-        "итоговые числа, затем короткие выводы."
-    ),
-    "brief": (
-        "Дай сжатое резюме: 5–10 ключевых пунктов и общий уровень риска, без воды."
-    ),
+    "matrix": "Сгруппируй результат в таблицу/матрицу по запрошенной оси; не теряй элементы.",
+    "stats": "Дай количественную сводку: итоговые числа и распределения, затем краткие выводы.",
+    "brief": "Дай сжатое резюме: ключевые пункты и общая картина, без воды.",
+    "table": "Представь извлечённые элементы таблицей с заполненными полями.",
+    "narrative": "Дай связное объяснение с опорой на источники.",
     "report": "",
 }
 
@@ -278,6 +314,4 @@ def output_style_directive(plan: QueryPlan) -> str:
     base = _OUTPUT_STYLE_DIRECTIVE.get(plan.output_style, "")
     if plan.group_by:
         base = (base + f" Ось группировки: {plan.group_by}.").strip()
-    if plan.severity_filter:
-        base = (base + " Сфокусируйся на severity: " + ", ".join(plan.severity_filter) + ".").strip()
     return base

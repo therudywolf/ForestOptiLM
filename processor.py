@@ -3597,57 +3597,53 @@ async def run_map_reduce(
         n_file_groups = len(file_groups)
         logger.info("File groups for reduce: %s", n_file_groups)
 
-        # Детерминированное категорирование (Столп 3) + память находок (Столп 5).
-        # Находки парсим один раз и переиспользуем для counts и для диффа сканов.
+        # Детерминированная агрегация (Pillar D) + память прогонов (Pillar E),
+        # доменно-нейтрально. Записи парсим один раз и переиспользуем для счёта и диффа.
         reduce_hint_full = reduce_hint
         try:
-            from findings_aggregate import (
-                categorize,
-                iter_findings_from_map,
-                summary_markdown,
-            )
+            from aggregate import categorize, iter_records_from_map, summary_markdown
 
-            agg_findings = list(iter_findings_from_map(merge_inputs))
-            if agg_findings:
+            agg_records = list(iter_records_from_map(merge_inputs))
+            if agg_records:
                 summ = categorize(
-                    agg_findings,
+                    agg_records,
                     dedup_keys=query_plan.dedup_keys(),
-                    axis=query_plan.group_by,
+                    axis=query_plan.facet_axis(),
                 )
                 cat_block = summary_markdown(summ, language=query_plan.language)
                 if cat_block:
                     reduce_hint_full = (reduce_hint + "\n\n" + cat_block).strip()
-                    logger.info("Category block built (%d chars) for REDUCE", len(cat_block))
+                    logger.info("Aggregate block built (%d chars) for REDUCE", len(cat_block))
                     if on_progress:
                         try:
-                            on_progress(1, 1, "categorize", from_cache_count, preview=cat_block[:300])
+                            on_progress(1, 1, "aggregate", from_cache_count, preview=cat_block[:300])
                         except TypeError:
                             pass
-                # Память находок: сохранить скан и сравнить с прошлым по тому же источнику.
+                # Память прогонов: сохранить прогон и сравнить с прошлым по тому же источнику.
                 try:
-                    from findings_store import findings_memory_enabled, record_and_diff
+                    from run_memory import record_and_diff, run_memory_enabled
 
-                    if job_id and source_path and findings_memory_enabled():
+                    if job_id and source_path and run_memory_enabled():
                         diff_block = record_and_diff(
                             job_id=job_id,
                             source_path=source_path,
                             query=user_query,
-                            findings=agg_findings,
-                            totals=dict(summ.by_severity),
+                            records=agg_records,
+                            totals={k: v for k, v in summ.by_category},
                             language=query_plan.language,
                         )
                         if diff_block:
                             reduce_hint_full = (reduce_hint_full + "\n\n" + diff_block).strip()
-                            logger.info("Scan diff vs previous appended for source")
+                            logger.info("Run diff vs previous appended for source")
                             if on_progress:
                                 try:
-                                    on_progress(1, 1, "scan_diff", from_cache_count, preview=diff_block[:300])
+                                    on_progress(1, 1, "run_diff", from_cache_count, preview=diff_block[:300])
                                 except TypeError:
                                     pass
                 except Exception as exc:
-                    logger.warning("Findings memory skipped: %s", sanitize_for_log(str(exc)[:160]))
+                    logger.warning("Run memory skipped: %s", sanitize_for_log(str(exc)[:160]))
         except Exception as exc:
-            logger.warning("Category aggregation skipped: %s", sanitize_for_log(str(exc)[:160]))
+            logger.warning("Aggregation skipped: %s", sanitize_for_log(str(exc)[:160]))
 
         refine_used = False
         draft: str = ""
