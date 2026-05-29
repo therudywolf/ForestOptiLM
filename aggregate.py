@@ -80,16 +80,25 @@ def _record_text(rec: dict[str, Any]) -> str:
 
 
 def extract_facets(rec: dict[str, Any], outer_source: str = "") -> dict[str, Any]:
-    """Нейтральные фасеты из записи MAP (любой схемы)."""
-    category = _first_present(rec, _CATEGORY)
-    item = _first_present(rec, _FIRST)
+    """Нейтральные фасеты из записи MAP (любой схемы).
+
+    Учитывает опциональный словарь `fields` (поля под задачу из query-adaptive
+    MAP): его значения дополняют верхнеуровневые поля, не перекрывая их.
+    """
+    flat = dict(rec)
+    extra = rec.get("fields")
+    if isinstance(extra, dict):
+        for k, v in extra.items():
+            flat.setdefault(k, v)
+    category = _first_present(flat, _CATEGORY)
+    item = _first_present(flat, _FIRST)
     if not item:
-        expl = _first_present(rec, ["explanation", "observation", "context", "rationale", "reason"])
+        expl = _first_present(flat, ["explanation", "observation", "context", "rationale", "reason"])
         item = expl[:80]
-    source = _first_present(rec, _SOURCE) or _first_evidence_source(rec) or outer_source
-    level = _first_present(rec, _LEVEL).lower()
-    value = _first_present(rec, _VALUE)
-    blob = _record_text(rec)
+    source = _first_present(flat, _SOURCE) or _first_evidence_source(rec) or outer_source
+    level = _first_present(flat, _LEVEL).lower()
+    value = _first_present(flat, _VALUE)
+    blob = _record_text(flat)
     entities: list[str] = []
     for pat in _ENTITY_RES.values():
         for m in pat.findall(blob):
