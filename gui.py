@@ -63,6 +63,8 @@ from processor import (
 )
 from pipeline import build_index, query_index
 from run_config import RunConfig
+from notebook_gui import NotebookUIMixin
+import connection_presets as cp
 
 logger = logging.getLogger("nocturne")
 
@@ -86,7 +88,7 @@ FILE_TYPES = [
 ]
 
 
-class NocturneApp(ctk.CTk):
+class NocturneApp(NotebookUIMixin, ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
         self.title("Nocturne Data Forge")
@@ -160,13 +162,29 @@ class NocturneApp(ctk.CTk):
                      text_color="gray", font=ctk.CTkFont(size=11)
                      ).pack(anchor="w", pady=(0, 10), **pad)
 
+        # Провайдер — быстрая настройка сервера (LM Studio / Ollama / OpenAI-совм.)
+        ctk.CTkLabel(sb, text="Провайдер (сервер LLM)").pack(anchor="w", pady=(8, 0), **pad)
+        self._provider_var = ctk.StringVar(
+            value=(cp.get_preset(cp.DEFAULT_PRESET_KEY) or cp.PRESETS[0]).label
+        )
+        self._provider_menu = ctk.CTkOptionMenu(
+            sb, variable=self._provider_var, values=cp.preset_labels(),
+            dynamic_resizing=False, width=250, command=self._on_provider_change,
+        )
+        self._provider_menu.pack(fill="x", pady=3, **pad)
+        self._provider_hint = ctk.CTkLabel(
+            sb, text="", text_color="gray", font=ctk.CTkFont(size=11),
+            wraplength=250, justify="left",
+        )
+        self._provider_hint.pack(anchor="w", pady=(0, 4), **pad)
+
         # API Base URL
         ctk.CTkLabel(sb, text="API Base URL").pack(anchor="w", pady=(8, 0), **pad)
         self._url_var = ctk.StringVar(value=API_BASE)
         ctk.CTkEntry(sb, textvariable=self._url_var).pack(fill="x", pady=3, **pad)
 
         # API Key
-        ctk.CTkLabel(sb, text="API Key").pack(anchor="w", pady=(6, 0), **pad)
+        ctk.CTkLabel(sb, text="API Key (если требуется)").pack(anchor="w", pady=(6, 0), **pad)
         self._api_key_var = ctk.StringVar(value=API_KEY)
         ctk.CTkEntry(sb, textvariable=self._api_key_var, show="*"
                      ).pack(fill="x", pady=3, **pad)
@@ -175,7 +193,7 @@ class NocturneApp(ctk.CTk):
         ctk.CTkButton(sb, text="Обновить модели", height=30,
                       command=self._on_fetch_models
                       ).pack(fill="x", pady=(10, 3), **pad)
-        ctk.CTkButton(sb, text="Проверить LM Studio", height=28,
+        ctk.CTkButton(sb, text="Проверить подключение", height=28,
                       fg_color="transparent", border_width=1,
                       command=self._on_test_connection
                       ).pack(fill="x", pady=(0, 8), **pad)
@@ -478,6 +496,7 @@ class NocturneApp(ctk.CTk):
         self._result_tab = self._tabs.add("Результат")
         self._logs_tab = self._tabs.add("Логи")
         self._rag_tab = self._tabs.add("RAG")
+        self._notebooks_tab = self._tabs.add("Блокноты")
         self._tabs.set("Результат")
 
         result_toolbar = ctk.CTkFrame(self._result_tab, fg_color="transparent")
@@ -519,6 +538,7 @@ class NocturneApp(ctk.CTk):
         self._log_text = ctk.CTkTextbox(self._logs_tab, wrap="word")
         self._log_text.pack(fill="both", expand=True)
         self._build_rag_tab(self._rag_tab)
+        self._build_notebooks_tab(self._notebooks_tab)
 
         # Save row
         save_row = ctk.CTkFrame(main, fg_color="transparent")
@@ -841,6 +861,16 @@ class NocturneApp(ctk.CTk):
             self._url_var.set(str(state.get("base_url") or "").strip())
         self._composer_use_var.set(bool(state.get("composer_enabled", False)))
         self._api_mode_var.set("openai" if state.get("api_mode") == "openai" else "native")
+        # Преселект провайдера под загруженные URL+режим (без перезаписи URL).
+        try:
+            preset = cp.get_preset(
+                cp.detect_preset(self._url_var.get().strip(), self._api_mode_var.get().strip())
+            )
+            if preset is not None:
+                self._provider_var.set(preset.label)
+                self._provider_hint.configure(text=preset.hint)
+        except Exception:
+            pass
         self._low_vram_var.set(bool(state.get("low_vram_mode", True)))
         self._max_reduce_tokens_var.set(str(state.get("max_reduce_input_tokens", 24000)))
         self._max_chunk_tokens_var.set(str(state.get("max_chunk_tokens", 6000)))
@@ -1263,6 +1293,29 @@ class NocturneApp(ctk.CTk):
         # Автоматический резерв без ручной настройки: ~20% контекста, но в разумных рамках.
         reserve = max(1024, min(4096, int(context_budget * 0.2)))
         return max(256, min(reserve, max(256, context_budget - 500)))
+
+    def _on_provider_change(self, label: str) -> None:
+        preset = cp.preset_by_label(label)
+        if preset is None:
+            return
+        # На старте (авто-детект) только показываем подсказку — НЕ перетираем
+        # сохранённый пользователем URL/режим.
+        if not getattr(self, "_runtime_state_ready", False):
+            self._provider_hint.configure(text=preset.hint)
+            return
+        if preset.autofills_url:
+            self._url_var.set(preset.base_url)
+        self._api_mode_var.set(preset.api_mode)
+        self._provider_hint.configure(text=preset.hint)
+        # Применить и сохранить, как при ручной смене режима.
+        self._on_runtime_mode_changed()
+        self._persist_runtime_state()
+        self._append_log_line(
+            f"[PRESET] {preset.label}: api_mode={preset.api_mode}, "
+            f"url={preset.base_url if preset.autofills_url else '(вручную)'}",
+            "preflight",
+        )
+        self._set_status(f"Провайдер: {preset.label}", "lightgreen")
 
     def _on_test_connection(self) -> None:
         set_runtime_modes(

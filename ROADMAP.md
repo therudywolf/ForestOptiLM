@@ -41,3 +41,29 @@
 - Add resumable jobs with a visible run history.
 - Add a project/session concept so indexes, cache, logs, and outputs are grouped by user task.
 - Ship signed Windows release artifacts once the recovery and stabilization phases are complete.
+
+## 6. Notebooks (NotebookLM-style)
+
+- [x] Persistent named source collections (file / folder / URL) with a per-notebook hybrid index.
+- [x] Grounded multi-turn chat: retrieval scoped to the notebook, `[N]` citations with click-to-passage, honest "not in sources" refusal.
+- [x] Studio panel: study guide, FAQ, timeline, briefing, flashcards generated over the corpus.
+- [x] Research-archive UI: notebook gallery (covers, descriptions, search, index status) ↔ three-pane workspace (Sources · Chat · Studio) with rename/describe/manage.
+- [ ] Optional audio transcription (faster-whisper) and audio-overview script generation (deferred; heavy local dependency).
+- [ ] Per-page / per-line citation granularity for PDFs (today citations resolve to file + chunk).
+- [ ] Incremental index updates instead of full rebuild when adding a source.
+
+## 7. Providers & distribution
+
+- [x] Connection presets: LM Studio (native/OpenAI), Ollama, OpenAI-compatible, manual — one-click Base URL + API mode (`connection_presets.py`), with auto-detection and a GUI provider selector.
+- [x] CLI `--base-url` / `--api-key` / `--api-mode` so any server (incl. Ollama) works headless.
+- [x] Optimization run-profiles: `balanced`, `precise`, `ollama_local` alongside the existing presets.
+- [x] Cross-platform PyInstaller builds (Windows/macOS/Linux) via CI matrix + per-OS scripts; release artifacts attached to GitHub Releases on tag.
+- [ ] Provider-native model metadata for Ollama (context length, vision capability) to enrich auto-categorization.
+- [ ] Signed/notarized macOS and Windows artifacts.
+
+## 8. Smart import (intelligent ingestion)
+
+- [x] Pluggable importer registry that normalizes recognized exports to clean text before chunking (`smart_import.py`), wired into `file_extractors.extract_content`.
+- [x] Telegram Desktop HTML export: per-message dialogue, grouped-sender carry-over, service-message skip, `[медиа: …]` markers.
+- [ ] More formats: WhatsApp `_chat.txt`, Slack/Discord JSON exports, generic chat logs.
+- [ ] Preserve reply/thread structure and forwarded-from attribution in the cleaned output.

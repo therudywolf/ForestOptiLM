@@ -35,6 +35,23 @@ Licensed under **AGPL-3.0-or-later** — see [LICENSE](LICENSE), [NOTICE](NOTICE
 
 ## Features
 
+- **Notebooks (NotebookLM-style)** — persistent named source collections with a
+  **grounded chat** that answers *only* from that notebook's sources, with
+  clickable `[N]` citations (open the file / see the cited passage) and an honest
+  *"not in the sources"* refusal. Plus a **Studio** panel that generates study
+  guides, FAQs, timelines, briefings and flashcards over the corpus. See
+  [Notebooks](#notebooks).
+- **Smart import** — recognized exports are normalized to clean, LLM-friendly text
+  *before* indexing instead of being dumped as raw markup. First format:
+  **Telegram Desktop HTML export** (`messages*.html`) → one clean
+  `[date] sender: text` block per message, with grouped-message author carry-over,
+  service-message skipping and `[медиа: …]` markers. Works everywhere (Map-Reduce,
+  RAG, Notebooks) and is pluggable for more formats. See [Smart import](#smart-import).
+- **Multiple backends** — one-click **provider presets** for LM Studio (native or
+  OpenAI), **Ollama**, and any OpenAI-compatible server (vLLM, llama.cpp, LocalAI);
+  models picked from a live API list. See [Provider presets](#provider-presets-lm-studio--ollama--openai-compatible).
+- **Cross-platform builds** — standalone apps for **Windows, macOS and Linux** via
+  a CI matrix and per-OS scripts. See [Desktop builds](#desktop-builds-windows--macos--linux).
 - **Query-adaptive extraction** — the MAP schema is derived from your task, not fixed.
 - **Map-Reduce pipeline** with evidence-grounding and faithful merge.
 - **Record-aware ingestion** — JSON/JSONL/XML reports split by *records* (one record never split across chunks), no per-format parsers.
@@ -80,7 +97,14 @@ python main.py
 ```bash
 python -m forestoptilm.cli analyze ./docs -q "Summarize security findings"
 python -m forestoptilm.cli analyze ./docs -q "..." --profile large_corpus -o report.md
+
+# Point at any server (here: Ollama) without editing config files
+python -m forestoptilm.cli analyze ./docs -q "..." \
+  --base-url http://127.0.0.1:11434 --api-mode openai -m qwen2.5 --profile ollama_local
 ```
+
+Flags: `--base-url`, `--api-key`, `--api-mode {native,openai}`, `--model/-m`,
+`--profile`, `--workers`, `--composer`, `--scout-model`, `--output/-o`.
 
 ### Windows: one-click launch
 
@@ -90,29 +114,77 @@ Double-click **`start.bat`** in the project directory. The script will:
 - install dependencies from `requirements.txt`;
 - launch the application.
 
-### Windows: build a standalone .exe
+## Desktop builds (Windows / macOS / Linux)
 
-No Python needed on the target machine. From a checkout with deps installed:
+Standalone builds need no Python on the target machine. PyInstaller does **not**
+cross-compile, so each OS is built on its own — locally or via CI.
+
+### Download a release
+
+Tagged releases publish a zip per OS (built by the
+[Release workflow](.github/workflows/release.yml)):
+
+- `NocturneDataForge-Windows-*.zip` — unzip, run `NocturneDataForge.exe`
+- `NocturneDataForge-macOS-*.zip` — contains `NocturneDataForge.app`
+- `NocturneDataForge-Linux-*.zip` — unzip, run `./NocturneDataForge/NocturneDataForge`
+
+Every push also builds all three on CI ([Build workflow](.github/workflows/build.yml))
+so artifacts are downloadable from the Actions run.
+
+### Build it yourself
+
+From a checkout with deps installed (`pip install -r requirements.txt pyinstaller`):
 
 ```powershell
-pip install -r requirements.txt pyinstaller
+# Windows
 pwsh -File scripts/build_exe.ps1      # or double-click scripts\build_exe.bat
 ```
 
-The script prefetches the tokenizer (so the app works **offline**) and runs
-PyInstaller against [`nocturne.spec`](nocturne.spec). Output is a one-dir app:
-
-```
-dist/NocturneDataForge/NocturneDataForge.exe   (+ _internal/)
+```bash
+# macOS / Linux
+bash scripts/build.sh
 ```
 
-Ship the **whole `dist/NocturneDataForge` folder** (zip it). On first run the app
-creates a `NocturneData/` folder next to the `.exe` for cache and indexes. Build
-artifacts (`build/`, `dist/`, `.build/`) are git-ignored.
+Both prefetch the tokenizer (so the app works **offline**) and run PyInstaller
+against [`nocturne.spec`](nocturne.spec). Output is a one-dir app under
+`dist/NocturneDataForge/` (plus `dist/NocturneDataForge.app` on macOS). Ship the
+**whole folder** (zip it, or run `python scripts/package_dist.py`). On first run
+the app creates a `NocturneData/` folder next to the binary for cache and indexes.
+Build artifacts (`build/`, `dist/`, `.build/`) are git-ignored.
 
 ## Configuration
 
-### LM Studio connection (recommended)
+### Provider presets (LM Studio / Ollama / OpenAI-compatible)
+
+Pick a **Провайдер (сервер LLM)** in the sidebar and the Base URL + API mode are
+filled for you — no need to remember ports or paths:
+
+| Preset | Base URL | API mode | Notes |
+|--------|----------|----------|-------|
+| **LM Studio (REST v1)** | `http://127.0.0.1:1234` | `native` | reasoning:off for thinking models, auto load/unload, context from metadata |
+| **LM Studio (OpenAI API)** | `http://127.0.0.1:1234` | `openai` | same server via `/v1` — use if native is finicky |
+| **Ollama** | `http://127.0.0.1:11434` | `openai` | OpenAI-compatible `/v1`; no API key |
+| **OpenAI-compatible** | *(you enter)* | `openai` | vLLM, llama.cpp server, LocalAI, … |
+| **Вручную** | *(you enter)* | *(you choose)* | manual |
+
+Then click **Обновить модели** to list the models the server actually exposes and
+pick the chat / embedding / vision model from the dropdowns. The preset is
+auto-detected from your saved URL on next launch.
+
+#### Ollama quickstart
+
+```bash
+ollama serve                      # start the server (:11434)
+ollama pull qwen2.5               # a chat model
+ollama pull nomic-embed-text      # an embedding model for RAG / Notebooks
+```
+
+In the app: Провайдер → **Ollama**, **Обновить модели**, select `qwen2.5` as the
+LLM and `nomic-embed-text` as the embedding model. CLI: `--base-url
+http://127.0.0.1:11434 --api-mode openai`. (Embeddings need an Ollama build with
+the OpenAI-compatible `/v1/embeddings` endpoint — any recent release.)
+
+### LM Studio connection file (optional)
 
 Copy the template and fill in your values:
 
@@ -209,6 +281,26 @@ depends on LM Studio throughput, scout threshold, and hardware. Use **scout** +
 | `NOCTURNE_MAP_NORMALIZE_SPILL` | `2500` | Spill normalized MAP JSON to SQLite before merge (`0` = keep all in RAM) |
 | `NOCTURNE_DUAL_MAP_RESOLVE` | `0` | When `1` and dual-instance pool has 2+ IDs, run MAP on both and merge via `conflict_resolve` |
 
+### Optimization presets (run profiles)
+
+[`config/run_profiles.yaml`](config/run_profiles.yaml) bundles engine settings
+(scout filter, chunk size, workers, composer merge, low-VRAM) into named presets
+applied with `--profile <name>` (CLI) or the GUI buttons:
+
+| Profile | For | Highlights |
+|---------|-----|-----------|
+| `quick_scan` | fast first pass | scout on, small chunks |
+| `balanced` | mid-size corpora | no scout, 5k chunks |
+| `precise` | maximum fidelity | small chunks, composer merge |
+| `deep_audit` | careful review | no scout, large chunks |
+| `large_corpus` | 1M+ tokens | scout + composer + low-VRAM |
+| `ollama_local` | Ollama / small context | scout, 3k chunks |
+
+The actual extraction prompt is **derived from your query** (intent + per-task
+schema), so presets tune *throughput and context*, not the wording — the wording
+adapts itself. Context size is read automatically from the server; cap it with
+`NOCTURNE_MAX_CHUNK_TOKENS` or the **Дополнительно** panel.
+
 ### GUI (no manual tuning)
 
 - **Быстро / Глубоко / 1M+** — run profiles in one click.
@@ -259,11 +351,73 @@ tokens (`CVE-2024-3094`, hostnames, `pkg@version`), fused with Reciprocal Rank
 Fusion. If the embedding model/server is unavailable, BM25-only search still
 works — exact lookups don't depend on the embedder.
 
+## Smart import
+
+Raw exports index poorly: a Telegram HTML dump fed through naive `get_text()`
+becomes a soup of navigation, dates, reactions and markup. **Smart import**
+detects known export formats and rewrites them into clean, per-message text
+*before* chunking — the same shape people hand-prepare for NotebookLM.
+
+- **Telegram Desktop HTML export** — point the app (or a notebook source) at a
+  `messages*.html` file or the export folder. Each message becomes
+  `[<date+timezone>] <sender>:\n<text>`; consecutive grouped messages inherit the
+  previous sender (Telegram omits it), `message service` separators are dropped,
+  and photos/files/stickers get a `[медиа: …]` marker instead of vanishing.
+
+Detection and conversion happen inside
+[`file_extractors.extract_content`](file_extractors.py), so smart import benefits
+the main Map-Reduce flow, RAG and Notebooks alike — no special button. Anything
+not recognized falls back to the normal `html→text` path. Adding a new format
+(WhatsApp `_chat.txt`, Slack JSON, …) is a single class in
+[`smart_import.py`](smart_import.py).
+
+## Notebooks
+
+A **Notebook** is a persistent, named collection of sources you can chat with and
+study — the local-first take on NotebookLM. Each notebook is a self-contained
+folder; everything stays on your machine.
+
+The **Блокноты** tab opens on a **research archive** — a gallery of notebook cards
+(cover, description, source/chunk counts, index status, search) you return to,
+reopen, rename, describe and manage over time. Opening a card switches to a
+three-pane **workspace** — **Источники · Чат · Studio** — mirroring NotebookLM.
+
+1. In the archive, click **＋ Новое исследование** to create a notebook (then
+   **Изменить** to set its description/icon; the cover colour is automatic).
+2. Add sources: **Файл** / **Папка** (indexed in place — huge dumps are not
+   copied) or **URL** (the page text is fetched and saved into the notebook).
+3. Click **🔨 Построить индекс** — builds the notebook's own hybrid index
+   (BM25 + FAISS) using the embedding model selected in the sidebar.
+4. **Chat:** ask in plain language. Answers are **grounded** — retrieval runs
+   *only* over this notebook, every claim carries a `[N]` citation, and clicking
+   a citation chip shows the exact passage with a button to open the source. If
+   the answer isn't in the sources, the assistant says so instead of inventing it.
+5. **Studio:** one click generates a **study guide**, **FAQ**, **timeline**,
+   **briefing/synopsis** or **flashcards** over the corpus; results are saved as
+   notes inside the notebook.
+
+Notebooks live in `NocturneData/notebooks/` next to the packaged `.exe`, or in
+`.local/notebooks/` when running from source (override with
+`NOCTURNE_NOTEBOOKS_DIR`). Layout per notebook: `notebook.json` (metadata),
+`index/` (FAISS + BM25), `sources/` (URL/derived text), `notes/` (Studio output),
+`chat.jsonl` (chat history). Adding a source rebuilds the index (FAISS is
+immutable). Audio transcription and audio/video "overviews" are intentionally out
+of scope for this local build.
+
 ## Project Structure
 
 | File / dir | Purpose |
 |------------|---------|
 | `main.py` | GUI entry point |
+| `notebook_store.py` | Notebooks: persistent source collections, CRUD, per-notebook index/chat/notes |
+| `notebook_chat.py` | Grounded chat over a notebook with `[N]` citations + honest refusal |
+| `notebook_studio.py` | Studio: study guide / FAQ / timeline / briefing / flashcards generation |
+| `notebook_gui.py` | «Блокноты» tab (NotebookUIMixin) — sources, chat with citation chips, Studio |
+| `url_ingest.py` | Fetch a web page and extract its text as a notebook source |
+| `smart_import.py` | Smart import: recognize exports (Telegram HTML…) and normalize to clean text |
+| `connection_presets.py` | Provider presets (LM Studio / Ollama / OpenAI-compatible) + auto-detection |
+| `scripts/build.sh`, `build_exe.ps1` | Per-OS PyInstaller builds (Linux/macOS, Windows) |
+| `scripts/prefetch_tiktoken.py`, `package_dist.py` | Offline tokenizer cache; zip the build per OS |
 | `gui.py` | CustomTkinter interface (dark theme) |
 | `forestoptilm/cli.py` | Headless `analyze` command |
 | `query_plan.py` | Query understanding: intent, entities, per-task extraction schema |
@@ -309,6 +463,8 @@ works — exact lookups don't depend on the embedder.
 | `NOCTURNE_DUAL_MAP_RESOLVE` | `0` | Dual-instance MAP + conflict resolution per chunk |
 | `NOCTURNE_SMOKE_CHAT_MODEL` | — | Override chat model for integration smoke |
 | `NOCTURNE_SMOKE_EMBED_MODEL` | — | Override embedding model for integration smoke |
+| `NOCTURNE_NOTEBOOKS_DIR` | *(auto)* | Override where Notebooks are stored (default: next to cache dir / `.local/notebooks`) |
+| `NOCTURNE_URL_MAX_BYTES` | `26214400` (25 MiB) | Max response size when adding a URL source |
 
 ### Tests
 
@@ -321,7 +477,7 @@ set NOCTURNE_RUN_INTEGRATION=1
 python -m pytest tests/test_lmstudio_integration.py -m integration -q
 ```
 
-GUI **Проверить LM Studio** runs full smoke when a chat model is selected.
+GUI **Проверить подключение** runs full smoke when a chat model is selected.
 
 ## Troubleshooting
 
