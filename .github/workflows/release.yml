@@ -59,6 +59,47 @@ jobs:
         with:
           files: |
             dist/NocturneDataForge-*.zip
-            dist/*.tar.gz
+            dist/NocturneDataForge-*.tar.gz
+            dist/forestoptilm-*.tar.gz
+          draft: false
+          generate_release_notes: true
+
+  build-fedora:
+    name: Build (Fedora)
+    runs-on: ubuntu-latest
+    container: fedora:latest
+    steps:
+      - name: Install build deps (Fedora)
+        run: |
+          dnf -y install git python3 python3-pip python3-tkinter \
+            binutils gcc mesa-libGL libglvnd-glx findutils
+
+      - uses: actions/checkout@v4
+
+      - name: Install Python dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install -r requirements.txt pyinstaller pytest
+
+      - name: Unit tests
+        run: python3 -m pytest tests/ -q -m "not integration"
+        env:
+          NOCTURNE_SKIP_INTEGRATION: "1"
+
+      - name: Prefetch tiktoken (offline tokenizer)
+        run: python3 scripts/prefetch_tiktoken.py
+
+      - name: Build with PyInstaller
+        run: python3 -m PyInstaller --noconfirm --clean nocturne.spec
+
+      - name: Package artifact
+        run: python3 scripts/package_dist.py
+        env:
+          NOCTURNE_DIST_OS: Fedora
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/NocturneDataForge-Fedora-*.tar.gz
           draft: false
           generate_release_notes: true

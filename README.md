@@ -121,14 +121,22 @@ cross-compile, so each OS is built on its own — locally or via CI.
 
 ### Download a release
 
-Tagged releases publish a zip per OS (built by the
+Tagged releases publish a per-OS archive (built by the
 [Release workflow](.github/workflows/release.yml)):
 
-- `NocturneDataForge-Windows-*.zip` — unzip, run `NocturneDataForge.exe`
-- `NocturneDataForge-macOS-*.zip` — contains `NocturneDataForge.app`
-- `NocturneDataForge-Linux-*.zip` — unzip, run `./NocturneDataForge/NocturneDataForge`
+| OS | Asset | Run |
+|----|-------|-----|
+| Windows | `NocturneDataForge-Windows-*.zip` | unzip → `NocturneDataForge.exe` |
+| macOS | `NocturneDataForge-macOS-*.tar.gz` | `tar xzf …` → open `NocturneDataForge.app` |
+| Linux | `NocturneDataForge-Linux-*.tar.gz` | `tar xzf …` → `./NocturneDataForge/NocturneDataForge` (or `run.sh`) |
+| Fedora | `NocturneDataForge-Fedora-*.tar.gz` | `tar xzf …` → `./NocturneDataForge/NocturneDataForge` (or `run.sh`) |
 
-Every push also builds all three on CI ([Build workflow](.github/workflows/build.yml))
+Linux/macOS archives are `.tar.gz` so the executable bit and symlinks survive (a
+plain zip drops them and the binary won't launch). The **Fedora** build is made
+inside a `fedora:latest` container for native-library compatibility; the generic
+**Linux** build is made on Ubuntu and runs on most recent distros.
+
+Every push also builds all targets on CI ([Build workflow](.github/workflows/build.yml))
 so artifacts are downloadable from the Actions run.
 
 ### Build it yourself
@@ -147,10 +155,11 @@ bash scripts/build.sh
 
 Both prefetch the tokenizer (so the app works **offline**) and run PyInstaller
 against [`nocturne.spec`](nocturne.spec). Output is a one-dir app under
-`dist/NocturneDataForge/` (plus `dist/NocturneDataForge.app` on macOS). Ship the
-**whole folder** (zip it, or run `python scripts/package_dist.py`). On first run
-the app creates a `NocturneData/` folder next to the binary for cache and indexes.
-Build artifacts (`build/`, `dist/`, `.build/`) are git-ignored.
+`dist/NocturneDataForge/` (plus `dist/NocturneDataForge.app` on macOS). Package it
+for release with `python scripts/package_dist.py` (`.zip` on Windows, `.tar.gz`
+elsewhere). On first run the app creates a `NocturneData/` folder next to the
+binary for cache and indexes. Build artifacts (`build/`, `dist/`, `.build/`) are
+git-ignored.
 
 ## Configuration
 

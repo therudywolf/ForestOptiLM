@@ -1,0 +1,4 @@
+# Shell scripts MUST keep LF endings or they fail to run on Linux/macOS
+# ("bad interpreter: /usr/bin/env bash^M"). Pin them explicitly so this holds
+# regardless of a contributor's core.autocrlf setting.
+*.sh text eol=lf
