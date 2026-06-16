@@ -1,12 +1,12 @@
 [project]
 name = "forestoptilm"
-version = "0.6.0-alpha.1"
+version = "0.7.0-alpha.1"
 description = "Bulk async file processing through local LLMs (LM Studio)"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
 requires-python = ">=3.10"
 authors = [
-    { name = "therudywolf", url = "https://github.com/therudywolf" },
+    { name = "therudywolf" },
 ]
 keywords = ["llm", "lm-studio", "map-reduce", "rag", "document-processing"]
 classifiers = [
@@ -14,7 +14,6 @@ classifiers = [
     "Environment :: X11 Applications",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
@@ -32,6 +31,12 @@ Issues = "https://github.com/therudywolf/ForestOptiLM/issues"
 
 [project.scripts]
 forestoptilm = "forestoptilm.cli:main"
+
+[tool.setuptools]
+# Flat layout with many top-level modules — name the importable package
+# explicitly so setuptools' auto-discovery doesn't bail out. (The app ships as
+# a PyInstaller binary; the sdist is just a source snapshot.)
+packages = ["forestoptilm"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.4"]

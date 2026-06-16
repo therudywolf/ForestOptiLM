@@ -52,6 +52,7 @@ jobs:
 
       - name: Build source archive (Linux only)
         if: runner.os == 'Linux'
+        continue-on-error: true  # never let an sdist hiccup block the binary upload
         run: python -m build --sdist
 
       - name: Upload release assets
