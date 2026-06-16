@@ -56,6 +56,7 @@
 
 - [x] Connection presets: LM Studio (native/OpenAI), Ollama, OpenAI-compatible, manual — one-click Base URL + API mode (`connection_presets.py`), with auto-detection and a GUI provider selector.
 - [x] CLI `--base-url` / `--api-key` / `--api-mode` so any server (incl. Ollama) works headless.
+- [x] Reasoning-model adaptation in `call_llm`: auto-escalate reasoning:off→on on empty output, strip inline `<think>` blocks, salvage from the reasoning channel; heuristic covers gemma-4+, gpt-oss, glm-4.6, o4. Verified live on gemma-4-e2b + gemma-12b (small MAP + big composer).
 - [x] Optimization run-profiles: `balanced`, `precise`, `ollama_local` alongside the existing presets.
 - [x] Cross-platform PyInstaller builds (Windows/macOS/Linux) via CI matrix + per-OS scripts; release artifacts attached to GitHub Releases on tag.
 - [ ] Provider-native model metadata for Ollama (context length, vision capability) to enrich auto-categorization.
