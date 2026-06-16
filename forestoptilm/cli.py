@@ -52,6 +52,10 @@ def main(argv: list[str] | None = None) -> int:
     analyze.add_argument("--scout-model", default="")
     analyze.add_argument("--profile", default="", help="run_profiles.yaml key")
     analyze.add_argument("--workers", type=int, default=0)
+    analyze.add_argument("--base-url", default="", help="Override server Base URL (e.g. http://127.0.0.1:11434 for Ollama)")
+    analyze.add_argument("--api-key", default="", help="Override API key")
+    analyze.add_argument("--api-mode", default="", choices=["", "native", "openai"],
+                         help="native = LM Studio REST; openai = OpenAI-compatible (Ollama, vLLM, …)")
     analyze.add_argument("--output", "-o", type=Path, default=None)
     args = p.parse_args(argv)
 
@@ -59,6 +63,16 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     base_url, api_key, _ = get_connection_defaults()
+    if args.base_url.strip():
+        base_url = args.base_url.strip()
+    if args.api_key.strip():
+        api_key = args.api_key.strip()
+    api_mode = (args.api_mode or "").strip().lower() or "native"
+    # Синхронизируем глобальный режим, иначе fetch_models / resolve_runtime_model_context
+    # пойдут в нативные LM Studio эндпоинты даже при --api-mode openai (Ollama сломается).
+    from processor import set_runtime_modes
+
+    set_runtime_modes(api_mode=api_mode)
     profile = get_profile(args.profile) if args.profile else {}
     scout_mode = bool(profile.get("scout_mode", False))
     scout_threshold = float(profile.get("scout_threshold", 0.35))
@@ -130,6 +144,7 @@ def main(argv: list[str] | None = None) -> int:
                 scout_relevance_threshold=scout_threshold,
                 scout_model=scout_m,
                 source_path=str(args.path),
+                api_mode=api_mode,
             )
         )
     out_path = args.output or Path("report.md")

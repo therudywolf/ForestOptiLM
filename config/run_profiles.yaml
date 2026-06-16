@@ -1,5 +1,12 @@
 # Run profiles for ForestOptiLM / Nocturne Data Forge
-large_corpus:
+#
+# Presets tune the Map-Reduce engine for a given trade-off (speed vs. fidelity vs.
+# scale). Apply from the CLI with `--profile <name>`, or via the GUI one-click
+# buttons. Keys: scout_mode, scout_threshold, max_chunk_tokens, workers,
+# composer_enabled, low_vram_mode.
+
+# --- core presets (used by GUI buttons) ----------------------------------
+large_corpus:        # 1M+ tokens: scout filter + smaller chunks + composer merge
   scout_mode: true
   scout_threshold: 0.35
   max_chunk_tokens: 4500
@@ -7,15 +14,38 @@ large_corpus:
   composer_enabled: true
   low_vram_mode: true
 
-quick_scan:
+quick_scan:          # fast first pass over a big pile
   scout_mode: true
   scout_threshold: 0.5
   max_chunk_tokens: 3500
   workers: 4
   composer_enabled: false
 
-deep_audit:
+deep_audit:          # no scout, larger chunks, careful merge
   scout_mode: false
   max_chunk_tokens: 6000
   workers: 2
   composer_enabled: true
+
+# --- optimization presets ------------------------------------------------
+balanced:            # sensible default for mid-size corpora
+  scout_mode: false
+  max_chunk_tokens: 5000
+  workers: 3
+  composer_enabled: false
+  low_vram_mode: true
+
+precise:             # maximum fidelity: small chunks, no scout, composer merge
+  scout_mode: false
+  max_chunk_tokens: 3000
+  workers: 2
+  composer_enabled: true
+  low_vram_mode: true
+
+ollama_local:        # tuned for Ollama / modest local context windows
+  scout_mode: true
+  scout_threshold: 0.4
+  max_chunk_tokens: 3000
+  workers: 2
+  composer_enabled: false
+  low_vram_mode: false

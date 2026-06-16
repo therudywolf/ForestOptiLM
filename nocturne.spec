@@ -3,11 +3,17 @@
 #
 # PyInstaller spec for Nocturne Data Forge (ForestOptiLM) GUI.
 # Build:  pyinstaller --noconfirm --clean nocturne.spec
-# Output: dist/NocturneDataForge/NocturneDataForge.exe  (one-dir, reliable)
+# Output (one-dir, reliable):
+#   Windows: dist/NocturneDataForge/NocturneDataForge.exe
+#   Linux:   dist/NocturneDataForge/NocturneDataForge
+#   macOS:   dist/NocturneDataForge/NocturneDataForge  +  dist/NocturneDataForge.app
 #
+# Cross-platform: the same spec builds on Windows, Linux and macOS (PyInstaller
+# does NOT cross-compile — run it once per target OS, e.g. via CI matrix).
 # One-dir is used intentionally: faiss/pandas/tcl-tk ship native libraries that
-# are far more robust un-packed than inside a single self-extracting .exe.
+# are far more robust un-packed than inside a single self-extracting binary.
 import os
+import sys
 
 from PyInstaller.utils.hooks import collect_all, collect_submodules, copy_metadata
 
@@ -89,3 +95,17 @@ coll = COLLECT(
     upx=False,
     name="NocturneDataForge",
 )
+
+# macOS: also wrap the one-dir build into a proper .app bundle.
+if sys.platform == "darwin":
+    app = BUNDLE(
+        coll,
+        name="NocturneDataForge.app",
+        icon=None,
+        bundle_identifier="com.therudywolf.nocturnedataforge",
+        info_plist={
+            "CFBundleName": "Nocturne Data Forge",
+            "CFBundleDisplayName": "Nocturne Data Forge",
+            "NSHighResolutionCapable": True,
+        },
+    )
