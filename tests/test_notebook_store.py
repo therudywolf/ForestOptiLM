@@ -83,6 +83,18 @@ class TestNotebookCrud(unittest.TestCase):
         reloaded = nbs.load_notebook(nb.id)
         self.assertEqual(reloaded.name, "Изучение ИБ — дампы")  # type: ignore[union-attr]
 
+    def test_cyrillic_name_yields_ascii_dir(self) -> None:
+        # faiss on Windows can't open non-ASCII index paths — the folder name MUST
+        # be ASCII even when the user's notebook name is fully Cyrillic.
+        nb = nbs.create_notebook("Изучение ИБ")
+        self.assertTrue(nb.id.isascii(), f"non-ASCII notebook id: {nb.id!r}")
+        self.assertTrue(str(nb.dir).isascii(), f"non-ASCII notebook dir: {nb.dir!r}")
+        self.assertEqual(nb.name, "Изучение ИБ")  # display name preserved
+        # Mixed name keeps its ASCII part.
+        nb2 = nbs.create_notebook("E2E проверка")
+        self.assertTrue(nb2.id.isascii())
+        self.assertIn("E2E", nb2.id)
+
     def test_add_path_source_dedup(self) -> None:
         nb = nbs.create_notebook("nb")
         f = Path(self._tmp.name) / "a.txt"

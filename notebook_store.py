@@ -75,7 +75,14 @@ def notebooks_root() -> Path:
 
 
 def _slugify(name: str) -> str:
-    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in name.strip())
+    """ASCII-safe folder name for the notebook.
+
+    Deliberately ASCII-only: faiss on Windows opens index files via the narrow C
+    ``fopen``, which cannot handle non-ASCII (e.g. Cyrillic) paths — so a notebook
+    named «Изучение ИБ» must still live in an ASCII directory. The human-readable
+    name (with any script) is preserved in notebook.json, not on the path.
+    """
+    safe = "".join(c if (c.isascii() and c.isalnum()) or c in "-_" else "_" for c in name.strip())
     safe = re.sub(r"_+", "_", safe).strip("_")
     return safe[:48] or "notebook"
 

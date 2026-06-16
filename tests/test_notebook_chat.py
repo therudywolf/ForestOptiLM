@@ -93,6 +93,34 @@ class TestAnswerQuestion(unittest.TestCase):
         self.assertEqual(res.answer, nc.REFUSAL_TEXT)
         self.assertEqual(res.citations, [])
 
+    def test_empty_model_output_is_graceful(self) -> None:
+        # Small reasoning models with reasoning:off sometimes return empty; the
+        # chat must not crash — it returns a friendly message instead.
+        nb = _FakeNotebook([_Hit("some grounding text", "C:/x/a.txt")])
+
+        async def empty_call_llm(messages, model, base_url, api_key, semaphore, **kw):
+            raise RuntimeError("Model returned empty content (possibly reasoning-only output)")
+
+        with mock.patch("processor.call_llm", new=empty_call_llm):
+            res = asyncio.run(nc.answer_question(
+                nb, "вопрос", base_url="u", api_key="", chat_model="m"))
+        self.assertFalse(res.refused)
+        self.assertEqual(res.citations, [])
+        self.assertEqual(len(res.contexts), 1)
+        self.assertTrue(res.extra.get("empty_output"))
+        self.assertIn("пуст", res.answer.lower())
+
+    def test_other_runtime_errors_propagate(self) -> None:
+        nb = _FakeNotebook([_Hit("text", "C:/x/a.txt")])
+
+        async def boom(messages, model, base_url, api_key, semaphore, **kw):
+            raise RuntimeError("connection refused")
+
+        with mock.patch("processor.call_llm", new=boom):
+            with self.assertRaises(RuntimeError):
+                asyncio.run(nc.answer_question(
+                    nb, "q", base_url="u", api_key="", chat_model="m"))
+
     def test_grounded_answer_with_citations(self) -> None:
         nb = _FakeNotebook([_Hit("xz backdoor CVE-2024-3094", "C:/x/a.txt")])
 

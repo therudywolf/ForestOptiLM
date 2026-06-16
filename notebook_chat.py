@@ -263,15 +263,31 @@ async def answer_question(
 
     messages = build_chat_messages(question, contexts, history)
     semaphore = asyncio.Semaphore(1)
-    raw = await call_llm(
-        messages,
-        chat_model,
-        base_url,
-        api_key,
-        semaphore,
-        max_tokens=max_answer_tokens,
-        api_mode=api_mode,
-    )
+    try:
+        raw = await call_llm(
+            messages,
+            chat_model,
+            base_url,
+            api_key,
+            semaphore,
+            max_tokens=max_answer_tokens,
+            api_mode=api_mode,
+        )
+    except RuntimeError as exc:
+        # Маленькие reasoning-модели c reasoning:off иногда отдают пустой вывод —
+        # не роняем чат, а возвращаем понятное сообщение (ретраи внутри call_llm
+        # уже отработали). Прочие ошибки (сеть/HTTP) пробрасываем.
+        if "empty content" in str(exc).lower():
+            return ChatResult(
+                answer="Модель вернула пустой ответ. Попробуйте переформулировать "
+                       "вопрос или выбрать модель побольше.",
+                citations=[],
+                contexts=[c.to_citation() for c in contexts],
+                refused=False,
+                model=chat_model,
+                extra={"empty_output": True},
+            )
+        raise
     answer = (raw or "").strip()
     used = parse_used_citations(answer, contexts)
     return ChatResult(
