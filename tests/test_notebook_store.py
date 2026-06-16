@@ -35,7 +35,10 @@ class TestNotebooksRoot(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cache = Path(tmp) / "NocturneData" / ".nocturne_cache"
             os.environ["NOCTURNE_CACHE_DIR"] = str(cache)
-            self.assertEqual(nbs.notebooks_root(), Path(tmp) / "NocturneData" / "notebooks")
+            # notebooks_root() резолвит cache; сравниваем так же (macOS/Windows temp
+            # бывает симлинком/8.3-путём, нерезолвленное сравнение ложно упадёт).
+            expected = cache.resolve().parent / "notebooks"
+            self.assertEqual(nbs.notebooks_root(), expected)
 
     def test_default_local(self) -> None:
         root = nbs.notebooks_root()

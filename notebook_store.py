@@ -296,10 +296,12 @@ class Notebook:
             return False
         self.sources = [s for s in self.sources if s.id != source_id]
         # Удаляем только то, что мы сами породили (sources/), не трогаем файлы юзера.
+        # Обе стороны резолвим: на macOS/Windows temp бывает симлинком (/var→/private/var)
+        # или 8.3-путём (RUNNER~1), и нерезолвленное сравнение не совпадёт.
         if src.kind == "url" and src.path:
             try:
-                p = Path(src.path)
-                if self.sources_dir in p.resolve().parents:
+                p = Path(src.path).resolve()
+                if self.sources_dir.resolve() in p.parents:
                     p.unlink(missing_ok=True)
             except Exception:
                 pass
