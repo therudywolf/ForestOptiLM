@@ -51,6 +51,9 @@ Desktop.ini
 # Nocturne runtime data (generated locally)
 .nocturne_cache/
 .nocturne_index/
+last_job.json
+report.md
+NocturneData/
 
 # Test / coverage
 .coverage

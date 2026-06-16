@@ -1151,6 +1151,27 @@ def run_lmstudio_smoke_test(
         return False, sanitize_for_log(str(exc))
 
 
+def _strip_think_blocks(text: str) -> str:
+    """Срезать инлайновые CoT-блоки <think>…</think> (qwen3 / deepseek-r1 и пр.,
+    обычно через OpenAI-совместимый транспорт). Если кроме блока ничего нет —
+    вернётся пустая строка, и вызывающий код эскалирует reasoning."""
+    if not text:
+        return text
+    return _THINK_BLOCK_RE.sub("", text).strip()
+
+
+_THINK_BLOCK_RE = re.compile(r"(?is)<(think|thinking)>.*?</\1>")
+
+
+def _model_is_reasoning(model_id: str) -> bool:
+    try:
+        from reasoning_models import is_no_reasoning_param, model_has_reasoning_capability
+
+        return model_has_reasoning_capability(model_id) and not is_no_reasoning_param(model_id)
+    except Exception:
+        return False
+
+
 async def call_llm(
     messages: list[dict[str, Any]],
     model: str,
@@ -1163,14 +1184,23 @@ async def call_llm(
     on_retry: Callable[[int, int, str, float], None] | None = None,
     api_mode: str = "native",
     client: httpx.AsyncClient | None = None,
+    prefer_reasoning_off: bool = True,
 ) -> str:
     """
     Один запрос к чату (native LM Studio или OpenAI-совместимый), с семафором и backoff.
     Важно: слот семафора освобождается ДО backoff sleep, чтобы другие воркеры не простаивали.
+
+    Адаптация под reasoning-модели:
+    - ``prefer_reasoning_off=True`` (MAP/REDUCE — нужен чистый <results>): сначала
+      reasoning:off; ``False`` (чат/материалы) — сразу даём модели думать.
+    - Если под reasoning:off модель вернула ПУСТО (маленькие reasoning-модели так
+      делают) — авто-эскалация: повтор с reasoning:on.
+    - Инлайновые <think>…</think> в content срезаются.
     """
     headers = {"Content-Type": "application/json", **_auth_headers(api_key)}
     use_native = api_mode.strip().lower() != "openai"
     openai_fallback_tried = False
+    allow_reasoning_off = bool(prefer_reasoning_off)
 
     def _build_payload(native: bool, include_reasoning_control: bool = True) -> dict[str, Any]:
         if native:
@@ -1184,8 +1214,8 @@ async def call_llm(
                 "temperature": 0,
                 "store": False,
             }
-            if include_reasoning_control:
-                payload.update(native_reasoning_payload(model))
+            if include_reasoning_control and allow_reasoning_off:
+                payload.update(native_reasoning_payload(model, prefer_off=True))
             if system_prompt:
                 payload["system_prompt"] = system_prompt
             ctx_env = os.getenv("NOCTURNE_NATIVE_CHAT_CONTEXT_LENGTH", "").strip()
@@ -1279,6 +1309,7 @@ async def call_llm(
             if not isinstance(data, dict):
                 raise RuntimeError("Unexpected response format from LM Studio chat endpoint")
             content, reasoning = _extract_chat_response_content(data)
+            content = _strip_think_blocks(content)
             if not str(content).strip():
                 reasoning_str = str(reasoning).strip()
                 if reasoning_str:
@@ -1287,7 +1318,20 @@ async def call_llm(
                         content = salvaged
                     elif re.search(r"<results>", reasoning_str, re.IGNORECASE):
                         content = reasoning_str
+                    elif not prefer_reasoning_off:
+                        # Natural-language сайт: маленькие reasoning-модели кладут
+                        # сам ответ в reasoning-канал, content пуст — забираем его.
+                        content = _strip_think_blocks(reasoning_str)
                 if not str(content).strip():
+                    # Reasoning-модель ничего не отдала под reasoning:off — разрешим
+                    # ей подумать на следующей попытке (авто-эскалация off→on).
+                    if allow_reasoning_off and use_native and _model_is_reasoning(model):
+                        allow_reasoning_off = False
+                        logger.info(
+                            "Model %s empty under reasoning:off; retrying with reasoning on.",
+                            model,
+                        )
+                        raise RuntimeError("empty under reasoning:off — retrying with reasoning on")
                     if allow_empty_content:
                         content = ""
                     else:

@@ -16,10 +16,12 @@ REASONING_ID_HEURISTIC: Final = re.compile(
     r"(?:"
     r"qwen3[\.\-_]|qwen-?3[\.\-_]|"
     r"deepseek[-_]?r\d|deepseek-r|"
-    r"glm[-_]?4\.?5[-_]?air|"
+    r"glm[-_]?4\.?[5-9][-_]?air|glm[-_]?4\.?6|"
+    r"gemma[-_]?[4-9]|"  # gemma-4+ are thinking models (gemma-2/3 are not)
     r"magistral|"
-    r"reasoning|thinker|"
-    r"o1[-_]|o3[-_]"
+    r"gpt[-_]?oss|"
+    r"reasoning|thinker|thinking|"
+    r"o1[-_]|o3[-_]|o4[-_]"
     r")"
 )
 
