@@ -61,6 +61,8 @@
 - [x] Cross-platform PyInstaller builds (Windows/macOS/Linux) via CI matrix + per-OS scripts; release artifacts attached to GitHub Releases on tag.
 - [x] Name-based vision-model detection (llava / *-vl / qwen2.5-vl / minicpm-v / pixtral / gemma-3/4 …) so Ollama / OpenAI-compatible servers expose vision; the image_url path works on both transports.
 - [x] Windows .exe / macOS bundle carry author metadata (therudywolf). Actual code-signing/notarization still needs a paid certificate (scaffolding documented).
+- [x] Full LM Studio REST v1 coverage: model download (`POST /api/v1/models/download`) + progress polling (`GET /api/v1/models/download/status/:job_id`) — client helpers in `lm_studio_api.py` and a «Скачать модель…» GUI dialog.
+- [x] Model-instance hygiene: every app-triggered load (chat / embedding / vision / composer / scout / context-probe) is tracked, MAP keeps a single target instance, and loaded models are best-effort unloaded on app close (`NOCTURNE_UNLOAD_ON_CLOSE`, default on) so instances stop piling up. Clean shutdown cancels all `after()` timers and moves model-status polling off the UI thread.
 - [ ] Provider-native context-length detection for Ollama / OpenAI-compatible servers.
 
 ## 8. Smart import (intelligent ingestion)

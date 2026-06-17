@@ -569,6 +569,47 @@ def _loaded_instances_snapshot(base_url: str, api_key: str) -> dict[str, int]:
     return out
 
 
+# Модели, которые ПРИЛОЖЕНИЕ заставило LM Studio загрузить за сессию (chat,
+# embedding, vision, composer, scout). Используется для выгрузки при закрытии —
+# чтобы инстансы не копились и не «висели» после выхода.
+_APP_LOADED_MODELS: set[str] = set()
+
+
+def note_app_loaded_model(model: str) -> None:
+    """Запомнить, что приложение вызвало загрузку модели (для cleanup при закрытии)."""
+    m = (model or "").strip()
+    if m and not m.startswith("("):
+        _APP_LOADED_MODELS.add(m)
+
+
+def app_loaded_models() -> set[str]:
+    return set(_APP_LOADED_MODELS)
+
+
+def unload_app_models(base_url: str, api_key: str) -> int:
+    """Best-effort выгрузить все модели, загруженные приложением за сессию.
+
+    Только для нативного LM Studio (есть /api/v1/models/unload); для Ollama/OpenAI
+    выгрузки нет — модели сами уходят по своему keep-alive. Возвращает число
+    успешно выгруженных моделей. Модели, которых нет в реестре, не трогаем.
+
+    Гранулярность — по ключу модели, не по instance_id (как и весь lifecycle в
+    _ensure_model_ready): если пользователь вручную держит второй инстанс той же
+    модели, что грузило приложение, он тоже будет выгружен. Это согласуется с
+    поведением во время прогона; отключается через NOCTURNE_UNLOAD_ON_CLOSE=0.
+    """
+    models = sorted(_APP_LOADED_MODELS)
+    n = 0
+    for m in models:
+        try:
+            if _try_unload_model(base_url, api_key, m):
+                n += 1
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("unload_app_models: %s failed: %s", m, sanitize_for_log(str(exc)))
+    _APP_LOADED_MODELS.clear()
+    return n
+
+
 def _try_unload_model(base_url: str, api_key: str, model_key: str) -> bool:
     """
     Best-effort unload всех loaded instances модели.
@@ -994,6 +1035,7 @@ def resolve_runtime_model_context(
                         "temperature": 0,
                     }
                     client.post(chat_url, json=payload, headers=headers)
+            note_app_loaded_model(model)  # зонд тоже грузит модель → выгрузить при закрытии
             load_triggered = True
         except Exception:
             # Даже если trigger не удался, продолжаем polling metadata.
@@ -1220,6 +1262,7 @@ async def call_llm(
     use_native = api_mode.strip().lower() != "openai"
     openai_fallback_tried = False
     allow_reasoning_off = bool(prefer_reasoning_off)
+    note_app_loaded_model(model)  # любой чат → модель грузится; пометим для cleanup
 
     def _build_payload(native: bool, include_reasoning_control: bool = True) -> dict[str, Any]:
         if native:

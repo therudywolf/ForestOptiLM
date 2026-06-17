@@ -60,6 +60,12 @@ class EmbeddingClient:
             logger.info("Embedding model auto-load unavailable: %s", sanitize_for_log(str(exc)))
 
     def embed_texts(self, texts: list[str], batch_size: int = 32) -> list[list[float]]:
+        try:  # пометить embedding-модель для выгрузки при закрытии (ленивый импорт)
+            from processor import note_app_loaded_model
+
+            note_app_loaded_model(self.model)
+        except Exception:
+            pass
         vectors: list[list[float]] = []
         for start in range(0, len(texts), batch_size):
             batch = texts[start : start + batch_size]

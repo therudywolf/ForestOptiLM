@@ -26,6 +26,7 @@ import logging
 import os
 import queue
 import threading
+import tkinter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Literal
@@ -34,6 +35,7 @@ import customtkinter as ctk
 import httpx
 import pandas as pd
 
+import lm_studio_api as lmsapi
 from lmstudio_config import (
     get_default_model_optional,
     lmstudio_root_url,
@@ -109,6 +111,7 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
         self._log_entries: list[tuple[str, str]] = []  # (phase, formatted_line)
         self._pending_log_lines: list[str] = []
         self._log_flush_scheduled = False
+        self._log_flush_after_id: str | None = None
         self._log_filter_var = ctk.StringVar(value="all")
         # context_length per model, populated after "Обновить модели"
         self._model_ctx: dict[str, int] = {}
@@ -120,6 +123,9 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
         self._runtime_state = load_ui_runtime_state()
         self._runtime_state_ready = False
         self._model_poll_after_id: str | None = None
+        self._queue_poll_after_id: str | None = None
+        self._model_poll_active = False
+        self._closing = False
 
         self._build_ui()
         self._apply_runtime_state_to_widgets()
@@ -197,6 +203,10 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
         ctk.CTkButton(sb, text="Проверить подключение", height=28,
                       fg_color="transparent", border_width=1,
                       command=self._on_test_connection
+                      ).pack(fill="x", pady=(0, 3), **pad)
+        ctk.CTkButton(sb, text="Скачать модель…", height=28,
+                      fg_color="transparent", border_width=1,
+                      command=self._on_download_model_dialog
                       ).pack(fill="x", pady=(0, 8), **pad)
 
         # LLM model
@@ -608,12 +618,15 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
         )
         if show:
             self._pending_log_lines.append(formatted)
-            if not self._log_flush_scheduled:
+            if not self._log_flush_scheduled and not self._closing and self.winfo_exists():
                 self._log_flush_scheduled = True
-                self.after(150, self._flush_logs_to_ui)
+                self._log_flush_after_id = self.after(150, self._flush_logs_to_ui)
 
     def _flush_logs_to_ui(self) -> None:
         self._log_flush_scheduled = False
+        self._log_flush_after_id = None
+        if self._closing or not self.winfo_exists():
+            return
         if not self._pending_log_lines:
             return
         chunk = "\n".join(self._pending_log_lines) + "\n"
@@ -666,32 +679,93 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
         return ""
 
     def _on_close(self) -> None:
-        if self._model_poll_after_id is not None:
-            self.after_cancel(self._model_poll_after_id)
-            self._model_poll_after_id = None
+        # Закрываемся чисто: глушим таймеры (иначе Tk ждёт отложенные after-колбэки
+        # и процесс «висит»), затем best-effort выгружаем загруженные нами модели,
+        # чтобы инстансы не копились в LM Studio после выхода.
+        self._closing = True
+        for attr in ("_model_poll_after_id", "_queue_poll_after_id", "_log_flush_after_id"):
+            aid = getattr(self, attr, None)
+            if aid is not None:
+                try:
+                    self.after_cancel(aid)
+                except Exception:
+                    pass
+                setattr(self, attr, None)
+        self._unload_models_on_close()
         self.destroy()
 
+    def _unload_models_on_close(self) -> None:
+        """Выгрузить модели, загруженные приложением (нативный LM Studio).
+
+        Делаем в фоновом потоке с коротким join-таймаутом, чтобы недоступный сервер
+        не подвесил выход. Управляется env NOCTURNE_UNLOAD_ON_CLOSE (1 по умолчанию).
+        """
+        if os.environ.get("NOCTURNE_UNLOAD_ON_CLOSE", "1").strip().lower() in ("0", "false", "no"):
+            return
+        try:
+            import processor
+
+            if not processor.app_loaded_models():
+                return
+            base_url = self._url_var.get().strip() or API_BASE
+            api_key = self._api_key_var.get().strip() or API_KEY
+
+            def _worker() -> None:
+                try:
+                    processor.unload_app_models(base_url, api_key)
+                except Exception:
+                    pass
+
+            t = threading.Thread(target=_worker, daemon=True)
+            t.start()
+            t.join(timeout=4.0)
+        except Exception:
+            pass
+
     def _poll_loaded_model(self) -> None:
+        if self._closing or not self.winfo_exists():
+            return
+        self._model_poll_active = True  # занять слот цикла (старт идёт в фоновом потоке)
         base_url = self._url_var.get().strip() or API_BASE
         api_key = self._api_key_var.get().strip() or API_KEY
         root = lmstudio_root_url(base_url)
         headers: dict[str, str] = {}
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
+
+        # Сетевой запрос — в фоновом потоке, чтобы не морозить UI (раньше блокировал
+        # главный поток на timeout=5s каждые 4с).
+        def _fetch() -> None:
+            text = "недоступно"
+            try:
+                r = httpx.get(f"{root}/api/v1/models", headers=headers, timeout=5.0)
+                if r.status_code < 400:
+                    data = r.json()
+                    loaded_names: list[str] = []
+                    for m in data.get("models", []):
+                        key = str(m.get("key") or m.get("id") or "")
+                        loaded = m.get("loaded_instances") or []
+                        if isinstance(loaded, list) and loaded:
+                            loaded_names.append(key)
+                    text = ", ".join(loaded_names) if loaded_names else "нет загруженных моделей"
+            except Exception:
+                text = "недоступно"
+            if self._closing or not self.winfo_exists():
+                return
+            try:  # окно могло закрыться, пока ждали ответ — не шуметь трейсбэком
+                self.after(0, lambda: self._apply_loaded_model_label(text))
+            except (RuntimeError, tkinter.TclError):
+                pass
+
+        threading.Thread(target=_fetch, daemon=True).start()
+
+    def _apply_loaded_model_label(self, text: str) -> None:
+        if self._closing or not self.winfo_exists():
+            return
         try:
-            r = httpx.get(f"{root}/api/v1/models", headers=headers, timeout=5.0)
-            if r.status_code < 400:
-                data = r.json()
-                loaded_names: list[str] = []
-                for m in data.get("models", []):
-                    key = str(m.get("key") or m.get("id") or "")
-                    loaded = m.get("loaded_instances") or []
-                    if isinstance(loaded, list) and loaded:
-                        loaded_names.append(key)
-                text = ", ".join(loaded_names) if loaded_names else "нет загруженных моделей"
-                self._loaded_model_label.configure(text=f"Активная модель в LM Studio: {text}")
+            self._loaded_model_label.configure(text=f"Активная модель в LM Studio: {text}")
         except Exception:
-            self._loaded_model_label.configure(text="Активная модель в LM Studio: недоступно")
+            pass
         self._model_poll_after_id = self.after(4000, self._poll_loaded_model)
 
     def _on_build_index(self) -> None:
@@ -1258,7 +1332,7 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
             status += f" (reasoning: {n_reason})"
         self._set_status(status)
         self._persist_runtime_state()
-        if self._model_poll_after_id is None:
+        if not self._model_poll_active:
             self._poll_loaded_model()
 
     def _update_ctx_label(self, model: str) -> None:
@@ -1317,6 +1391,78 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
             "preflight",
         )
         self._set_status(f"Провайдер: {preset.label}", "lightgreen")
+
+    def _on_download_model_dialog(self) -> None:
+        """Скачать модель в LM Studio (REST v1 /api/v1/models/download + status)."""
+        base_url = self._url_var.get().strip() or API_BASE
+        api_key = self._api_key_var.get().strip() or API_KEY
+        root = lmstudio_root_url(base_url)
+
+        dlg = ctk.CTkToplevel(self)
+        dlg.title("Скачать модель (LM Studio)")
+        dlg.geometry("460x230")
+        ctk.CTkLabel(
+            dlg, text="Загрузка модели в LM Studio",
+            font=ctk.CTkFont(size=14, weight="bold"),
+        ).pack(pady=(12, 4))
+        ctk.CTkLabel(
+            dlg,
+            text="Идентификатор модели (например, repo из каталога LM Studio / HF).",
+            text_color="gray", font=ctk.CTkFont(size=11), wraplength=420, justify="left",
+        ).pack(pady=(0, 6))
+        model_var = ctk.StringVar(value="")
+        ctk.CTkEntry(dlg, textvariable=model_var, width=420).pack(pady=4)
+        status = ctk.CTkLabel(dlg, text="", text_color="gray", wraplength=420, justify="left")
+        status.pack(pady=6)
+
+        def _set(text: str, color: str = "gray") -> None:
+            if dlg.winfo_exists():
+                status.configure(text=text, text_color=color)
+
+        def _poll(job_id: str) -> None:
+            if self._closing or not dlg.winfo_exists():
+                return  # диалог закрыт — прекращаем опрос (загрузка продолжится на сервере)
+            st = lmsapi.get_model_download_status(root, api_key, job_id)
+            if "error" in st:
+                self.after(0, lambda: _set(f"Статус недоступен: {st['error']}", "#f59e0b"))
+                return
+            state = str(st.get("status") or st.get("state") or "").lower()
+            prog = st.get("progress")
+            pct = f" {float(prog) * 100:.0f}%" if isinstance(prog, (int, float)) else ""
+            if state in ("completed", "done", "success", "finished"):
+                self.after(0, lambda: _set("Готово ✓ — обновите список моделей.", "lightgreen"))
+                return
+            if state in ("failed", "error", "cancelled", "canceled"):
+                self.after(0, lambda: _set(f"Не удалось: {sanitize_for_log(str(st))[:200]}", "#f87171"))
+                return
+            self.after(0, lambda: _set(f"Загрузка…{pct} ({state or 'в процессе'})"))
+            if not self._closing and self.winfo_exists() and dlg.winfo_exists():
+                self.after(2000, lambda: threading.Thread(
+                    target=_poll, args=(job_id,), daemon=True).start())
+
+        def _start() -> None:
+            model = model_var.get().strip()
+            if not model:
+                _set("Укажите идентификатор модели.", "#f59e0b")
+                return
+            _set("Запуск загрузки…")
+
+            def _worker() -> None:
+                resp = lmsapi.start_model_download(root, api_key, model)
+                if "error" in resp:
+                    self.after(0, lambda: _set(f"Ошибка: {resp['error']}", "#f87171"))
+                    return
+                job_id = str(resp.get("job_id") or resp.get("id") or "").strip()
+                if not job_id:
+                    self.after(0, lambda: _set(
+                        "Загрузка запущена (job_id не вернулся). "
+                        "Проверьте прогресс в LM Studio.", "lightgreen"))
+                    return
+                threading.Thread(target=_poll, args=(job_id,), daemon=True).start()
+
+            threading.Thread(target=_worker, daemon=True).start()
+
+        ctk.CTkButton(dlg, text="Скачать", command=_start).pack(pady=10)
 
     def _on_test_connection(self) -> None:
         set_runtime_modes(
@@ -1956,7 +2102,8 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
 
         except queue.Empty:
             pass
-        self.after(80, self._poll_queue)
+        if not self._closing and self.winfo_exists():
+            self._queue_poll_after_id = self.after(80, self._poll_queue)
 
     # ------------------------------------------------------------------ #
     #  Save result
