@@ -59,6 +59,14 @@ if os.path.isdir(_tk_cache):
 if os.path.isdir("config"):
     datas += [("config", "config")]
 
+# App icon: bundle .ico/.png so the running app can set its window icon,
+# and feed .ico/.icns to the EXE/BUNDLE for the file/dock icon.
+for _ic in ("assets/icon.ico", "assets/icon.png"):
+    if os.path.isfile(_ic):
+        datas += [(_ic, "assets")]
+_icon_ico = "assets/icon.ico" if os.path.isfile("assets/icon.ico") else None
+_icon_icns = "assets/icon.icns" if os.path.isfile("assets/icon.icns") else None
+
 a = Analysis(
     ["main.py"],
     pathex=["."],
@@ -89,7 +97,7 @@ exe = EXE(
     upx=False,
     console=False,            # GUI app — no console window
     disable_windowed_traceback=False,
-    icon=None,
+    icon=_icon_ico,           # Windows .exe icon (ignored on other OSes)
     version=_version_file,
 )
 
@@ -107,7 +115,7 @@ if sys.platform == "darwin":
     app = BUNDLE(
         coll,
         name="NocturneDataForge.app",
-        icon=None,
+        icon=_icon_icns,
         bundle_identifier="com.therudywolf.nocturnedataforge",
         info_plist={
             "CFBundleName": "Nocturne Data Forge",

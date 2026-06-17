@@ -25,6 +25,7 @@ import datetime as dt
 import logging
 import os
 import queue
+import sys
 import threading
 import tkinter
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -128,6 +129,7 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
         self._closing = False
 
         self._build_ui()
+        self._set_window_icon()
         self._apply_runtime_state_to_widgets()
         self._runtime_state_ready = True
         self._bind_runtime_state_watchers()
@@ -677,6 +679,29 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
             self._embedding_model_var.set(embed)
             return embed
         return ""
+
+    def _assets_dir(self) -> Path:
+        """Каталог assets — и из исходников, и из собранного бандла (PyInstaller)."""
+        base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+        return base / "assets"
+
+    def _set_window_icon(self) -> None:
+        """Иконка окна: .ico на Windows + PNG-фолбэк (iconphoto) кроссплатформенно."""
+        assets = self._assets_dir()
+        ico = assets / "icon.ico"
+        png = assets / "icon.png"
+        try:
+            if sys.platform == "win32" and ico.is_file():
+                self.iconbitmap(default=str(ico))
+        except Exception:
+            pass
+        try:
+            if png.is_file():
+                # держим ссылку, иначе Tk соберёт изображение мусором
+                self._icon_photo = tkinter.PhotoImage(file=str(png))
+                self.iconphoto(True, self._icon_photo)
+        except Exception:
+            pass
 
     def _on_close(self) -> None:
         # Закрываемся чисто: глушим таймеры (иначе Tk ждёт отложенные after-колбэки
