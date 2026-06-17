@@ -29,8 +29,11 @@ Homepage = "https://github.com/therudywolf/ForestOptiLM"
 Repository = "https://github.com/therudywolf/ForestOptiLM"
 Issues = "https://github.com/therudywolf/ForestOptiLM/issues"
 
-[project.scripts]
-forestoptilm = "forestoptilm.cli:main"
+# No [project.scripts] console entry point on purpose: forestoptilm.cli imports
+# the flat top-level modules (parser, pipeline, processor, …) which are NOT part
+# of the installable `forestoptilm` package, so an installed `forestoptilm`
+# command would ImportError. The app ships as a PyInstaller binary; from a
+# checkout use `python -m forestoptilm.cli analyze …` (documented in README).
 
 [tool.setuptools]
 # Flat layout with many top-level modules — name the importable package
