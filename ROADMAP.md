@@ -69,5 +69,6 @@
 
 - [x] Pluggable importer registry that normalizes recognized exports to clean text before chunking (`smart_import.py`), wired into `file_extractors.extract_content`.
 - [x] Telegram Desktop HTML export: per-message dialogue, grouped-sender carry-over, service-message skip, `[медиа: …]` markers.
-- [ ] More formats: WhatsApp `_chat.txt`, Slack/Discord JSON exports, generic chat logs.
+- [x] More formats: WhatsApp `_chat.txt`, Slack/Discord JSON exports (`smart_import.py`: `whatsapp_txt`, `slack_json`, `discord_json`).
+- [ ] Generic chat-log heuristic importer (unstructured `name: message` logs).
 - [ ] Preserve reply/thread structure and forwarded-from attribution in the cleaned output.

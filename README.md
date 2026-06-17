@@ -41,12 +41,13 @@ Licensed under **AGPL-3.0-or-later** — see [LICENSE](LICENSE), [NOTICE](NOTICE
   *"not in the sources"* refusal. Plus a **Studio** panel that generates study
   guides, FAQs, timelines, briefings and flashcards over the corpus. See
   [Notebooks](#notebooks).
-- **Smart import** — recognized exports are normalized to clean, LLM-friendly text
-  *before* indexing instead of being dumped as raw markup. First format:
-  **Telegram Desktop HTML export** (`messages*.html`) → one clean
-  `[date] sender: text` block per message, with grouped-message author carry-over,
-  service-message skipping and `[медиа: …]` markers. Works everywhere (Map-Reduce,
-  RAG, Notebooks) and is pluggable for more formats. See [Smart import](#smart-import).
+- **Smart import** — recognized chat exports are normalized to clean,
+  LLM-friendly `[date] sender: text` blocks *before* indexing instead of being
+  dumped as raw markup. Shipped importers: **Telegram Desktop HTML**
+  (`messages*.html`), **WhatsApp** (`_chat.txt`), **Slack** and **Discord** JSON
+  exports — with grouped-message author carry-over, service-message skipping and
+  `[медиа: …]` markers. Works everywhere (Map-Reduce, RAG, Notebooks) and is
+  pluggable for more formats. See [Smart import](#smart-import).
 - **Multiple backends** — one-click **provider presets** for LM Studio (native or
   OpenAI), **Ollama**, and any OpenAI-compatible server (vLLM, llama.cpp, LocalAI);
   models picked from a live API list. See [Provider presets](#provider-presets-lm-studio--ollama--openai-compatible).
@@ -384,13 +385,15 @@ detects known export formats and rewrites them into clean, per-message text
   `[<date+timezone>] <sender>:\n<text>`; consecutive grouped messages inherit the
   previous sender (Telegram omits it), `message service` separators are dropped,
   and photos/files/stickers get a `[медиа: …]` marker instead of vanishing.
+- **WhatsApp** (`_chat.txt`), **Slack** and **Discord** JSON exports — same clean
+  `[date] sender: text` normalization (`whatsapp_txt`, `slack_json`,
+  `discord_json` importers in `smart_import.py`).
 
 Detection and conversion happen inside
 [`file_extractors.extract_content`](file_extractors.py), so smart import benefits
 the main Map-Reduce flow, RAG and Notebooks alike — no special button. Anything
-not recognized falls back to the normal `html→text` path. Adding a new format
-(WhatsApp `_chat.txt`, Slack JSON, …) is a single class in
-[`smart_import.py`](smart_import.py).
+not recognized falls back to the normal `html→text` path. Adding a new format is a
+single class in [`smart_import.py`](smart_import.py).
 
 ## Notebooks
 
@@ -422,8 +425,9 @@ Notebooks live in `NocturneData/notebooks/` next to the packaged `.exe`, or in
 `NOCTURNE_NOTEBOOKS_DIR`). Layout per notebook: `notebook.json` (metadata),
 `index/` (FAISS + BM25), `sources/` (URL/derived text), `notes/` (Studio output),
 `chat.jsonl` (chat history). Adding a source rebuilds the index (FAISS is
-immutable). Audio transcription and audio/video "overviews" are intentionally out
-of scope for this local build.
+immutable). Audio files (`.mp3/.wav/.m4a/.ogg/.flac/.opus/.aac/.wma`) are
+transcribed locally via the optional `faster-whisper` dependency and become text
+sources; only TTS / audio-video "overviews" are intentionally out of scope.
 
 ## Project Structure
 
