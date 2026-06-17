@@ -30,7 +30,7 @@ import threading
 import tkinter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Final, Literal
 
 import customtkinter as ctk
 import httpx
@@ -92,13 +92,54 @@ FILE_TYPES = [
 ]
 
 
+# Вкладки. NotebookLM-режим («Блокноты») идёт первым и по умолчанию — это лицо
+# приложения; массовый Map-Reduce-анализ — вторичен.
+TAB_NOTEBOOKS: Final = "📓  Блокноты"
+TAB_RESULT: Final = "📊  Результат"
+TAB_LOGS: Final = "🧾  Логи"
+TAB_RAG: Final = "🔎  RAG"
+
+# Фирменный акцент — фиолетово-индиго, как иконка (полумесяц на индиго-сквиркле).
+_BRAND_ACCENT = ["#7c6cf0", "#6d5dfc"]
+_BRAND_ACCENT_HOVER = ["#6354e0", "#5a4bd6"]
+
+
+def _apply_brand_theme() -> None:
+    """Перекрасить акцент CustomTkinter под бренд (вместо генерик-синего)."""
+    try:
+        tm = ctk.ThemeManager.theme
+    except Exception:
+        return
+
+    def setk(widget: str, **kw: object) -> None:
+        d = tm.get(widget)
+        if isinstance(d, dict):
+            for k, v in kw.items():
+                if k in d:
+                    d[k] = v
+
+    a, ah = _BRAND_ACCENT, _BRAND_ACCENT_HOVER
+    setk("CTkButton", fg_color=a, hover_color=ah)
+    setk("CTkOptionMenu", fg_color=a, button_color=ah, button_hover_color=a)
+    setk("CTkComboBox", button_color=a, button_hover_color=ah, border_color=a)
+    setk("CTkSegmentedButton", selected_color=a, selected_hover_color=ah)
+    setk("CTkProgressBar", progress_color=a)
+    setk("CTkSlider", progress_color=a, button_color=a, button_hover_color=ah)
+    setk("CTkCheckBox", fg_color=a, hover_color=ah)
+    setk("CTkRadioButton", fg_color=a, hover_color=ah)
+    setk("CTkSwitch", progress_color=a)
+    setk("CTkEntry", border_color=a)
+
+
 class NocturneApp(NotebookUIMixin, ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
         self.title("Nocturne Data Forge")
-        self.geometry("1060x720")
+        self.geometry("1280x840")
+        self.minsize(1080, 720)
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
+        _apply_brand_theme()
 
         self._file_path: Path | None = None
         self._folder_path: Path | None = None
@@ -139,7 +180,7 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
         # Открыть конкретную вкладку на старте (отладка/удобство): NOCTURNE_STARTUP_TAB=Блокноты
         _startup_tab = os.environ.get("NOCTURNE_STARTUP_TAB", "").strip()
         if _startup_tab:
-            self.after(250, lambda t=_startup_tab: self._tabs.set(t))
+            self.after(250, lambda t=_startup_tab: self._select_tab_by_hint(t))
 
     # ------------------------------------------------------------------ #
     #  Layout
@@ -416,8 +457,14 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
         ).pack(fill="x", pady=(2, 4), **pad)
 
     def _build_main(self, main: ctk.CTkFrame) -> None:
+        # Контролы массового Map-Reduce-анализа собраны в один фрейм — его прячем,
+        # когда активна вкладка «Блокноты» (NotebookLM-режим), чтобы не загромождать.
+        self._analysis_panel = ctk.CTkFrame(main, fg_color="transparent")
+        self._analysis_panel.pack(fill="x")
+        panel = self._analysis_panel
+
         # File / folder row
-        btn_row = ctk.CTkFrame(main, fg_color="transparent")
+        btn_row = ctk.CTkFrame(panel, fg_color="transparent")
         btn_row.pack(anchor="w", fill="x", pady=(0, 4))
         ctk.CTkButton(btn_row, text="Выбрать файл", width=140,
                       command=self._on_select_file).pack(side="left", padx=(0, 8))
@@ -425,19 +472,19 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
                       command=self._on_select_folder).pack(side="left")
 
         self._file_label = ctk.CTkLabel(
-            main, text="Файл или папка не выбраны",
+            panel, text="Файл или папка не выбраны",
             text_color="gray", anchor="w",
         )
         self._file_label.pack(anchor="w", pady=(2, 10), fill="x")
 
         # Query
-        ctk.CTkLabel(main, text="Запрос — что сделать с файлами?"
+        ctk.CTkLabel(panel, text="Запрос — что сделать с файлами?"
                      ).pack(anchor="w", pady=(0, 2))
-        self._query_text = ctk.CTkTextbox(main, height=88, wrap="word")
+        self._query_text = ctk.CTkTextbox(panel, height=88, wrap="word")
         self._query_text.pack(fill="x", pady=(0, 10))
 
         # Action buttons
-        act_row = ctk.CTkFrame(main, fg_color="transparent")
+        act_row = ctk.CTkFrame(panel, fg_color="transparent")
         act_row.pack(anchor="w", fill="x", pady=(0, 8))
         self._start_btn = ctk.CTkButton(
             act_row, text="▶  СТАРТ", width=120,
@@ -471,15 +518,15 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
         ).pack(side="left", padx=(6, 0))
 
         # Progress
-        self._progress_bar = ctk.CTkProgressBar(main)
+        self._progress_bar = ctk.CTkProgressBar(panel)
         self._progress_bar.pack(fill="x", pady=(0, 2))
         self._progress_bar.set(0)
         self._status_label = ctk.CTkLabel(
-            main, text="Готов к работе", anchor="w", text_color="gray",
+            panel, text="Готов к работе", anchor="w", text_color="gray",
         )
         self._status_label.pack(anchor="w", pady=(0, 4))
         self._preflight_label = ctk.CTkLabel(
-            main,
+            panel,
             text="Preflight: выберите файл и модель",
             anchor="w",
             text_color="gray",
@@ -488,7 +535,7 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
         )
         self._preflight_label.pack(anchor="w", pady=(0, 8))
         self._loaded_model_label = ctk.CTkLabel(
-            main,
+            panel,
             text="Активная модель в LM Studio: неизвестно",
             anchor="w",
             text_color="gray",
@@ -497,7 +544,7 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
 
         # Meta-prompt preview label (shown when composer generates a directive)
         self._meta_prompt_label = ctk.CTkLabel(
-            main,
+            panel,
             text="",
             anchor="w",
             text_color="#6ee7b7",
@@ -507,14 +554,19 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
         self._meta_prompt_label.pack(anchor="w", pady=(0, 4))
         self._meta_prompt_label.pack_forget()  # hidden until first meta_plan_done
 
-        # Tabs: Result / Logs
-        self._tabs = ctk.CTkTabview(main)
+        # Вкладки: NotebookLM («Блокноты») — первая и по умолчанию.
+        self._tabs = ctk.CTkTabview(main, command=self._on_tab_changed)
         self._tabs.pack(fill="both", expand=True, pady=(0, 6))
-        self._result_tab = self._tabs.add("Результат")
-        self._logs_tab = self._tabs.add("Логи")
-        self._rag_tab = self._tabs.add("RAG")
-        self._notebooks_tab = self._tabs.add("Блокноты")
-        self._tabs.set("Результат")
+        self._notebooks_tab = self._tabs.add(TAB_NOTEBOOKS)
+        self._result_tab = self._tabs.add(TAB_RESULT)
+        self._logs_tab = self._tabs.add(TAB_LOGS)
+        self._rag_tab = self._tabs.add(TAB_RAG)
+        self._tabs.set(TAB_NOTEBOOKS)
+        try:
+            self._tabs._segmented_button.configure(
+                font=ctk.CTkFont(size=14, weight="bold"))
+        except Exception:
+            pass
 
         result_toolbar = ctk.CTkFrame(self._result_tab, fg_color="transparent")
         result_toolbar.pack(fill="x", pady=(0, 6))
@@ -557,13 +609,45 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
         self._build_rag_tab(self._rag_tab)
         self._build_notebooks_tab(self._notebooks_tab)
 
-        # Save row
-        save_row = ctk.CTkFrame(main, fg_color="transparent")
+        # Save row (только для результата Map-Reduce — прячем на «Блокнотах»)
+        self._save_row = ctk.CTkFrame(main, fg_color="transparent")
+        save_row = self._save_row
         save_row.pack(anchor="w", fill="x")
         ctk.CTkButton(save_row, text="Копировать", width=110,
                       command=self._on_copy_result).pack(side="left", padx=(0, 8))
         ctk.CTkButton(save_row, text="Сохранить…", width=110,
                       command=self._on_save_result).pack(side="left")
+
+        # Стартуем на вкладке «Блокноты» → сразу применяем её раскладку.
+        self._on_tab_changed()
+
+    def _select_tab_by_hint(self, hint: str) -> None:
+        """Выбрать вкладку по подстроке имени (имена содержат эмодзи)."""
+        low = hint.lower()
+        for name in (TAB_NOTEBOOKS, TAB_RESULT, TAB_LOGS, TAB_RAG):
+            if low in name.lower():
+                try:
+                    self._tabs.set(name)
+                    self._on_tab_changed()  # .set() не зовёт command — вызываем сами
+                except Exception:
+                    pass
+                return
+
+    def _on_tab_changed(self, *_args: object) -> None:
+        """На вкладке «Блокноты» (NotebookLM) прячем Map-Reduce-контролы — чистый
+        вид как в NotebookLM; на остальных вкладках возвращаем их."""
+        try:
+            is_notebooks = self._tabs.get() == TAB_NOTEBOOKS
+        except Exception:
+            return
+        if is_notebooks:
+            self._analysis_panel.pack_forget()
+            self._save_row.pack_forget()
+        else:
+            if not self._analysis_panel.winfo_ismapped():
+                self._analysis_panel.pack(fill="x", before=self._tabs)
+            if not self._save_row.winfo_ismapped():
+                self._save_row.pack(anchor="w", fill="x")
 
     def _build_rag_tab(self, parent: ctk.CTkFrame) -> None:
         row1 = ctk.CTkFrame(parent, fg_color="transparent")

@@ -64,6 +64,8 @@
 - [x] Full LM Studio REST v1 coverage: model download (`POST /api/v1/models/download`) + progress polling (`GET /api/v1/models/download/status/:job_id`) — client helpers in `lm_studio_api.py` and a «Скачать модель…» GUI dialog.
 - [x] Model-instance hygiene: every app-triggered load (chat / embedding / vision / composer / scout / context-probe) is tracked, MAP keeps a single target instance, and loaded models are best-effort unloaded on app close (`NOCTURNE_UNLOAD_ON_CLOSE`, default on) so instances stop piling up. Clean shutdown cancels all `after()` timers and moves model-status polling off the UI thread.
 - [ ] Provider-native context-length detection for Ollama / OpenAI-compatible servers.
+- [x] NotebookLM-first UI: app opens on the «📓 Блокноты» tab (Map-Reduce controls hidden there for a clean notebook view), brand violet-indigo accent matching the icon, larger default window. Fixed a hard crash when opening the Notebooks tab with existing notebooks (re-layout was done inside the gallery `<Configure>` event → debounced).
+- [x] Packaged exe reads `lmstudio.json` placed NEXT TO the binary (editable without a rebuild), and writes logs / faulthandler traces to `NocturneData/app.log` (windowed exe otherwise has no stderr).
 
 ## 8. Smart import (intelligent ingestion)
 
