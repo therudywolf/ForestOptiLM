@@ -137,6 +137,10 @@ plain zip drops them and the binary won't launch). The **Fedora** build is made
 inside a `fedora:latest` container for native-library compatibility; the generic
 **Linux** build is made on Ubuntu and runs on most recent distros.
 
+On Linux, run `./install-desktop.sh` from inside the unpacked folder to add
+**Nocturne Data Forge** (with its icon) to your application menu; it installs a
+per-user `~/.local/share/applications/nocturnedataforge.desktop`.
+
 Every push also builds all targets on CI ([Build workflow](.github/workflows/build.yml))
 so artifacts are downloadable from the Actions run.
 

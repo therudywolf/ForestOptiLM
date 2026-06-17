@@ -2,3 +2,5 @@
 # ("bad interpreter: /usr/bin/env bash^M"). Pin them explicitly so this holds
 # regardless of a contributor's core.autocrlf setting.
 *.sh text eol=lf
+# Freedesktop .desktop entries must be LF too (CRLF breaks Exec/Icon parsing).
+*.desktop text eol=lf

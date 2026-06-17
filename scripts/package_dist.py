@@ -41,13 +41,18 @@ def main() -> int:
         print(f"error: {build_dir} not found — run PyInstaller first", file=sys.stderr)
         return 1
 
-    # Convenience launcher for Linux/Fedora next to the binary.
+    # Linux/Fedora: ship the launcher + desktop-menu integration next to the binary.
     if sys.platform.startswith("linux") and base_dir == "NocturneDataForge":
-        launcher = ASSETS / "run.sh"
-        if launcher.is_file():
-            dest = build_dir / "run.sh"
-            shutil.copy2(launcher, dest)
-            os.chmod(dest, 0o755)
+        for name, mode in (("run.sh", 0o755), ("install-desktop.sh", 0o755),
+                           ("NocturneDataForge.desktop", 0o644)):
+            src = ASSETS / name
+            if src.is_file():
+                dest = build_dir / name
+                shutil.copy2(src, dest)
+                os.chmod(dest, mode)
+        icon_png = ROOT / "assets" / "icon.png"
+        if icon_png.is_file():
+            shutil.copy2(icon_png, build_dir / "NocturneDataForge.png")
 
     fmt = "zip" if sys.platform == "win32" else "gztar"
     arch = platform.machine() or "x64"

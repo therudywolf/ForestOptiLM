@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Nocturne Data Forge
+GenericName=Local-LLM document analysis
+Comment=Map-Reduce & NotebookLM-style analysis over local LLMs (LM Studio / Ollama)
+Exec=NocturneDataForge %F
+Icon=nocturnedataforge
+Terminal=false
+Categories=Office;Utility;Science;
+StartupNotify=true
+StartupWMClass=NocturneDataForge
+Keywords=LLM;RAG;NotebookLM;LM Studio;Ollama;analysis;
