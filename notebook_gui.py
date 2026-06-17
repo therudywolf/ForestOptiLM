@@ -570,12 +570,13 @@ class NotebookUIMixin:
 
         def work() -> None:
             try:
-                stats = nb.rebuild_index(
+                stats, incremental = nb.update_index(
                     base_url=base_url, api_key=api_key, embedding_model=emb,
                     chunk_size_tokens=chunk_size, on_progress=on_progress,
                 )
+                mode = "обновлён" if incremental else "пересобран"
                 self._nb_after(lambda: self._nb_set_status(
-                    f"Индекс готов: {stats.chunks_total} фрагм. / {stats.files_total} файлов",
+                    f"Индекс {mode}: {stats.chunks_total} фрагм. / {stats.files_total} файлов",
                     "lightgreen"))
                 self._nb_after(self._nb_update_index_info)
                 self._nb_after(self._nb_render_workspace_header)

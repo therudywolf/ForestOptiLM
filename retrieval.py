@@ -57,19 +57,7 @@ class LocalFaissStore:
 
         with self.meta_file.open("w", encoding="utf-8") as f:
             for chunk in chunks:
-                f.write(
-                    json.dumps(
-                        {
-                            "chunk_id": chunk.chunk_id,
-                            "source_path": chunk.source_path,
-                            "text": chunk.text,
-                            "tokens": chunk.tokens,
-                            "metadata": chunk.metadata,
-                        },
-                        ensure_ascii=False,
-                    )
-                    + "\n"
-                )
+                f.write(self._meta_line(chunk))
 
         files_total = len({c.source_path for c in chunks})
         info = {
@@ -84,6 +72,76 @@ class LocalFaissStore:
             files_total=files_total,
             index_dir=self.index_dir,
             embedding_model=embedding_model,
+        )
+
+    @staticmethod
+    def _meta_line(chunk: DocumentChunk) -> str:
+        return json.dumps(
+            {
+                "chunk_id": chunk.chunk_id,
+                "source_path": chunk.source_path,
+                "text": chunk.text,
+                "tokens": chunk.tokens,
+                "metadata": chunk.metadata,
+            },
+            ensure_ascii=False,
+        ) + "\n"
+
+    def has_index(self) -> bool:
+        return self.index_file.exists() and self.meta_file.exists()
+
+    def info(self) -> dict:
+        try:
+            return json.loads(self.info_file.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+
+    def existing_chunk_ids(self) -> set[str]:
+        return {str(m.get("chunk_id")) for m in self._read_meta() if m.get("chunk_id")}
+
+    def indexed_source_paths(self) -> set[str]:
+        return {str(m.get("source_path")) for m in self._read_meta() if m.get("source_path")}
+
+    def append(self, chunks: list[DocumentChunk], vectors: list[list[float]]) -> IndexStats:
+        """Дозаписать новые чанки в существующий FAISS-индекс (без пересборки).
+
+        IndexFlatIP поддерживает инкрементальный ``.add``; meta дописываем построчно.
+        """
+        if not self.has_index():
+            raise RuntimeError("No existing index to append to")
+        if len(chunks) != len(vectors):
+            raise ValueError("Chunks and vectors lengths mismatch")
+        info = self.info()
+        if chunks:
+            dim = len(vectors[0])
+            if info.get("dim") and int(info["dim"]) != dim:
+                raise ValueError(
+                    f"Embedding dim mismatch (index={info.get('dim')}, new={dim}); rebuild required"
+                )
+            index = faiss.read_index(str(self.index_file))
+            x = np.asarray(vectors, dtype="float32")
+            faiss.normalize_L2(x)
+            index.add(x)
+            faiss.write_index(index, str(self.index_file))
+            with self.meta_file.open("a", encoding="utf-8") as f:
+                for chunk in chunks:
+                    f.write(self._meta_line(chunk))
+        # пересчитываем счётчики из meta (источник истины)
+        all_meta = self._read_meta()
+        chunks_total = len(all_meta)
+        files_total = len({str(m.get("source_path")) for m in all_meta if m.get("source_path")})
+        info.update({"chunks_total": chunks_total, "files_total": files_total})
+        self.info_file.write_text(json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8")
+        # сбросить кэш, чтобы следующий поиск перечитал индекс+meta
+        self._cached_index = None
+        self._cached_meta = None
+        self._cached_mtime_ns = -1
+        self._cached_bm25 = None
+        return IndexStats(
+            chunks_total=chunks_total,
+            files_total=files_total,
+            index_dir=self.index_dir,
+            embedding_model=str(info.get("embedding_model") or ""),
         )
 
     def search(self, query_vector: list[float], top_k: int = 8) -> list[RetrievalHit]:

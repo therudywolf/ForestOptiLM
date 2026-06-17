@@ -156,6 +156,94 @@ def build_index(
     return store.build(unique_chunks, vectors, embedding_model=embedding_model)
 
 
+def add_to_index(
+    input_paths: list[Path],
+    index_dir: Path,
+    base_url: str,
+    api_key: str,
+    embedding_model: str,
+    chunk_size_tokens: int,
+    on_progress: Callable[[int, int, str], None] | None = None,
+    max_workers: int | None = None,
+) -> tuple[IndexStats, bool]:
+    """Инкрементально дозаписать НОВЫЕ файлы в существующий индекс.
+
+    Возвращает (stats, incremental): ``incremental=False`` означает, что пришлось
+    сделать полную пересборку (нет индекса, сменилась embedding-модель, или файлы
+    были удалены — из FAISS flat-index удалять нельзя).
+    """
+    store = LocalFaissStore(index_dir=index_dir)
+    all_files = _iter_files(input_paths)
+    info = store.info()
+    if (
+        not store.has_index()
+        or str(info.get("embedding_model") or "") != embedding_model
+    ):
+        return build_index(input_paths, index_dir, base_url, api_key, embedding_model,
+                           chunk_size_tokens, on_progress, max_workers), False
+
+    current = {str(f) for f in all_files}
+    indexed = store.indexed_source_paths()
+    if indexed - current:  # источник удалён → flat-index не умеет удалять → пересборка
+        return build_index(input_paths, index_dir, base_url, api_key, embedding_model,
+                           chunk_size_tokens, on_progress, max_workers), False
+
+    new_files = [f for f in all_files if str(f) not in indexed]
+    if not new_files:
+        return IndexStats(
+            chunks_total=int(info.get("chunks_total") or 0),
+            files_total=int(info.get("files_total") or 0),
+            index_dir=index_dir, embedding_model=embedding_model,
+        ), True
+
+    root_dir: Path | None = None
+    if len(input_paths) == 1 and input_paths[0].is_dir():
+        root_dir = input_paths[0]
+    elif len(input_paths) == 1 and input_paths[0].is_file():
+        root_dir = input_paths[0].parent
+
+    new_chunks: list[DocumentChunk] = []
+    pool_workers = max(1, min(32, max_workers if max_workers is not None else _INDEX_MAX_WORKERS))
+    done = 0
+    with ThreadPoolExecutor(max_workers=pool_workers) as pool:
+        futures = {pool.submit(_to_chunks, f, chunk_size_tokens, 200, root_dir, True): f
+                   for f in new_files}
+        for fut in as_completed(futures):
+            done += 1
+            if on_progress:
+                on_progress(done, len(new_files), "index_extract")
+            new_chunks.extend(fut.result() or [])
+
+    # Дедуп новых чанков по содержимому + против уже проиндексированного.
+    existing_hashes = {
+        hashlib.sha256(str(m.get("text") or "").strip().encode("utf-8")).hexdigest()
+        for m in store._read_meta()
+    }
+    unique: list[DocumentChunk] = []
+    seen: set[str] = set()
+    for ch in new_chunks:
+        key = hashlib.sha256(ch.text.strip().encode("utf-8")).hexdigest()
+        if key in existing_hashes or key in seen:
+            continue
+        seen.add(key)
+        unique.append(ch)
+    if not unique:
+        return IndexStats(
+            chunks_total=int(info.get("chunks_total") or 0),
+            files_total=int(info.get("files_total") or 0),
+            index_dir=index_dir, embedding_model=embedding_model,
+        ), True
+
+    emb_client = EmbeddingClient(base_url=base_url, api_key=api_key, model=embedding_model)
+    if on_progress:
+        on_progress(0, len(unique), "index_embed")
+    vectors = emb_client.embed_texts([c.text for c in unique], batch_size=16)
+    if on_progress:
+        on_progress(len(unique), len(unique), "index_embed")
+    logger.info("Incremental index add: new_files=%s new_chunks=%s", len(new_files), len(unique))
+    return store.append(unique, vectors), True
+
+
 def query_index(
     question: str,
     index_dir: Path,

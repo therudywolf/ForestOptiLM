@@ -369,6 +369,39 @@ class Notebook:
         self.save()
         return stats
 
+    def update_index(
+        self,
+        *,
+        base_url: str,
+        api_key: str,
+        embedding_model: str,
+        chunk_size_tokens: int,
+        on_progress: Callable[[int, int, str], None] | None = None,
+    ) -> "tuple[IndexStats, bool]":
+        """Обновить индекс инкрементально (дозаписать новые источники), иначе —
+        полная пересборка. Возвращает (stats, incremental)."""
+        from pipeline import add_to_index
+
+        paths = self.index_input_paths()
+        if not paths:
+            raise RuntimeError("В блокноте нет доступных источников для индексации")
+        self.index_dir.mkdir(parents=True, exist_ok=True)
+        stats, incremental = add_to_index(
+            input_paths=paths,
+            index_dir=self.index_dir,
+            base_url=base_url,
+            api_key=api_key,
+            embedding_model=embedding_model,
+            chunk_size_tokens=chunk_size_tokens,
+            on_progress=on_progress,
+        )
+        self.embedding_model = embedding_model
+        self.index_chunks = stats.chunks_total
+        self.index_files = stats.files_total
+        self.index_built_at = _now()
+        self.save()
+        return stats, incremental
+
     def query(
         self,
         question: str,
