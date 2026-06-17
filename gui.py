@@ -918,8 +918,8 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
                 api_key=api_key,
                 model=model,
                 wait_for_loaded=True,
-                max_wait_seconds=180.0,
                 poll_interval_seconds=1.0,
+                stop_flag=lambda: self._closing,
             )
             if ctx:
                 self._model_ctx[model] = ctx
@@ -1765,8 +1765,8 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
                     api_key=api_key,
                     model=model,
                     wait_for_loaded=True,
-                    max_wait_seconds=180.0,
                     poll_interval_seconds=1.0,
+                    stop_flag=lambda: self._stop_requested or self._closing,
                 )
                 effective_context = runtime_ctx or context_budget
                 effective_reserve = self._get_response_reserve(effective_context)

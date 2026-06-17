@@ -99,7 +99,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         ctx, ctx_source, _state = resolve_runtime_model_context(
             base_url, api_key, model,
-            wait_for_loaded=True, max_wait_seconds=180.0,
+            wait_for_loaded=True, max_wait_seconds=45.0,
         )
         if ctx:
             model_context = ctx

@@ -998,9 +998,10 @@ def resolve_runtime_model_context(
     model: str,
     *,
     wait_for_loaded: bool = True,
-    max_wait_seconds: float = 180.0,
+    max_wait_seconds: float = 45.0,
     poll_interval_seconds: float = 1.0,
     trigger_load_request: bool = True,
+    stop_flag: Callable[[], bool] | None = None,
 ) -> tuple[int | None, str, str]:
     """
     Получить runtime-контекст выбранной модели через LM Studio /api/v0/models/{id}.
@@ -1008,6 +1009,11 @@ def resolve_runtime_model_context(
       - source=runtime_loaded, если есть loaded_context_length у загруженной модели;
       - source=metadata_not_loaded, если модель не загружена, но metadata доступна;
       - source=unavailable, если данные получить не удалось.
+
+    stop_flag — необязательный callable; если вернёт True, ожидание прерывается
+    (кнопка «Стоп» / закрытие окна), и возвращается лучшее доступное значение.
+    Дефолт ожидания снижен до 45с, чтобы недоступный/медленный сервер не
+    подвешивал UI — уже загруженная модель отвечает мгновенно.
     """
     root = _lmstudio_root(base_url)
     openai_base = _openai_base(base_url)
@@ -1044,6 +1050,9 @@ def resolve_runtime_model_context(
     last_ctx: int | None = None
     last_state = ""
     while True:
+        if stop_flag is not None and stop_flag():
+            last_state = "stopped"
+            break  # «Стоп»/закрытие — отдаём лучшее доступное значение (или fallback у вызывающего)
         handled_native_catalog = False
         try:
             with httpx.Client(timeout=10.0) as client:
