@@ -133,7 +133,9 @@ def _read_pdf(path: Path) -> str:
             t = page.extract_text()
             if t:
                 parts.append(t)
-    return "\n".join(parts)
+    # Pages are separated by a form-feed (\f) so chunking can map a chunk back to
+    # its page number for citations. \f is stripped from the final chunk text.
+    return "\f".join(parts)
 
 
 def _read_docx(path: Path) -> str:

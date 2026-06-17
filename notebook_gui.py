@@ -713,7 +713,9 @@ class NotebookUIMixin:
             for cit in citations:
                 n = cit.get("n", "?")
                 disp = str(cit.get("display") or "источник")
-                ctk.CTkButton(chips, text=f"[{n}] {disp}", height=24, font=ctk.CTkFont(size=11),
+                loc = str(cit.get("locator") or "")
+                label = f"[{n}] {disp}" + (f" · {loc}" if loc else "")
+                ctk.CTkButton(chips, text=label, height=24, font=ctk.CTkFont(size=11),
                               fg_color="transparent", border_width=1, anchor="w",
                               command=lambda c=cit: self._nb_show_citation(c)).pack(side="left", padx=2)
         self.after(0, self._nb_scroll_chat_to_end)
@@ -732,7 +734,9 @@ class NotebookUIMixin:
         top.transient(self)
         disp = str(citation.get("display") or "источник")
         path = str(citation.get("source_path") or "")
-        ctk.CTkLabel(top, text=disp, font=ctk.CTkFont(size=13, weight="bold"),
+        loc = str(citation.get("locator") or "")
+        title = disp + (f"  ·  {loc}" if loc else "")
+        ctk.CTkLabel(top, text=title, font=ctk.CTkFont(size=13, weight="bold"),
                      wraplength=520, justify="left").pack(anchor="w", padx=12, pady=(12, 2))
         ctk.CTkLabel(top, text=path, text_color=_MUTED, wraplength=520,
                      justify="left").pack(anchor="w", padx=12, pady=(0, 8))

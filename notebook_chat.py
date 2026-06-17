@@ -62,6 +62,16 @@ class ContextItem:
     text: str
     chunk_id: str = ""
     score: float = 0.0
+    page: int | None = None
+    line_start: int | None = None
+
+    def locator(self) -> str:
+        """Человекочитаемая привязка: «стр. 4» / «строка 120» / ''."""
+        if self.page:
+            return f"стр. {self.page}"
+        if self.line_start:
+            return f"строка {self.line_start}"
+        return ""
 
     def to_citation(self, quote_chars: int = 320) -> dict[str, Any]:
         quote = _strip_headers(self.text).strip()
@@ -74,6 +84,9 @@ class ContextItem:
             "quote": quote,
             "chunk_id": self.chunk_id,
             "score": round(float(self.score), 4),
+            "page": self.page,
+            "line_start": self.line_start,
+            "locator": self.locator(),
         }
 
 
@@ -132,6 +145,14 @@ def select_contexts(
         tok = count_tokens(text)
         if out and used + tok > max_tokens:
             break
+        meta = getattr(hit, "metadata", None) or {}
+
+        def _as_int(v: Any) -> int | None:
+            try:
+                return int(v) if v is not None else None
+            except Exception:
+                return None
+
         out.append(
             ContextItem(
                 n=len(out) + 1,
@@ -140,6 +161,8 @@ def select_contexts(
                 text=text,
                 chunk_id=str(getattr(hit, "chunk_id", "") or ""),
                 score=float(getattr(hit, "score", 0.0) or 0.0),
+                page=_as_int(meta.get("page")),
+                line_start=_as_int(meta.get("line_start")),
             )
         )
         used += tok

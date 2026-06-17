@@ -2,6 +2,7 @@
 """Единый API чанкинга для Map-Reduce и RAG."""
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from file_extractors import ParseError, extract_content, extract_file_metadata
@@ -97,15 +98,41 @@ def build_document_chunks(
         text = str(content).strip()
         if not text:
             return []
+        # Page breaks (\f, from PDF extraction) → page numbers for citations.
+        page_breaks = [m.start() for m in re.finditer("\f", text)]
+        marker = f"[Файл: {display_path}]\n"
+        search_from = 0
         for idx, c in enumerate(
             chunk_text_for_map_file(
                 path, text, chunk_size_tokens, overlap_tokens, root_dir=root_dir, file_meta=file_meta,
             )
         ):
-            cid = hashlib.sha256(f"{path}:{idx}:{c[:200]}".encode()).hexdigest()[:24]
             cmeta: dict = {"chunk_index": idx}
             if file_meta:
                 cmeta.update(file_meta)
+            # Locate this chunk in the source to derive its line/page.
+            bs = c.split(marker, 1)[-1].strip()
+            start_probe = bs[:48]
+            loc = text.find(start_probe, search_from) if start_probe else -1
+            if loc < 0 and start_probe:
+                loc = text.find(start_probe)
+            if loc >= 0:
+                cmeta["line_start"] = text.count("\n", 0, loc) + 1
+                search_from = loc + 1
+            if page_breaks and bs:
+                # Page from the chunk MIDDLE — the dominant page, unskewed by the
+                # overlap tail that a boundary chunk repeats from the previous page.
+                off = min(len(bs) // 2, max(0, len(bs) - 48))
+                mid_probe = bs[off:off + 48]
+                mloc = text.find(mid_probe, max(0, search_from - 4000)) if mid_probe else -1
+                if mloc < 0 and mid_probe:
+                    mloc = text.find(mid_probe)
+                anchor = mloc if mloc >= 0 else loc
+                if anchor >= 0:
+                    cmeta["page"] = sum(1 for b in page_breaks if b < anchor) + 1
+            if page_breaks:
+                c = c.replace("\f", "\n")  # don't leak the page-break marker into chunks
+            cid = hashlib.sha256(f"{path}:{idx}:{c[:200]}".encode()).hexdigest()[:24]
             chunks.append(
                 DocumentChunk(
                     chunk_id=cid, source_path=str(path), text=c, tokens=count_tokens(c), metadata=cmeta,
