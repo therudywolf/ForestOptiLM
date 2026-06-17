@@ -89,6 +89,7 @@ class NotebookUIMixin:
         self._nb_current = None
         self._nb_busy = False
         self._nb_view = "archive"
+        self._nb_relayout_after: str | None = None
         self._nb_search_var = ctk.StringVar(value="")
 
         self._nb_container = ctk.CTkFrame(parent, fg_color="transparent")
@@ -148,6 +149,23 @@ class NotebookUIMixin:
         cols = max(1, int((avail - 8) // (self._nb_card_w + 16)))
         if cols != self._nb_gallery_cols:
             self._nb_gallery_cols = cols
+            # ВАЖНО: перерисовку откладываем ИЗ обработчика <Configure>. Уничтожать
+            # и пересоздавать виджеты прямо внутри события ресайза их же контейнера —
+            # частая причина жёсткого краша Tk на Windows (особенно в собранном .exe,
+            # где пустой архив не падал, а карточки — да). after() и дебаунс рвут
+            # реентрантность.
+            if self._nb_relayout_after is not None:
+                try:
+                    self.after_cancel(self._nb_relayout_after)
+                except Exception:
+                    pass
+            self._nb_relayout_after = self.after(60, self._nb_relayout_gallery)
+
+    def _nb_relayout_gallery(self) -> None:
+        self._nb_relayout_after = None
+        if getattr(self, "_closing", False) or not self.winfo_exists():
+            return
+        if self._nb_view == "archive":
             self._nb_render_archive()
 
     def _nb_render_archive(self) -> None:
@@ -167,7 +185,11 @@ class NotebookUIMixin:
         for c in range(cols + 1):
             self._nb_gallery.grid_columnconfigure(c, weight=1 if c == cols else 0)
         for idx, nb in enumerate(notebooks):
-            card = self._nb_build_card(self._nb_gallery, nb)
+            try:
+                card = self._nb_build_card(self._nb_gallery, nb)
+            except Exception:
+                logger.exception("notebook card render failed: %s", getattr(nb, "id", "?"))
+                continue
             card.grid(row=idx // cols, column=idx % cols, padx=8, pady=8, sticky="nw")
 
     def _nb_render_archive_empty(self, filtered: bool) -> None:

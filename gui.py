@@ -136,6 +136,10 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(300, self._on_fetch_models)
         self.after(600, self._maybe_first_run_wizard)
+        # Открыть конкретную вкладку на старте (отладка/удобство): NOCTURNE_STARTUP_TAB=Блокноты
+        _startup_tab = os.environ.get("NOCTURNE_STARTUP_TAB", "").strip()
+        if _startup_tab:
+            self.after(250, lambda t=_startup_tab: self._tabs.set(t))
 
     # ------------------------------------------------------------------ #
     #  Layout
@@ -700,6 +704,25 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
                 # держим ссылку, иначе Tk соберёт изображение мусором
                 self._icon_photo = tkinter.PhotoImage(file=str(png))
                 self.iconphoto(True, self._icon_photo)
+        except Exception:
+            pass
+
+    def report_callback_exception(self, exc, val, tb) -> None:  # noqa: ANN001
+        """Перехват ЛЮБОГО исключения в Tk-колбэке: логируем и продолжаем работу.
+
+        Иначе в оконном .exe (где sys.stderr недоступен) необработанное исключение
+        в колбэке может уронить приложение целиком. Здесь оно становится нефатальным.
+        """
+        import traceback
+
+        text = "".join(traceback.format_exception(exc, val, tb))
+        try:
+            logger.error("Tk callback exception (не критично):\n%s", text)
+        except Exception:
+            pass
+        try:
+            if not self._closing and self.winfo_exists():
+                self._set_status("Внутренняя ошибка интерфейса (см. лог) — приложение продолжит работу", "#f59e0b")
         except Exception:
             pass
 

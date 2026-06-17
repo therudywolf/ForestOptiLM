@@ -41,6 +41,32 @@ def _frozen_bootstrap() -> None:
         os.environ.setdefault("NOCTURNE_CACHE_DIR", str(data_dir / ".nocturne_cache"))
     except Exception:
         pass
+    # В оконном .exe sys.stdout/stderr = None → любой трейсбэк/print падает в пустоту,
+    # а необработанное исключение может уронить процесс. Заворачиваем вывод в файл
+    # лога и включаем faulthandler, чтобы даже нативный креш (segfault) оставил след.
+    try:
+        import faulthandler
+
+        log_path = data_dir / "app.log"
+        _log_fh = open(log_path, "a", buffering=1, encoding="utf-8", errors="replace")  # noqa: SIM115
+        if sys.stdout is None:
+            sys.stdout = _log_fh
+        if sys.stderr is None:
+            sys.stderr = _log_fh
+        faulthandler.enable(file=_log_fh)
+        # logging.basicConfig при импорте повесил StreamHandler на sys.stdout, который
+        # в оконном .exe = None → каждый logger.* падает с "NoneType has no write".
+        # Выкидываем сломанные хендлеры и пишем логи в app.log.
+        root = logging.getLogger()
+        for _h in list(root.handlers):
+            root.removeHandler(_h)
+        _fh_handler = logging.StreamHandler(_log_fh)
+        _fh_handler.setFormatter(logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+        root.addHandler(_fh_handler)
+        root.setLevel(logging.INFO)
+    except Exception:
+        pass
     meipass = Path(getattr(sys, "_MEIPASS", exe_dir))
     tk_cache = meipass / "tiktoken_cache"
     if tk_cache.is_dir():

@@ -29,6 +29,7 @@ import json
 import logging
 import os
 import re
+import sys
 from pathlib import Path
 from typing import Final
 
@@ -69,6 +70,12 @@ def _candidate_paths() -> list[Path]:
     env_p = os.getenv("NOCTURNE_LMSTUDIO_CONFIG", "").strip()
     if env_p:
         paths.append(Path(env_p).expanduser())
+    # В упакованном .exe конфиг лежит РЯДОМ с бинарником (его можно править без
+    # пересборки), а не внутри read-only бандла (_internal).
+    if getattr(sys, "frozen", False):
+        exe_dir = Path(sys.executable).resolve().parent
+        paths.append(exe_dir / "lmstudio.json")
+        paths.append(exe_dir / ".local" / "lmstudio.json")
     root = Path(__file__).resolve().parent
     paths.append(root / ".local" / "lmstudio.json")
     return paths
