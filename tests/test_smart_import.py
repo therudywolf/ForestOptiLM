@@ -2,6 +2,7 @@
 """Smart import: Telegram HTML export → clean per-message dialogue."""
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -97,6 +98,76 @@ class TestTelegramImporter(unittest.TestCase):
     def test_plain_html_returns_none(self) -> None:
         p = _write(self.tmp, "page.html", PLAIN_HTML)
         self.assertIsNone(si.smart_extract_text(p))
+
+
+WHATSAPP_TXT = (
+    "[12.10.2023, 14:30:15] Сергей Медведев: Привет, выкатываем релиз v0.7?\n"
+    "[12.10.2023, 14:31:02] Анна: Да, и я проверю кириллицу\n"
+    "это вторая строка моего сообщения\n"
+    "[12.10.2023, 14:32:00] Сергей Медведев: Отлично 👍\n"
+    "12/10/2023, 14:33 - Анна: Собираю под Fedora\n"
+    "12/10/2023, 14:34 - Messages and calls are end-to-end encrypted.\n"
+)
+
+REGULAR_LOG = "\n".join(
+    f"2023-10-12 14:3{i}:00 ERROR module: something failed code={i}" for i in range(9)
+)
+
+SLACK_JSON = json.dumps([
+    {"type": "message", "user": "U1", "user_profile": {"real_name": "Сергей"},
+     "text": "Готовим релиз v0.7", "ts": "1697112600.000100"},
+    {"type": "message", "username": "anna", "text": "Проверю кириллицу", "ts": "1697112660.000200"},
+    {"type": "message", "subtype": "channel_join", "user": "U3", "text": "has joined", "ts": "1697112700.0"},
+], ensure_ascii=False)
+
+DISCORD_JSON = json.dumps({
+    "guild": {"name": "G"}, "channel": {"name": "general"},
+    "messages": [
+        {"author": {"name": "sergey", "nickname": "Сергей"},
+         "timestamp": "2023-10-12T14:30:00.000+00:00", "content": "Релиз готов"},
+        {"author": {"name": "anna"}, "timestamp": "2023-10-12T14:31:00.000+00:00", "content": "Проверю"},
+    ],
+}, ensure_ascii=False)
+
+
+class TestWhatsAppSlackDiscord(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name)
+
+    def test_whatsapp_detect_and_extract(self) -> None:
+        p = _write(self.tmp, "WhatsApp Chat.txt", WHATSAPP_TXT)
+        self.assertEqual(si.detect_format(p), "whatsapp_txt")
+        text = si.smart_extract_text(p) or ""
+        self.assertIn("[12.10.2023, 14:30:15] Сергей Медведев:", text)
+        self.assertIn("это вторая строка моего сообщения", text)  # multiline joined
+        self.assertNotIn("end-to-end encrypted", text)  # system line skipped
+        self.assertIn("Собираю под Fedora", text)  # dash format too
+
+    def test_regular_log_not_whatsapp(self) -> None:
+        p = _write(self.tmp, "app.log", REGULAR_LOG)
+        self.assertIsNone(si.detect_format(p))  # must NOT hijack ordinary logs
+
+    def test_slack_detect_and_extract(self) -> None:
+        p = _write(self.tmp, "general.json", SLACK_JSON)
+        self.assertEqual(si.detect_format(p), "slack_json")
+        text = si.smart_extract_text(p) or ""
+        self.assertIn("Сергей:", text)
+        self.assertIn("Готовим релиз", text)
+        self.assertNotIn("has joined", text)  # channel_join skipped
+        self.assertEqual(text.count("\n\n"), 1)  # two messages
+
+    def test_discord_detect_and_extract(self) -> None:
+        p = _write(self.tmp, "export.json", DISCORD_JSON)
+        self.assertEqual(si.detect_format(p), "discord_json")
+        text = si.smart_extract_text(p) or ""
+        self.assertIn("Сергей:", text)  # nickname preferred
+        self.assertIn("Релиз готов", text)
+
+    def test_plain_json_not_matched(self) -> None:
+        p = _write(self.tmp, "data.json", '{"foo": 1, "bar": [2, 3]}')
+        self.assertIsNone(si.detect_format(p))
 
 
 class TestIntegrationWithExtractContent(unittest.TestCase):

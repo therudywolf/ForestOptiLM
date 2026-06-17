@@ -35,9 +35,12 @@
 """
 from __future__ import annotations
 
+import json
 import logging
+import re
+from datetime import datetime
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 logger = logging.getLogger("nocturne")
 
@@ -171,8 +174,157 @@ class TelegramHtmlImporter:
         return "\n\n".join(out)
 
 
+def _fmt_unix(ts: Any) -> str:
+    try:
+        return datetime.fromtimestamp(float(ts)).strftime("%d.%m.%Y %H:%M")
+    except Exception:
+        return ""
+
+
+class WhatsAppTxtImporter:
+    """Экспорт чата WhatsApp (_chat.txt) → диалог по сообщениям.
+
+    Форматы строк (зависят от платформы/локали)::
+
+        [12.10.2023, 14:30:15] Имя: текст
+        12/10/2023, 14:30 - Имя: текст
+
+    Многострочные сообщения склеиваются (строки-продолжения без таймстампа).
+    Системные строки (шифрование, «изменил тему» и т.п. — без «Имя:») опускаем.
+    """
+
+    name = "whatsapp_txt"
+    _LINE = re.compile(
+        r"^\[?(?P<ts>\d{1,2}[./]\d{1,2}[./]\d{2,4},?\s+\d{1,2}:\d{2}(?::\d{2})?"
+        r"(?:\s?[APap][Mm])?)\]?\s+(?:-\s)?(?P<rest>.+)$"
+    )
+
+    def detect(self, path: Path) -> bool:
+        if path.suffix.lower() not in {".txt"}:
+            return False
+        head = _read_head(path, 65536)
+        if not head:
+            return False
+        hits = 0
+        for line in head.splitlines()[:80]:
+            m = self._LINE.match(line)
+            if m and ": " in m.group("rest")[:42]:
+                hits += 1
+        return hits >= 4  # WhatsApp-структура (дата с / или . + запятая); логи не задевает
+
+    def extract(self, path: Path) -> str:
+        from file_extractors import _decode
+
+        text = _decode(path.read_bytes())
+        out: list[str] = []
+        cur: list[str] = []
+        cur_header = ""
+
+        def flush() -> None:
+            if cur_header and cur:
+                out.append(cur_header + "\n" + "\n".join(cur).strip())
+
+        for line in text.splitlines():
+            m = self._LINE.match(line)
+            if m:
+                rest = m.group("rest")
+                if ": " in rest[:42]:
+                    flush()
+                    sender, msg = rest.split(":", 1)
+                    cur_header = f"[{m.group('ts').strip()}] {sender.strip()}:"
+                    cur = [msg.strip()]
+                else:
+                    # системное сообщение — закрываем предыдущее и пропускаем
+                    flush()
+                    cur, cur_header = [], ""
+            elif cur_header:
+                cur.append(line.rstrip())
+        flush()
+        logger.info("smart_import whatsapp_txt: %s → %d messages", path.name, len(out))
+        return "\n\n".join(out)
+
+
+class SlackJsonImporter:
+    """Экспорт Slack (JSON массив сообщений канала) → диалог по сообщениям."""
+
+    name = "slack_json"
+
+    def detect(self, path: Path) -> bool:
+        if path.suffix.lower() != ".json":
+            return False
+        head = _read_head(path, 65536)
+        return bool(head) and '"ts"' in head and '"text"' in head and (
+            '"user"' in head or '"username"' in head or '"user_profile"' in head
+        )
+
+    def extract(self, path: Path) -> str:
+        from file_extractors import _decode
+
+        data = json.loads(_decode(path.read_bytes()))
+        msgs = data if isinstance(data, list) else (data.get("messages") if isinstance(data, dict) else None)
+        if not isinstance(msgs, list):
+            return ""
+        skip_subtypes = {"channel_join", "channel_leave", "group_join", "group_leave",
+                         "channel_topic", "channel_purpose", "channel_name"}
+        out: list[str] = []
+        for m in msgs:
+            if not isinstance(m, dict) or m.get("type", "message") != "message":
+                continue
+            if str(m.get("subtype") or "") in skip_subtypes:
+                continue
+            text = str(m.get("text") or "").strip()
+            if not text:
+                continue
+            prof = m.get("user_profile") if isinstance(m.get("user_profile"), dict) else {}
+            sender = str(prof.get("real_name") or m.get("username") or m.get("user") or "unknown")
+            ts = _fmt_unix(m.get("ts"))
+            header = f"[{ts}] {sender}:" if ts else f"{sender}:"
+            out.append(f"{header}\n{text}")
+        logger.info("smart_import slack_json: %s → %d messages", path.name, len(out))
+        return "\n\n".join(out)
+
+
+class DiscordJsonImporter:
+    """Экспорт Discord (DiscordChatExporter JSON) → диалог по сообщениям."""
+
+    name = "discord_json"
+
+    def detect(self, path: Path) -> bool:
+        if path.suffix.lower() != ".json":
+            return False
+        head = _read_head(path, 65536)
+        return bool(head) and '"messages"' in head and '"author"' in head and '"timestamp"' in head
+
+    def extract(self, path: Path) -> str:
+        from file_extractors import _decode
+
+        data = json.loads(_decode(path.read_bytes()))
+        msgs = data.get("messages") if isinstance(data, dict) else None
+        if not isinstance(msgs, list):
+            return ""
+        out: list[str] = []
+        for m in msgs:
+            if not isinstance(m, dict):
+                continue
+            author = m.get("author") if isinstance(m.get("author"), dict) else {}
+            name = str(author.get("nickname") or author.get("name") or "unknown")
+            content = str(m.get("content") or "").strip()
+            if not content:
+                continue
+            ts = str(m.get("timestamp") or "")[:16].replace("T", " ")
+            header = f"[{ts}] {name}:" if ts else f"{name}:"
+            out.append(f"{header}\n{content}")
+        logger.info("smart_import discord_json: %s → %d messages", path.name, len(out))
+        return "\n\n".join(out)
+
+
 # Порядок важен: первый совпавший импортёр выигрывает.
-IMPORTERS: list[Importer] = [TelegramHtmlImporter()]
+IMPORTERS: list[Importer] = [
+    TelegramHtmlImporter(),
+    WhatsAppTxtImporter(),
+    SlackJsonImporter(),
+    DiscordJsonImporter(),
+]
 
 
 def detect_format(path: Path) -> str | None:

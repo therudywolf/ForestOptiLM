@@ -445,6 +445,24 @@ def fetch_models(base_url: str, api_key: str) -> list[str]:
     return ids
 
 
+# Имена мультимодальных (vision) моделей — для серверов без capabilities (Ollama,
+# OpenAI-совместимые), где каталог не сообщает vision-флаг.
+_VISION_NAME_RE = re.compile(
+    r"(?i)(?:^|[/_\-])(?:"
+    r"llava|bakllava|moondream|pixtral|"
+    r"[a-z0-9.]*-?vl\b|vl-|"
+    r"minicpm-?v|internvl|cogvlm|"
+    r"qwen2\.?5?-?vl|gemma-?[34]|"
+    r"vision|multimodal|"
+    r"granite-?vision|smolvlm|janus|aya-?vision"
+    r")"
+)
+
+
+def model_name_suggests_vision(model_id: str) -> bool:
+    return bool(_VISION_NAME_RE.search(model_id or ""))
+
+
 def categorize_models(base_url: str, api_key: str) -> dict[str, list[str]]:
     """Разделить модели на chat / vision / embedding / reasoning по каталогу LM Studio."""
     from reasoning_models import model_has_reasoning_capability, refresh_model_catalog_cache
@@ -462,7 +480,8 @@ def categorize_models(base_url: str, api_key: str) -> dict[str, list[str]]:
             out["reasoning"].append(key)
         if mtype == "embedding" or "embed" in key.lower():
             out["embedding"].append(key)
-        elif isinstance(caps, dict) and caps.get("vision"):
+        elif (isinstance(caps, dict) and caps.get("vision")) or model_name_suggests_vision(key):
+            # caps.vision (LM Studio) OR имя-эвристика (Ollama / OpenAI-совместимые)
             out["vision"].append(key)
             out["chat"].append(key)
         else:

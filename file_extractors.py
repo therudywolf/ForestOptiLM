@@ -190,20 +190,6 @@ def _read_html_text(path: Path) -> str:
     return re.sub(r"<[^>]+>", " ", text)
 
 
-def _read_html_smart(path: Path) -> str:
-    """HTML-извлечение с умным импортом: распознанные выгрузки (например,
-    Telegram-экспорт) приводятся к чистому диалогу; иначе — обычный html→text."""
-    try:
-        from smart_import import smart_extract_text
-
-        clean = smart_extract_text(path)
-        if clean:
-            return clean
-    except Exception as exc:  # noqa: BLE001 — умный импорт не должен ломать обычный путь
-        logger.debug("smart_import skipped for %s: %s", path.name, exc)
-    return _read_html_text(path)
-
-
 # ------------------------------------------------------------------ #
 #  Table extractors
 # ------------------------------------------------------------------ #
@@ -304,9 +290,9 @@ TEXT_EXTRACTORS: dict[str, Callable[[Path], str]] = {
     ".docx": _read_docx,
     ".odt":  _read_odt,
     ".epub": _read_epub,
-    # Web (умный импорт распознанных выгрузок, иначе обычный html→text)
-    ".html": _read_html_smart,
-    ".htm":  _read_html_smart,
+    # Web (smart import of recognized exports is handled centrally before this)
+    ".html": _read_html_text,
+    ".htm":  _read_html_text,
     # Code – all treated as plain text
     ".py":   _read_plain_text,
     ".js":   _read_plain_text,
@@ -403,6 +389,18 @@ def _extract_single_file(path: Path) -> tuple[ContentKind, str | pd.DataFrame]:
 
     if suffix in IMAGE_EXTENSIONS:
         return ("vision", str(path.resolve()))
+
+    # Smart import: recognized exports (Telegram HTML, WhatsApp .txt, Slack/Discord
+    # JSON, …) become a clean per-message dialogue BEFORE the normal table/text
+    # routing. Detection is signature-based, so ordinary files fall straight through.
+    try:
+        from smart_import import smart_extract_text
+
+        clean = smart_extract_text(path)
+        if clean:
+            return ("text", clean)
+    except Exception as exc:  # noqa: BLE001 — smart import must never break extraction
+        logger.debug("smart_import skipped for %s: %s", path.name, exc)
 
     # Try table extractor first
     if suffix in TABLE_EXTRACTORS:
