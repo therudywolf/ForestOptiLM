@@ -114,6 +114,22 @@ def _read_plain_text(path: Path) -> str:
     return _decode(path.read_bytes())
 
 
+def _read_audio(path: Path) -> str:
+    """Транскрипция аудио (faster-whisper, опционально). Пропускается с понятной
+    ошибкой, если зависимость не установлена — тогда файл не индексируется."""
+    from audio_transcribe import transcribe
+
+    try:
+        text = transcribe(path)
+    except RuntimeError as exc:
+        raise ParseError(str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise ParseError(f"Audio transcription failed: {exc}") from exc
+    if not text.strip():
+        raise ParseError("No speech recognized in audio")
+    return text
+
+
 # ------------------------------------------------------------------ #
 #  Text extractors
 # ------------------------------------------------------------------ #
@@ -326,6 +342,15 @@ TEXT_EXTRACTORS: dict[str, Callable[[Path], str]] = {
     ".dart": _read_plain_text,
     # Markup data — kept consistent with large_corpus_io.STREAMING_PLAIN_SUFFIXES
     ".xml":  _read_plain_text,
+    # Audio → local transcription (faster-whisper, optional dependency)
+    ".mp3":  _read_audio,
+    ".wav":  _read_audio,
+    ".m4a":  _read_audio,
+    ".ogg":  _read_audio,
+    ".flac": _read_audio,
+    ".opus": _read_audio,
+    ".aac":  _read_audio,
+    ".wma":  _read_audio,
 }
 
 TABLE_EXTRACTORS: dict[str, Callable[[Path], pd.DataFrame]] = {
@@ -345,7 +370,8 @@ _SKIP_EXTENSIONS = {
     ".pyc", ".pyo", ".pyd",
     ".exe", ".dll", ".so", ".dylib",
     ".ico", ".svg",
-    ".mp3", ".mp4", ".avi", ".mov", ".woff", ".woff2", ".ttf", ".eot",
+    # .mp3 is intentionally NOT skipped — audio is transcribed (faster-whisper).
+    ".mp4", ".avi", ".mov", ".woff", ".woff2", ".ttf", ".eot",
     ".bin", ".dat",
 }
 

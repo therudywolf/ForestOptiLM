@@ -83,6 +83,7 @@ FILE_TYPES = [
      "*.go *.rs *.kt *.sql *.sh *.bat *.ps1 *.toml *.cfg *.properties"),
     ("Изображения (vision)", "*.png *.jpg *.jpeg *.webp *.gif *.bmp *.tif *.tiff"),
     ("Таблицы",  "*.csv *.xlsx *.xls *.json *.yaml *.yml"),
+    ("Аудио (транскрипция)", "*.mp3 *.wav *.m4a *.ogg *.flac *.opus *.aac *.wma"),
     ("Архивы",   "*.zip *.tar *.tar.gz *.tgz *.gz"),
     ("Все файлы", "*.*"),
 ]
