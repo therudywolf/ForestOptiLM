@@ -23,16 +23,21 @@ class TestConfigCandidatePaths(unittest.TestCase):
     def test_frozen_looks_next_to_exe(self) -> None:
         # Регрессия: упакованный .exe должен читать lmstudio.json РЯДОМ с собой,
         # а не только внутри read-only бандла (_internal) — иначе сервер/ключ
-        # пользователя не подхватываются.
+        # пользователя не подхватываются. Путь строим под текущую ОС (на POSIX
+        # backslash не разделитель), иначе тест ложно падает в CI.
+        import tempfile
+
+        exe = Path(tempfile.gettempdir()) / "appdir" / "NocturneDataForge.exe"
         with patch.object(lmstudio_config.sys, "frozen", True, create=True), \
-             patch.object(lmstudio_config.sys, "executable", r"C:\app\NocturneDataForge.exe"):
-            paths = [str(p) for p in _candidate_paths()]
-        self.assertTrue(any(p.endswith(r"\app\lmstudio.json") for p in paths), paths)
+             patch.object(lmstudio_config.sys, "executable", str(exe)):
+            paths = _candidate_paths()
+        expected = Path(str(exe)).resolve().parent / "lmstudio.json"
+        self.assertIn(expected, paths)
 
     def test_non_frozen_uses_repo_local(self) -> None:
         with patch.object(lmstudio_config.sys, "frozen", False, create=True):
-            paths = [str(p) for p in _candidate_paths()]
-        self.assertTrue(any(p.endswith("lmstudio.json") for p in paths))
+            paths = [p.name for p in _candidate_paths()]
+        self.assertIn("lmstudio.json", paths)
 
 
 class TestLMStudioUrlNormalization(unittest.TestCase):
