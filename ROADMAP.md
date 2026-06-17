@@ -48,9 +48,9 @@
 - [x] Grounded multi-turn chat: retrieval scoped to the notebook, `[N]` citations with click-to-passage, honest "not in sources" refusal.
 - [x] Studio panel: study guide, FAQ, timeline, briefing, flashcards generated over the corpus.
 - [x] Research-archive UI: notebook gallery (covers, descriptions, search, index status) ↔ three-pane workspace (Sources · Chat · Studio) with rename/describe/manage.
-- [ ] Optional audio transcription (faster-whisper) and audio-overview script generation (deferred; heavy local dependency).
-- [ ] Per-page / per-line citation granularity for PDFs (today citations resolve to file + chunk).
-- [ ] Incremental index updates instead of full rebuild when adding a source.
+- [x] Local audio transcription (faster-whisper, optional dep) — audio files become text sources; no TTS (audio-overview script generation deferred).
+- [x] Page (PDF) / line citation granularity — chunks carry page/line, surfaced in the citation chip and popup («стр. N» / «строка N»).
+- [x] Incremental index updates (append new sources without a full rebuild; rebuild on remove / embedding-model change).
 
 ## 7. Providers & distribution
 
@@ -59,8 +59,9 @@
 - [x] Reasoning-model adaptation in `call_llm`: auto-escalate reasoning:off→on on empty output, strip inline `<think>` blocks, salvage from the reasoning channel; heuristic covers gemma-4+, gpt-oss, glm-4.6, o4. Verified live on gemma-4-e2b + gemma-12b (small MAP + big composer).
 - [x] Optimization run-profiles: `balanced`, `precise`, `ollama_local` alongside the existing presets.
 - [x] Cross-platform PyInstaller builds (Windows/macOS/Linux) via CI matrix + per-OS scripts; release artifacts attached to GitHub Releases on tag.
-- [ ] Provider-native model metadata for Ollama (context length, vision capability) to enrich auto-categorization.
-- [ ] Signed/notarized macOS and Windows artifacts.
+- [x] Name-based vision-model detection (llava / *-vl / qwen2.5-vl / minicpm-v / pixtral / gemma-3/4 …) so Ollama / OpenAI-compatible servers expose vision; the image_url path works on both transports.
+- [x] Windows .exe / macOS bundle carry author metadata (therudywolf). Actual code-signing/notarization still needs a paid certificate (scaffolding documented).
+- [ ] Provider-native context-length detection for Ollama / OpenAI-compatible servers.
 
 ## 8. Smart import (intelligent ingestion)
 

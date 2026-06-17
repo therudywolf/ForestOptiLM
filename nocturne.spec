@@ -72,6 +72,11 @@ a = Analysis(
 )
 pyz = PYZ(a.pure)
 
+# Windows .exe version resource (author/product metadata, shown in Properties).
+_version_file = None
+if sys.platform == "win32" and os.path.isfile(os.path.join("scripts", "version_info.txt")):
+    _version_file = os.path.join("scripts", "version_info.txt")
+
 exe = EXE(
     pyz,
     a.scripts,
@@ -85,6 +90,7 @@ exe = EXE(
     console=False,            # GUI app — no console window
     disable_windowed_traceback=False,
     icon=None,
+    version=_version_file,
 )
 
 coll = COLLECT(
@@ -107,5 +113,6 @@ if sys.platform == "darwin":
             "CFBundleName": "Nocturne Data Forge",
             "CFBundleDisplayName": "Nocturne Data Forge",
             "NSHighResolutionCapable": True,
+            "NSHumanReadableCopyright": "Copyright (C) 2025 therudywolf — AGPL-3.0-or-later",
         },
     )

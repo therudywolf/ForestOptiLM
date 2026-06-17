@@ -161,6 +161,18 @@ elsewhere). On first run the app creates a `NocturneData/` folder next to the
 binary for cache and indexes. Build artifacts (`build/`, `dist/`, `.build/`) are
 git-ignored.
 
+### Code signing
+
+The Windows `.exe` carries author/product metadata (publisher **therudywolf**,
+via [`scripts/version_info.txt`](scripts/version_info.txt)) and the macOS bundle
+carries its copyright, but the binaries are **not code-signed** — so Windows
+SmartScreen and macOS Gatekeeper will warn on first run (Windows: *More info →
+Run anyway*; macOS: right-click → *Open*, or `xattr -d com.apple.quarantine`).
+Real signing needs a paid certificate — an **Authenticode** cert (Windows) and an
+**Apple Developer ID** (macOS, for notarization). Once you have them, sign the
+build with `signtool` / `codesign`+`notarytool` (wire it into the Release workflow
+behind repo secrets); no certificate ships in this repo.
+
 ## Configuration
 
 ### Provider presets (LM Studio / Ollama / OpenAI-compatible)
