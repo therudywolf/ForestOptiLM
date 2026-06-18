@@ -43,7 +43,8 @@ class LocalFaissStore:
         self._cached_bm25: BM25Index | None = None
         self._cached_bm25_sig: int = -1
 
-    def build(self, chunks: list[DocumentChunk], vectors: list[list[float]], embedding_model: str) -> IndexStats:
+    def build(self, chunks: list[DocumentChunk], vectors: list[list[float]],
+              embedding_model: str, chunk_size_tokens: int = 0) -> IndexStats:
         if not chunks:
             raise ValueError("No chunks to index")
         if len(chunks) != len(vectors):
@@ -65,6 +66,7 @@ class LocalFaissStore:
             "chunks_total": len(chunks),
             "files_total": files_total,
             "dim": dim,
+            "chunk_size_tokens": int(chunk_size_tokens or 0),
         }
         self.info_file.write_text(json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8")
         return IndexStats(

@@ -153,7 +153,8 @@ def build_index(
     if on_progress:
         on_progress(max(1, len(unique_chunks)), max(1, len(unique_chunks)), "index_embed")
     store = LocalFaissStore(index_dir=index_dir)
-    return store.build(unique_chunks, vectors, embedding_model=embedding_model)
+    return store.build(unique_chunks, vectors, embedding_model=embedding_model,
+                       chunk_size_tokens=chunk_size_tokens)
 
 
 def add_to_index(
@@ -175,9 +176,13 @@ def add_to_index(
     store = LocalFaissStore(index_dir=index_dir)
     all_files = _iter_files(input_paths)
     info = store.info()
+    prev_chunk = int(info.get("chunk_size_tokens") or 0)
     if (
         not store.has_index()
         or str(info.get("embedding_model") or "") != embedding_model
+        # Размер чанка сменился ИЛИ старый индекс без этого поля (был собран
+        # огромными чанками — поиск не работал) → полная пересборка с миграцией.
+        or prev_chunk != int(chunk_size_tokens or 0)
     ):
         return build_index(input_paths, index_dir, base_url, api_key, embedding_model,
                            chunk_size_tokens, on_progress, max_workers), False

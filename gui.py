@@ -648,6 +648,9 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
                 self._analysis_panel.pack(fill="x", before=self._tabs)
             if not self._save_row.winfo_ismapped():
                 self._save_row.pack(anchor="w", fill="x")
+            # Вернулись на анализ-вкладку — возобновляем поллинг активной модели.
+            if not self._model_poll_active and not self._closing:
+                self._poll_loaded_model()
 
     def _build_rag_tab(self, parent: ctk.CTkFrame) -> None:
         row1 = ctk.CTkFrame(parent, fg_color="transparent")
@@ -898,6 +901,13 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
             self._loaded_model_label.configure(text=f"Активная модель в LM Studio: {text}")
         except Exception:
             pass
+        # На вкладке «Блокноты» панель анализа (и эта метка) скрыта — нет смысла
+        # каждые 4с долбить сервер GET /api/v1/models. Ставим поллинг на паузу,
+        # пока метка не видна; он возобновится при возврате на анализ-вкладку.
+        if not getattr(self, "_analysis_panel", None) or not self._analysis_panel.winfo_ismapped():
+            self._model_poll_active = False
+            self._model_poll_after_id = None
+            return
         self._model_poll_after_id = self.after(4000, self._poll_loaded_model)
 
     def _on_build_index(self) -> None:

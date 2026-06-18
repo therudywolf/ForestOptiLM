@@ -50,8 +50,7 @@ import notebook_store as nbs
 from lmstudio_config import sanitize_for_log
 from notebook_chat import ChatResult, answer_question
 from notebook_studio import MATERIAL_ORDER, MATERIALS, generate_material
-from parser import compute_dynamic_chunk_size
-from processor import API_BASE, API_KEY, SYSTEM_PROMPT_MAP
+from processor import API_BASE, API_KEY
 from url_ingest import UrlIngestError, fetch_url
 
 logger = logging.getLogger("nocturne")
@@ -577,10 +576,16 @@ class NotebookUIMixin:
             return
         base_url = self._url_var.get().strip() or API_BASE
         api_key = self._api_key_var.get().strip() or API_KEY
-        context_budget = self._get_context_budget()
-        reserve = self._get_response_reserve(context_budget)
-        chunk_size = compute_dynamic_chunk_size(context_budget, SYSTEM_PROMPT_MAP,
-                                                "index build", response_reserve=reserve)
+        # Индекс блокнота — для RETRIEVAL по эмбеддингам, поэтому чанки должны быть
+        # МАЛЕНЬКИМИ (~512 токенов, под окно embedding-модели), а НЕ под контекст
+        # чат-модели. Крупные чанки (старое поведение давало ~6000 ток.) embedding
+        # обрезает до ~2048 и кодирует лишь начало (служебные [FILE_PATH]-заголовки) →
+        # все векторы похожи, поиск почти случаен (score ~0.03) → «нет ответа».
+        try:
+            chunk_size = int(os.getenv("NOCTURNE_NB_CHUNK_TOKENS", "512") or "512")
+        except ValueError:
+            chunk_size = 512
+        chunk_size = max(256, min(chunk_size, 1024))
         self._nb_set_busy(True)
         self._nb_set_status("Строю индекс…")
         self._nb_index_progress.set(0)
