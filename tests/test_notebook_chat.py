@@ -23,9 +23,11 @@ class _FakeNotebook:
     def __init__(self, hits: list[_Hit]) -> None:
         self._hits = hits
         self.last_query: str | None = None
+        self.last_top_k: int | None = None
 
     def query(self, question: str, **_kw) -> list[_Hit]:
         self.last_query = question
+        self.last_top_k = _kw.get("top_k")
         return self._hits
 
 
@@ -120,6 +122,19 @@ class TestAnswerQuestion(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 asyncio.run(nc.answer_question(
                     nb, "q", base_url="u", api_key="", chat_model="m"))
+
+    def test_default_top_k_retrieves_more(self) -> None:
+        # Регрессия: с маленькими чанками нужное «размазано» по большему числу
+        # фрагментов, поэтому по умолчанию забираем top_k=16 (а не 8), иначе на
+        # больших блокнотах релевантный фрагмент не попадает в контекст → отказ.
+        nb = _FakeNotebook([_Hit("grounding", "C:/x/a.txt")])
+
+        async def fake_call_llm(messages, model, base_url, api_key, semaphore, **kw):
+            return "ответ [1]."
+
+        with mock.patch("processor.call_llm", new=fake_call_llm):
+            asyncio.run(nc.answer_question(nb, "q", base_url="u", api_key="", chat_model="m"))
+        self.assertEqual(nb.last_top_k, 16)
 
     def test_grounded_answer_with_citations(self) -> None:
         nb = _FakeNotebook([_Hit("xz backdoor CVE-2024-3094", "C:/x/a.txt")])

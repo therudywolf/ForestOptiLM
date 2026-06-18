@@ -50,7 +50,8 @@
 - [x] Research-archive UI: notebook gallery (covers, descriptions, search, index status) ↔ three-pane workspace (Sources · Chat · Studio) with rename/describe/manage.
 - [x] Local audio transcription (faster-whisper, optional dep) — audio files become text sources; no TTS (audio-overview script generation deferred).
 - [x] Page (PDF) / line citation granularity — chunks carry page/line, surfaced in the citation chip and popup («стр. N» / «строка N»).
-- [x] Incremental index updates (append new sources without a full rebuild; rebuild on remove / embedding-model change).
+- [x] Incremental index updates (append new sources without a full rebuild; rebuild on remove / embedding-model / chunk-size change).
+- [x] Retrieval-sized index chunks (~512 tokens, `notebook_index_chunk_tokens`) instead of the chat-model MAP size. Fixes grounded chat always answering «нет ответа»: 6000-token chunks (~12–14k chars) exceeded the embedding model's window, so vectors were dominated by identical `[FILE_PATH]` headers and retrieval was near-random. chunk_size is stored in `index_info.json`; legacy huge-chunk indexes migrate on the next «Построить/обновить».
 
 ## 7. Providers & distribution
 

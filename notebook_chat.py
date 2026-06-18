@@ -249,9 +249,9 @@ async def answer_question(
     chat_model: str,
     embedding_model: str = "",
     api_mode: str = "native",
-    top_k: int = 8,
+    top_k: int = 16,
     history: list[dict[str, Any]] | None = None,
-    max_context_tokens: int = 8000,
+    max_context_tokens: int = 12000,
     max_answer_tokens: int = 1500,
     on_log: Callable[[str], None] | None = None,
 ) -> ChatResult:
@@ -273,7 +273,7 @@ async def answer_question(
         top_k=top_k,
     )
     _log(f"retrieval: {len(hits)} фрагментов")
-    contexts = select_contexts(hits, max_tokens=max_context_tokens)
+    contexts = select_contexts(hits, max_tokens=max_context_tokens, max_items=max(12, top_k))
 
     if not contexts:
         return ChatResult(
