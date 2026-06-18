@@ -25,6 +25,27 @@ from lmstudio_config import lmstudio_root_url, normalize_lmstudio_base_url, sani
 
 logger = logging.getLogger("nocturne")
 
+# (root_url|model), для которых уже инициировали загрузку в этом процессе. Без него
+# LM Studio плодит по новому инстансу embedding-модели (text-embedding-...:N) на
+# КАЖДЫЙ EmbeddingClient (а он создаётся на каждый чат-запрос и пересборку индекса).
+_EMB_LOAD_REQUESTED: set[str] = set()
+
+
+def _embedding_already_loaded(client: httpx.Client, root_url: str,
+                              headers: dict[str, str], model: str) -> bool:
+    """Есть ли уже загруженный инстанс модели (чтобы не грузить второй)."""
+    try:
+        r = client.get(f"{root_url}/api/v1/models", headers=headers, timeout=10.0)
+        if r.status_code >= 400:
+            return False
+        for m in (r.json().get("models") or []):
+            mid = str(m.get("key") or m.get("id") or "")
+            if mid == model and m.get("loaded_instances"):
+                return True
+    except Exception:
+        return False
+    return False
+
 
 class EmbeddingClient:
     def __init__(self, base_url: str, api_key: str, model: str, timeout: float = 120.0) -> None:
@@ -43,13 +64,26 @@ class EmbeddingClient:
         return headers
 
     def _try_load_model(self) -> None:
-        """Best-effort load for LM Studio REST v1; ignored for other compatible servers."""
+        """Best-effort load for LM Studio REST v1; ignored for other compatible servers.
+
+        Грузим embedding-модель МАКСИМУМ один раз за процесс и только если она ещё
+        не загружена — иначе LM Studio плодит по инстансу на каждый запрос (их потом
+        приходится выгружать вручную). После первой загрузки /v1/embeddings сам
+        переиспользует инстанс (JIT).
+        """
         if self._load_attempted or not self.root_url:
             return
         self._load_attempted = True
+        key = f"{self.root_url}|{self.model}"
+        if key in _EMB_LOAD_REQUESTED:
+            return
         try:
+            if _embedding_already_loaded(self._client, self.root_url, self._headers(), self.model):
+                _EMB_LOAD_REQUESTED.add(key)
+                return  # инстанс уже есть — переиспользуем, новый не создаём
             url = f"{self.root_url}/api/v1/models/load"
             r = self._client.post(url, headers=self._headers(), json={"model": self.model})
+            _EMB_LOAD_REQUESTED.add(key)
             if r.status_code >= 400:
                 logger.info(
                     "Embedding model auto-load skipped/failed: HTTP %s %s",
