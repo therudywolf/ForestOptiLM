@@ -576,16 +576,10 @@ class NotebookUIMixin:
             return
         base_url = self._url_var.get().strip() or API_BASE
         api_key = self._api_key_var.get().strip() or API_KEY
-        # Индекс блокнота — для RETRIEVAL по эмбеддингам, поэтому чанки должны быть
-        # МАЛЕНЬКИМИ (~512 токенов, под окно embedding-модели), а НЕ под контекст
-        # чат-модели. Крупные чанки (старое поведение давало ~6000 ток.) embedding
-        # обрезает до ~2048 и кодирует лишь начало (служебные [FILE_PATH]-заголовки) →
-        # все векторы похожи, поиск почти случаен (score ~0.03) → «нет ответа».
-        try:
-            chunk_size = int(os.getenv("NOCTURNE_NB_CHUNK_TOKENS", "512") or "512")
-        except ValueError:
-            chunk_size = 512
-        chunk_size = max(256, min(chunk_size, 1024))
+        # Индекс блокнота — для RETRIEVAL по эмбеддингам: чанки маленькие (~512 ток.,
+        # под окно embedding-модели), а НЕ под контекст чат-модели. См.
+        # notebook_store.notebook_index_chunk_tokens.
+        chunk_size = nbs.notebook_index_chunk_tokens()
         self._nb_set_busy(True)
         self._nb_set_status("Строю индекс…")
         self._nb_index_progress.set(0)

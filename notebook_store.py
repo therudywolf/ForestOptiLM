@@ -52,6 +52,20 @@ logger = logging.getLogger("nocturne")
 _META_NAME = "notebook.json"
 _LAST_ACTIVE = "last_active.txt"
 
+# Размер чанка для индекса блокнота — под окно embedding-модели (точный retrieval),
+# а НЕ под контекст чат-модели. Крупные чанки (>2048 ток.) embedding обрезает и
+# кодирует лишь начало (служебные заголовки) → векторы неразличимы, поиск случаен.
+NB_INDEX_CHUNK_TOKENS_DEFAULT = 512
+
+
+def notebook_index_chunk_tokens() -> int:
+    """Размер чанка индекса блокнота: env NOCTURNE_NB_CHUNK_TOKENS, клампим 256..1024."""
+    try:
+        v = int(os.getenv("NOCTURNE_NB_CHUNK_TOKENS", "") or NB_INDEX_CHUNK_TOKENS_DEFAULT)
+    except ValueError:
+        v = NB_INDEX_CHUNK_TOKENS_DEFAULT
+    return max(256, min(v, 1024))
+
 
 def notebooks_root() -> Path:
     """Корень всех блокнотов.

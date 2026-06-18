@@ -10,6 +10,35 @@ from pathlib import Path
 import notebook_store as nbs
 
 
+class TestNotebookChunkTokens(unittest.TestCase):
+    def setUp(self) -> None:
+        self._saved = os.environ.pop("NOCTURNE_NB_CHUNK_TOKENS", None)
+
+    def tearDown(self) -> None:
+        if self._saved is None:
+            os.environ.pop("NOCTURNE_NB_CHUNK_TOKENS", None)
+        else:
+            os.environ["NOCTURNE_NB_CHUNK_TOKENS"] = self._saved
+
+    def test_default_is_small(self) -> None:
+        # Дефолт — маленький чанк под embedding (а не тысячи токенов под чат-модель).
+        self.assertEqual(nbs.notebook_index_chunk_tokens(), 512)
+
+    def test_env_override(self) -> None:
+        os.environ["NOCTURNE_NB_CHUNK_TOKENS"] = "768"
+        self.assertEqual(nbs.notebook_index_chunk_tokens(), 768)
+
+    def test_clamped_high_and_low(self) -> None:
+        os.environ["NOCTURNE_NB_CHUNK_TOKENS"] = "9000"
+        self.assertEqual(nbs.notebook_index_chunk_tokens(), 1024)
+        os.environ["NOCTURNE_NB_CHUNK_TOKENS"] = "10"
+        self.assertEqual(nbs.notebook_index_chunk_tokens(), 256)
+
+    def test_bad_env_falls_back(self) -> None:
+        os.environ["NOCTURNE_NB_CHUNK_TOKENS"] = "abc"
+        self.assertEqual(nbs.notebook_index_chunk_tokens(), 512)
+
+
 class TestNotebooksRoot(unittest.TestCase):
     def setUp(self) -> None:
         self._saved = {k: os.environ.get(k) for k in ("NOCTURNE_NOTEBOOKS_DIR", "NOCTURNE_CACHE_DIR")}

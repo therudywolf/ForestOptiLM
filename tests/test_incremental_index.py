@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -33,11 +34,14 @@ class TestIncrementalIndex(unittest.TestCase):
         self.root = Path(self._tmp.name)
         self.index_dir = self.root / "index"
 
-    def _add(self, files, model="emb-1"):
+    def _add(self, files, model="emb-1", chunk=2000):
         return pipeline.add_to_index(
             input_paths=files, index_dir=self.index_dir,
-            base_url="u", api_key="", embedding_model=model, chunk_size_tokens=2000,
+            base_url="u", api_key="", embedding_model=model, chunk_size_tokens=chunk,
         )
+
+    def _info(self) -> dict:
+        return json.loads((self.index_dir / "index_info.json").read_text(encoding="utf-8"))
 
     def test_incremental_then_rebuild(self) -> None:
         f1 = self.root / "a.txt"
@@ -69,6 +73,39 @@ class TestIncrementalIndex(unittest.TestCase):
         # changing embedding model → full rebuild
         stats5, inc5 = self._add([f1], model="emb-2")
         self.assertFalse(inc5)
+
+    def test_chunk_size_stored_in_info(self) -> None:
+        # Регрессия: размер чанка должен сохраняться в index_info.json, иначе
+        # инкрементальное обновление не заметит смену размера.
+        f1 = self.root / "a.txt"
+        f1.write_text("Контент про сборки и релизы. " * 5, encoding="utf-8")
+        self._add([f1], chunk=512)
+        self.assertEqual(int(self._info().get("chunk_size_tokens")), 512)
+
+    def test_rebuild_on_chunk_size_change(self) -> None:
+        # Главный фикс: смена размера чанка → ПОЛНАЯ пересборка (а не incremental),
+        # иначе остаются старые слишком крупные чанки и поиск не работает.
+        f1 = self.root / "a.txt"
+        f1.write_text("Альфа контент про подсистемы и сервисы.", encoding="utf-8")
+        _s1, inc1 = self._add([f1], chunk=2000)
+        self.assertFalse(inc1)  # нет индекса → полная сборка
+        _s2, inc2 = self._add([f1], chunk=512)  # те же файлы/модель, другой размер
+        self.assertFalse(inc2)  # → пересборка
+        self.assertEqual(int(self._info().get("chunk_size_tokens")), 512)
+        _s3, inc3 = self._add([f1], chunk=512)  # тот же размер → incremental
+        self.assertTrue(inc3)
+
+    def test_rebuild_when_legacy_index_lacks_chunk_size(self) -> None:
+        # Старый индекс (без поля chunk_size_tokens) должен мигрировать пересборкой.
+        f1 = self.root / "a.txt"
+        f1.write_text("Гамма контент.", encoding="utf-8")
+        self._add([f1], chunk=512)
+        p = self.index_dir / "index_info.json"
+        info = self._info()
+        info.pop("chunk_size_tokens", None)
+        p.write_text(json.dumps(info, ensure_ascii=False), encoding="utf-8")
+        _s, inc = self._add([f1], chunk=512)
+        self.assertFalse(inc)  # отсутствует поле (prev=0 != 512) → пересборка
 
     def test_query_after_incremental(self) -> None:
         f1 = self.root / "a.txt"
