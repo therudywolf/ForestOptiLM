@@ -37,6 +37,28 @@ from typing import Any, Callable
 logger = logging.getLogger("nocturne")
 
 REFUSAL_TEXT = "В источниках блокнота нет ответа на этот вопрос."
+CANCELLED_TEXT = "⏹ Запрос остановлен."
+
+
+class ChatCancelled(Exception):
+    """Пользователь нажал «Стоп» — кооперативная отмена запроса чата."""
+
+
+async def _await_with_stop(coro: Any, stopped: Callable[[], bool], poll: float = 0.15) -> Any:
+    """Ждать coro, периодически проверяя stop-флаг. По «Стоп» отменяет задачу
+    (in-flight httpx-запрос рвётся) и поднимает ChatCancelled."""
+    task = asyncio.ensure_future(coro)
+    while True:
+        done, _ = await asyncio.wait({task}, timeout=poll)
+        if task in done:
+            return task.result()
+        if stopped():
+            task.cancel()
+            try:
+                await task
+            except BaseException:
+                pass
+            raise ChatCancelled()
 
 CHAT_SYSTEM_PROMPT = (
     "Ты — ассистент, отвечающий СТРОГО на основе источников блокнота.\n"
@@ -45,9 +67,12 @@ CHAT_SYSTEM_PROMPT = (
     "[Источники]. Не добавляй внешних знаний и не домысливай.\n"
     "2. После каждого утверждения ставь ссылку на источник в виде [N] — номер "
     "фрагмента. Если факт опирается на несколько фрагментов, перечисли их: [1][3].\n"
-    "3. Если в источниках нет ответа на вопрос — ответь ровно фразой: "
-    f"\"{REFUSAL_TEXT}\" и ничего не выдумывай.\n"
-    "4. Отвечай на языке вопроса, по делу, без воды и без описания своих "
+    "3. Если источники отвечают лишь ЧАСТИЧНО — всё равно ответь тем, что в них "
+    "есть (со ссылками [N]), и честно отметь, чего в источниках не хватает. "
+    "Не отказывайся от ответа, если хоть что-то по теме во фрагментах есть.\n"
+    f"4. Только если во фрагментах СОВСЕМ нет относящейся к вопросу информации — "
+    f"ответь ровно фразой: \"{REFUSAL_TEXT}\" и ничего не выдумывай.\n"
+    "5. Отвечай на языке вопроса, по делу, без воды и без описания своих "
     "размышлений."
 )
 
@@ -209,8 +234,9 @@ def build_chat_messages(
     parts.append("[Источники]\n" + ctx_block)
     parts.append("[Вопрос]\n" + question.strip())
     parts.append(
-        "Ответь строго по источникам выше и ставь ссылки [N]. "
-        f"Если ответа в источниках нет — напиши ровно: \"{REFUSAL_TEXT}\"."
+        "Ответь по источникам выше и ставь ссылки [N]. Если ответ есть лишь "
+        "частично — дай частичный ответ и отметь, чего не хватает. Напиши ровно "
+        f"\"{REFUSAL_TEXT}\" только если по теме во фрагментах нет ничего."
     )
     user = "\n\n".join(parts)
     return [
@@ -255,6 +281,7 @@ async def answer_question(
     max_answer_tokens: int = 1500,
     prefer_reasoning_off: bool = True,
     on_log: Callable[[str], None] | None = None,
+    stop_flag: Callable[[], bool] | None = None,
 ) -> ChatResult:
     """Полный цикл: retrieval по блокноту → grounded-ответ с цитатами.
 
@@ -271,6 +298,16 @@ async def answer_question(
                 on_log(msg)
             except Exception:
                 pass
+
+    def _stopped() -> bool:
+        return bool(stop_flag and stop_flag())
+
+    def _cancelled_result(ctxs: list[ContextItem]) -> ChatResult:
+        return ChatResult(
+            answer=CANCELLED_TEXT, citations=[],
+            contexts=[c.to_citation() for c in ctxs],
+            refused=False, model=chat_model, extra={"cancelled": True},
+        )
 
     hits = notebook.query(
         question,
@@ -291,19 +328,27 @@ async def answer_question(
             model=chat_model,
         )
 
+    if _stopped():  # успели нажать «Стоп» ещё на этапе поиска
+        return _cancelled_result(contexts)
+
     messages = build_chat_messages(question, contexts, history)
     semaphore = asyncio.Semaphore(1)
     try:
-        raw = await call_llm(
-            messages,
-            chat_model,
-            base_url,
-            api_key,
-            semaphore,
-            max_tokens=max_answer_tokens,
-            api_mode=api_mode,
-            prefer_reasoning_off=prefer_reasoning_off,
+        raw = await _await_with_stop(
+            call_llm(
+                messages,
+                chat_model,
+                base_url,
+                api_key,
+                semaphore,
+                max_tokens=max_answer_tokens,
+                api_mode=api_mode,
+                prefer_reasoning_off=prefer_reasoning_off,
+            ),
+            _stopped,
         )
+    except ChatCancelled:
+        return _cancelled_result(contexts)
     except RuntimeError as exc:
         # Маленькие reasoning-модели c reasoning:off иногда отдают пустой вывод —
         # не роняем чат, а возвращаем понятное сообщение (ретраи внутри call_llm

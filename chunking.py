@@ -26,6 +26,59 @@ def strip_chunk_headers(text: str) -> str:
     return "\n".join(lines).strip()
 
 
+def _raster_ext(blob: bytes) -> str:
+    """Расширение по магическим байтам — только растровые (vision их понимает).
+
+    EMF/WMF (вектор, частый формат диаграмм в docx) пропускаем — vision-модель не
+    обработает их без растеризации.
+    """
+    if blob[:4] == b"\x89PNG":
+        return ".png"
+    if blob[:3] == b"\xff\xd8\xff":
+        return ".jpg"
+    if blob[:6] in (b"GIF87a", b"GIF89a"):
+        return ".gif"
+    if blob[:2] == b"BM":
+        return ".bmp"
+    if blob[:4] == b"RIFF" and blob[8:12] == b"WEBP":
+        return ".webp"
+    return ""
+
+
+def _describe_doc_images(path: Path, vision_describe: Callable[[Path], str] | None) -> str:
+    """Описать картинки, ВСТРОЕННЫЕ в .docx (диаграммы/схемы), vision-моделью."""
+    if vision_describe is None or path.suffix.lower() != ".docx":
+        return ""
+    try:
+        from file_extractors import extract_docx_images
+        blobs = extract_docx_images(path)
+    except Exception:
+        return ""
+    import tempfile
+    descs: list[str] = []
+    for i, blob in enumerate(blobs):
+        ext = _raster_ext(blob or b"")
+        if not ext:
+            continue  # вектор/неизвестный формат — пропускаем
+        tmp: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as f:
+                f.write(blob)
+                tmp = Path(f.name)
+            d = vision_describe(tmp)
+            if d and d.strip():
+                descs.append(f"[Изображение {i + 1} из документа]\n{d.strip()}")
+        except Exception:
+            pass
+        finally:
+            if tmp is not None:
+                try:
+                    tmp.unlink()
+                except Exception:
+                    pass
+    return ("\n\n[Изображения из документа]\n" + "\n\n".join(descs)) if descs else ""
+
+
 def build_document_chunks(
     path: Path,
     chunk_size_tokens: int,
@@ -122,6 +175,11 @@ def build_document_chunks(
         )
     elif kind == "text":
         text = str(content).strip()
+        # Картинки, встроенные в документ (диаграммы/схемы в .docx), описываем
+        # vision-моделью и дописываем к тексту → их содержимое тоже ищется.
+        img_block = _describe_doc_images(path, vision_describe)
+        if img_block:
+            text = (text + img_block).strip()
         if not text:
             return []
         # Page breaks (\f, from PDF extraction) → page numbers for citations.

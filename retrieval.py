@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from pathlib import Path
 
 import faiss
@@ -42,6 +43,9 @@ class LocalFaissStore:
         self._cached_dim: int | None = None
         self._cached_bm25: BM25Index | None = None
         self._cached_bm25_sig: int = -1
+        # Стор переиспользуется между запросами (один на index_dir) → кэш FAISS/BM25
+        # живёт, но к нему могут обращаться из нескольких потоков — защищаем загрузку.
+        self._lock = threading.Lock()
 
     def build(self, chunks: list[DocumentChunk], vectors: list[list[float]],
               embedding_model: str, chunk_size_tokens: int = 0,
@@ -182,14 +186,15 @@ class LocalFaissStore:
         return str(m.get("chunk_id") or pos)
 
     def _ensure_bm25(self, meta: list[dict]) -> BM25Index:
-        if self._cached_bm25 is not None and self._cached_bm25_sig == self._cached_mtime_ns:
-            return self._cached_bm25
-        ids = [self._meta_id(i, m) for i, m in enumerate(meta)]
-        texts = [str(m.get("text") or "") for m in meta]
-        bm = BM25Index().fit(ids, texts)
-        self._cached_bm25 = bm
-        self._cached_bm25_sig = self._cached_mtime_ns
-        return bm
+        with self._lock:
+            if self._cached_bm25 is not None and self._cached_bm25_sig == self._cached_mtime_ns:
+                return self._cached_bm25
+            ids = [self._meta_id(i, m) for i, m in enumerate(meta)]
+            texts = [str(m.get("text") or "") for m in meta]
+            bm = BM25Index().fit(ids, texts)
+            self._cached_bm25 = bm
+            self._cached_bm25_sig = self._cached_mtime_ns
+            return bm
 
     def hybrid_search(
         self,
@@ -197,9 +202,16 @@ class LocalFaissStore:
         query_vector: list[float] | None,
         top_k: int = 8,
         candidate_k: int | None = None,
+        min_score_ratio: float = 0.0,
     ) -> list[RetrievalHit]:
         """FAISS (вектор) + BM25 (лексика) → слияние RRF. Точные CVE/хосты/пакеты
-        ловит BM25, семантику — вектор."""
+        ловит BM25, семантику — вектор.
+
+        ``min_score_ratio`` (0 = выкл) отбрасывает «хвост» — фрагменты со слитым
+        RRF-скором ниже ``min_score_ratio × лучший_скор``. Консервативно (0.15)
+        убирает явный шум, не задевая релевантные кандидаты — recall важнее для
+        grounded-чата, поэтому по умолчанию фильтр выключен.
+        """
         if not self.index_file.exists() or not self.meta_file.exists():
             return []
         index, meta, dim = self._load_cached_index_meta()
@@ -224,6 +236,9 @@ class LocalFaissStore:
         if not rankings:
             return []
         fused = reciprocal_rank_fusion(rankings, top_k=top_k)
+        if fused and min_score_ratio > 0.0:
+            floor = fused[0][1] * min_score_ratio
+            fused = [(cid, s) for cid, s in fused if s >= floor]
         by_id = {self._meta_id(pos, m): m for pos, m in enumerate(meta)}
         hits: list[RetrievalHit] = []
         for cid, score in fused:
@@ -245,27 +260,28 @@ class LocalFaissStore:
         idx_mtime = self.index_file.stat().st_mtime_ns
         meta_mtime = self.meta_file.stat().st_mtime_ns
         signature = max(idx_mtime, meta_mtime)
-        if (
-            self._cached_index is not None
-            and self._cached_meta is not None
-            and self._cached_mtime_ns == signature
-        ):
-            return self._cached_index, self._cached_meta, self._cached_dim
+        with self._lock:
+            if (
+                self._cached_index is not None
+                and self._cached_meta is not None
+                and self._cached_mtime_ns == signature
+            ):
+                return self._cached_index, self._cached_meta, self._cached_dim
 
-        index = faiss.read_index(str(self.index_file))
-        meta = self._read_meta()
-        dim = None
-        try:
-            info = json.loads(self.info_file.read_text(encoding="utf-8"))
-            dim_val = info.get("dim")
-            if isinstance(dim_val, int) and dim_val > 0:
-                dim = dim_val
-        except Exception:
+            index = faiss.read_index(str(self.index_file))
+            meta = self._read_meta()
             dim = None
-        self._cached_index = index
-        self._cached_meta = meta
-        self._cached_mtime_ns = signature
-        self._cached_dim = dim
+            try:
+                info = json.loads(self.info_file.read_text(encoding="utf-8"))
+                dim_val = info.get("dim")
+                if isinstance(dim_val, int) and dim_val > 0:
+                    dim = dim_val
+            except Exception:
+                dim = None
+            self._cached_index = index
+            self._cached_meta = meta
+            self._cached_mtime_ns = signature
+            self._cached_dim = dim
         return index, meta, dim
 
     def _read_meta(self) -> list[dict]:

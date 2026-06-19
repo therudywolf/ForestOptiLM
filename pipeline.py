@@ -38,6 +38,20 @@ from retrieval import LocalFaissStore
 logger = logging.getLogger("nocturne")
 
 _INDEX_MAX_WORKERS = max(2, min(16, (os.cpu_count() or 4)))
+
+# Один LocalFaissStore на каталог индекса, переиспользуемый между запросами: его
+# внутренний кэш (FAISS-индекс + BM25) тогда не перестраивается на каждый вопрос
+# чата. Инвалидация — по mtime внутри самого стора (пересборка индекса меняет файлы).
+_STORE_CACHE: dict[str, LocalFaissStore] = {}
+
+
+def _store_for(index_dir: Path) -> LocalFaissStore:
+    key = str(Path(index_dir).resolve()).lower()  # Windows: пути регистронезависимы
+    store = _STORE_CACHE.get(key)
+    if store is None:
+        store = LocalFaissStore(index_dir=index_dir)
+        _STORE_CACHE[key] = store
+    return store
 _ALLOWED_SUFFIXES = (
     set(TEXT_EXTRACTORS.keys()) | set(TABLE_EXTRACTORS.keys())
     | set(ARCHIVE_EXTENSIONS) | {".tar.gz"} | IMAGE_EXTENSIONS
@@ -288,7 +302,7 @@ def query_index(
     Если эмбеддинги недоступны (нет модели/сервера), всё равно работает чистый
     BM25 — точный поиск по CVE/хостам/пакетам не зависит от эмбеддера.
     """
-    store = LocalFaissStore(index_dir=index_dir)
+    store = _store_for(index_dir)
     qvec: list[float] | None = None
     try:
         emb_client = EmbeddingClient(base_url=base_url, api_key=api_key, model=embedding_model)
@@ -298,7 +312,9 @@ def query_index(
         logger.warning("Embedding query failed, falling back to BM25 only: %s", exc)
         qvec = None
     if hybrid:
-        hits = store.hybrid_search(question, qvec, top_k=top_k)
+        # min_score_ratio=0.15 убирает «хвост» совсем слабых фрагментов из контекста
+        # чата (меньше шума для модели), не задевая релевантные кандидаты.
+        hits = store.hybrid_search(question, qvec, top_k=top_k, min_score_ratio=0.15)
         if hits:
             return hits
     if qvec is None:

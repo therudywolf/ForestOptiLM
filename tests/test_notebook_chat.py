@@ -151,6 +151,40 @@ class TestAnswerQuestion(unittest.TestCase):
                 nb, "q", base_url="u", api_key="", chat_model="google/gemma-4-12b-qat"))
         self.assertTrue(captured.get("prefer_reasoning_off"))
 
+    def test_stop_flag_cancels_in_flight_request(self) -> None:
+        # «Стоп» во время ответа модели → кооперативная отмена, не падение.
+        nb = _FakeNotebook([_Hit("grounding", "C:/x/a.txt")])
+        stop = {"v": False}
+
+        async def slow_call_llm(messages, model, base_url, api_key, semaphore, **kw):
+            stop["v"] = True  # имитируем нажатие «Стоп» сразу после старта запроса
+            await asyncio.sleep(5)  # должен быть отменён задолго до конца
+            return "не должно дойти"
+
+        with mock.patch("processor.call_llm", new=slow_call_llm):
+            res = asyncio.run(nc.answer_question(
+                nb, "q", base_url="u", api_key="", chat_model="m",
+                stop_flag=lambda: stop["v"]))
+        self.assertTrue(res.extra.get("cancelled"))
+        self.assertEqual(res.answer, nc.CANCELLED_TEXT)
+        self.assertEqual(len(res.contexts), 1)  # источники всё равно показываем
+
+    def test_stop_flag_before_llm_skips_request(self) -> None:
+        # Уже остановлено к моменту поиска → запрос к модели не уходит вовсе.
+        nb = _FakeNotebook([_Hit("grounding", "C:/x/a.txt")])
+        called = {"v": False}
+
+        async def must_not_run(messages, model, base_url, api_key, semaphore, **kw):
+            called["v"] = True
+            return "x"
+
+        with mock.patch("processor.call_llm", new=must_not_run):
+            res = asyncio.run(nc.answer_question(
+                nb, "q", base_url="u", api_key="", chat_model="m",
+                stop_flag=lambda: True))
+        self.assertTrue(res.extra.get("cancelled"))
+        self.assertFalse(called["v"])
+
     def test_grounded_answer_with_citations(self) -> None:
         nb = _FakeNotebook([_Hit("xz backdoor CVE-2024-3094", "C:/x/a.txt")])
 

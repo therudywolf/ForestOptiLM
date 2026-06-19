@@ -154,6 +154,24 @@ def _read_pdf(path: Path) -> str:
     return "\f".join(parts)
 
 
+def _rows_to_markdown(rows: list[list[str]]) -> str:
+    """Таблица → Markdown (шапка + разделитель). LLM и retrieval так читают таблицы
+    куда лучше, чем склейку через табы; ячейки нормализуем (переносы → пробел)."""
+    rows = [r for r in rows if any(c.strip() for c in r)]
+    if not rows:
+        return ""
+    width = max(len(r) for r in rows)
+
+    def cell(c: str) -> str:
+        return c.replace("\n", " ").replace("|", r"\|").strip()
+
+    norm = [[cell(c) for c in r] + [""] * (width - len(r)) for r in rows]
+    out = ["| " + " | ".join(norm[0]) + " |",
+           "| " + " | ".join(["---"] * width) + " |"]
+    out += ["| " + " | ".join(r) + " |" for r in norm[1:]]
+    return "\n".join(out)
+
+
 def _read_docx(path: Path) -> str:
     if DocxDocument is None:
         raise ParseError("python-docx is not installed")
@@ -162,13 +180,44 @@ def _read_docx(path: Path) -> str:
     for p in doc.paragraphs:
         if p.text.strip():
             lines.append(p.text)
-    # Also extract tables from docx
+    # Таблицы docx → Markdown-блоки (структура сохраняется → точнее поиск/ответы).
     for table in doc.tables:
-        for row in table.rows:
-            cells = [c.text.strip() for c in row.cells]
-            if any(cells):
-                lines.append("\t".join(cells))
+        rows = [[c.text.strip() for c in row.cells] for row in table.rows]
+        md = _rows_to_markdown(rows)
+        if md:
+            lines.append("")
+            lines.append(md)
     return "\n".join(lines)
+
+
+def extract_docx_images(path: Path) -> list[bytes]:
+    """Блобы изображений, встроенных в .docx (диаграммы/схемы в теле документа).
+
+    Их потом описывает vision-модель (chunking) — иначе содержимое диаграмм теряется.
+    """
+    if DocxDocument is None:
+        return []
+    try:
+        doc = DocxDocument(path)
+    except Exception:
+        return []
+    blobs: list[bytes] = []
+    seen: set[int] = set()
+    try:
+        for rel in doc.part.rels.values():
+            if "image" in str(getattr(rel, "reltype", "")).lower():
+                try:
+                    blob = rel.target_part.blob
+                except Exception:
+                    continue
+                h = hash(blob[:256] + bytes(str(len(blob)), "ascii"))
+                if h in seen:
+                    continue
+                seen.add(h)
+                blobs.append(blob)
+    except Exception:
+        return blobs
+    return blobs
 
 
 def _read_odt(path: Path) -> str:
@@ -237,12 +286,29 @@ def _read_csv(path: Path) -> pd.DataFrame:
     return pd.DataFrame()
 
 
+def _read_all_sheets(path: Path, engine: str) -> pd.DataFrame:
+    """Все листы книги (а не только первый) с колонкой-меткой листа."""
+    sheets = pd.read_excel(str(path), engine=engine, sheet_name=None)
+    if not sheets:
+        return pd.DataFrame()
+    if len(sheets) == 1:
+        return next(iter(sheets.values()))
+    frames: list[pd.DataFrame] = []
+    for name, df in sheets.items():
+        if df is None or df.empty:
+            continue
+        df = df.copy()
+        df.insert(0, "__sheet__", str(name))
+        frames.append(df)
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
 def _read_xlsx(path: Path) -> pd.DataFrame:
-    return pd.read_excel(str(path), engine="openpyxl")
+    return _read_all_sheets(path, "openpyxl")
 
 
 def _read_xls(path: Path) -> pd.DataFrame:
-    return pd.read_excel(str(path), engine="xlrd")
+    return _read_all_sheets(path, "xlrd")
 
 
 def _read_json_table(path: Path) -> pd.DataFrame:

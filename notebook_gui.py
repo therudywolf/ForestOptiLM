@@ -103,6 +103,7 @@ class NotebookUIMixin:
     def _build_notebooks_tab(self, parent: ctk.CTkFrame) -> None:
         self._nb_current = None
         self._nb_busy = False
+        self._nb_chat_stop = threading.Event()  # кооперативная отмена запроса чата
         self._nb_view = "archive"
         self._nb_relayout_after: str | None = None
         self._nb_search_var = ctk.StringVar(value="")
@@ -351,6 +352,10 @@ class NotebookUIMixin:
                                          fg_color=_ACCENT, hover_color=_ACCENT_HOVER,
                                          command=self._nb_on_ask)
         self._nb_ask_btn.pack(side="left")
+        # Кнопка «Стоп» появляется на месте «Спросить», пока идёт запрос.
+        self._nb_stop_btn = ctk.CTkButton(input_row, text="⏹ Стоп", width=110,
+                                          fg_color="#b91c1c", hover_color="#7f1d1d",
+                                          command=self._nb_on_stop)
         self._nb_question.bind("<Control-Return>", lambda _e: (self._nb_on_ask(), "break")[1])
 
     def _nb_build_studio_panel(self, right: ctk.CTkFrame) -> None:
@@ -670,6 +675,7 @@ class NotebookUIMixin:
         nb.append_chat_turn("user", question)
         self._nb_add_message_row("user", question, [])
         self._nb_question.delete("1.0", "end")
+        self._nb_chat_stop.clear()  # новый запрос → сбрасываем флаг отмены
         self._nb_set_busy(True)
         self._nb_set_status("Ищу в источниках и формирую ответ…")
         thinking = self._nb_add_message_row("assistant", "…думаю…", [], placeholder=True)
@@ -684,6 +690,7 @@ class NotebookUIMixin:
                         chat_model=model, embedding_model=emb, api_mode=api_mode,
                         history=history,
                         on_log=lambda m: self._append_log_line(f"[NB chat] {m}", "general"),
+                        stop_flag=self._nb_chat_stop.is_set,
                     )
                 )
             except Exception as exc:  # noqa: BLE001
@@ -714,7 +721,9 @@ class NotebookUIMixin:
             pass
         self._nb_add_message_row("assistant", result.answer, result.citations,
                                  contexts=result.contexts, refused=result.refused)
-        if result.refused:
+        if result.extra.get("cancelled"):
+            self._nb_set_status("Запрос остановлен", "#f59e0b")
+        elif result.refused:
             self._nb_set_status("В источниках нет ответа", "#f59e0b")
         else:
             self._nb_set_status("Ответ готов", "lightgreen")
@@ -767,6 +776,21 @@ class NotebookUIMixin:
                 loc = str(cit.get("locator") or "")
                 label = f"[{n}] {disp}" + (f" · {loc}" if loc else "")
                 ctk.CTkButton(chips, text=label, height=24, font=ctk.CTkFont(size=11),
+                              fg_color="transparent", border_width=1, anchor="w",
+                              command=lambda c=cit: self._nb_show_citation(c)).pack(side="left", padx=2)
+        # При отказе модель не ставит [N], но фрагменты-кандидаты всё равно нашлись —
+        # покажем их, чтобы пользователь сам проверил, есть ли ответ рядом.
+        elif refused and contexts and not placeholder:
+            found = ctk.CTkFrame(outer, fg_color="transparent")
+            found.pack(anchor="w", pady=(3, 0))
+            ctk.CTkLabel(found, text="Найдено по теме (проверьте сами):", text_color=_MUTED,
+                         font=ctk.CTkFont(size=11)).pack(side="left", padx=(0, 4))
+            for cit in contexts[:5]:
+                n = cit.get("n", "?")
+                disp = str(cit.get("display") or "источник")
+                loc = str(cit.get("locator") or "")
+                label = f"[{n}] {disp}" + (f" · {loc}" if loc else "")
+                ctk.CTkButton(found, text=label, height=24, font=ctk.CTkFont(size=11),
                               fg_color="transparent", border_width=1, anchor="w",
                               command=lambda c=cit: self._nb_show_citation(c)).pack(side="left", padx=2)
         self.after(0, self._nb_scroll_chat_to_end)
@@ -946,6 +970,26 @@ class NotebookUIMixin:
             self._nb_ask_btn.configure(state="disabled" if busy else "normal")
         except Exception:
             pass
+        # Во время запроса показываем «Стоп» вместо «Спросить».
+        try:
+            if busy:
+                self._nb_ask_btn.pack_forget()
+                self._nb_stop_btn.configure(state="normal", text="⏹ Стоп")
+                self._nb_stop_btn.pack(side="left")
+            else:
+                self._nb_stop_btn.pack_forget()
+                self._nb_ask_btn.pack(side="left")
+        except Exception:
+            pass
+
+    def _nb_on_stop(self) -> None:
+        """«Стоп»: кооперативно отменить текущий запрос чата."""
+        self._nb_chat_stop.set()
+        try:
+            self._nb_stop_btn.configure(state="disabled", text="Останавливаю…")
+        except Exception:
+            pass
+        self._nb_set_status("Останавливаю запрос…", "#f59e0b")
 
     def _nb_set_status(self, text: str, color: str = _HINT) -> None:
         try:

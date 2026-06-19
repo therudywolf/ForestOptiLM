@@ -53,6 +53,30 @@ class TestHybridSearch(unittest.TestCase):
             self.assertTrue(hits)
             self.assertEqual(hits[0].chunk_id, "c1")
 
+    def test_min_score_ratio_trims_tail(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            store = self._store(Path(td))
+            full = store.hybrid_search(
+                query_text="memory leak", query_vector=[1.0, 0.0, 0.0, 0.0], top_k=3,
+            )
+            trimmed = store.hybrid_search(
+                query_text="memory leak", query_vector=[1.0, 0.0, 0.0, 0.0], top_k=3,
+                min_score_ratio=0.95,  # агрессивно: оставить лишь почти-лучшие
+            )
+            self.assertLessEqual(len(trimmed), len(full))
+            self.assertTrue(trimmed)  # лучший фрагмент никогда не выкидываем
+            # Все оставшиеся — не ниже порога относительно лучшего.
+            top = trimmed[0].score
+            self.assertTrue(all(h.score >= top * 0.95 - 1e-9 for h in trimmed))
+
+    def test_store_for_reuses_instance_per_dir(self) -> None:
+        import pipeline
+        with tempfile.TemporaryDirectory() as td:
+            pipeline._STORE_CACHE.clear()
+            a = pipeline._store_for(Path(td))
+            b = pipeline._store_for(Path(td))
+            self.assertIs(a, b)  # тот же инстанс → кэш FAISS/BM25 переживает запросы
+
 
 if __name__ == "__main__":
     unittest.main()
