@@ -18,11 +18,13 @@ class _FakeEmb:
     def __init__(self, **kw) -> None:
         pass
 
-    def embed_texts(self, texts, batch_size: int = 16):
+    def embed_texts(self, texts, batch_size: int = 16, task=None, on_batch=None):
         out = []
         for t in texts:
             h = hashlib.sha256(t.encode("utf-8")).digest()
             out.append([b / 255.0 for b in h[:8]])
+        if on_batch:
+            on_batch(len(texts), len(texts))
         return out
 
 
@@ -106,6 +108,21 @@ class TestIncrementalIndex(unittest.TestCase):
         p.write_text(json.dumps(info, ensure_ascii=False), encoding="utf-8")
         _s, inc = self._add([f1], chunk=512)
         self.assertFalse(inc)  # отсутствует поле (prev=0 != 512) → пересборка
+
+    def test_rebuild_when_prefix_scheme_missing(self) -> None:
+        # Старый индекс без nomic-префиксов (поле prefix_scheme отсутствует) при
+        # nomic-модели должен ПОЛНОСТЬЮ пересобраться, иначе пространства запрос/док
+        # не совпадут.
+        f1 = self.root / "a.txt"
+        f1.write_text("Контент про подсистемы.", encoding="utf-8")
+        self._add([f1], model="text-embedding-nomic-embed-text-v1.5")
+        info_p = self.index_dir / "index_info.json"
+        info = json.loads(info_p.read_text(encoding="utf-8"))
+        self.assertEqual(info.get("prefix_scheme"), "nomic-v1")
+        info.pop("prefix_scheme", None)  # эмулируем legacy-индекс
+        info_p.write_text(json.dumps(info), encoding="utf-8")
+        _s, inc = self._add([f1], model="text-embedding-nomic-embed-text-v1.5")
+        self.assertFalse(inc)  # полная пересборка-миграция
 
     def test_query_after_incremental(self) -> None:
         f1 = self.root / "a.txt"

@@ -23,7 +23,7 @@ import os
 from pathlib import Path
 from typing import Callable, Iterable
 
-from embeddings import EmbeddingClient
+from embeddings import EmbeddingClient, embedding_prefix_scheme
 from file_extractors import (
     ARCHIVE_EXTENSIONS,
     IMAGE_EXTENSIONS,
@@ -147,14 +147,16 @@ def build_index(
     )
 
     emb_client = EmbeddingClient(base_url=base_url, api_key=api_key, model=embedding_model)
+    _embp = (lambda done, total: on_progress(done, total, "index_embed")) if on_progress else None
     if on_progress:
         on_progress(0, max(1, len(unique_chunks)), "index_embed")
-    vectors = emb_client.embed_texts([c.text for c in unique_chunks], batch_size=16)
-    if on_progress:
-        on_progress(max(1, len(unique_chunks)), max(1, len(unique_chunks)), "index_embed")
+    # task="document" → nomic-префикс для документов (recall ↑); прогресс по батчам.
+    vectors = emb_client.embed_texts(
+        [c.text for c in unique_chunks], batch_size=16, task="document", on_batch=_embp)
     store = LocalFaissStore(index_dir=index_dir)
     return store.build(unique_chunks, vectors, embedding_model=embedding_model,
-                       chunk_size_tokens=chunk_size_tokens)
+                       chunk_size_tokens=chunk_size_tokens,
+                       prefix_scheme=embedding_prefix_scheme(embedding_model))
 
 
 def add_to_index(
@@ -177,12 +179,16 @@ def add_to_index(
     all_files = _iter_files(input_paths)
     info = store.info()
     prev_chunk = int(info.get("chunk_size_tokens") or 0)
+    prev_prefix = str(info.get("prefix_scheme") or "none")
     if (
         not store.has_index()
         or str(info.get("embedding_model") or "") != embedding_model
         # Размер чанка сменился ИЛИ старый индекс без этого поля (был собран
         # огромными чанками — поиск не работал) → полная пересборка с миграцией.
         or prev_chunk != int(chunk_size_tokens or 0)
+        # Сменилась схема префиксов эмбеддера (старый индекс без nomic-префиксов) →
+        # пересборка, иначе пространства документов/запросов не совпадут.
+        or prev_prefix != embedding_prefix_scheme(embedding_model)
     ):
         return build_index(input_paths, index_dir, base_url, api_key, embedding_model,
                            chunk_size_tokens, on_progress, max_workers), False
@@ -240,11 +246,11 @@ def add_to_index(
         ), True
 
     emb_client = EmbeddingClient(base_url=base_url, api_key=api_key, model=embedding_model)
+    _embp = (lambda done, total: on_progress(done, total, "index_embed")) if on_progress else None
     if on_progress:
         on_progress(0, len(unique), "index_embed")
-    vectors = emb_client.embed_texts([c.text for c in unique], batch_size=16)
-    if on_progress:
-        on_progress(len(unique), len(unique), "index_embed")
+    vectors = emb_client.embed_texts(
+        [c.text for c in unique], batch_size=16, task="document", on_batch=_embp)
     logger.info("Incremental index add: new_files=%s new_chunks=%s", len(new_files), len(unique))
     return store.append(unique, vectors), True
 
@@ -267,7 +273,7 @@ def query_index(
     qvec: list[float] | None = None
     try:
         emb_client = EmbeddingClient(base_url=base_url, api_key=api_key, model=embedding_model)
-        qvecs = emb_client.embed_texts([question], batch_size=1)
+        qvecs = emb_client.embed_texts([question], batch_size=1, task="query")  # nomic query-префикс
         qvec = qvecs[0] if qvecs else None
     except Exception as exc:
         logger.warning("Embedding query failed, falling back to BM25 only: %s", exc)

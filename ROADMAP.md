@@ -52,6 +52,9 @@
 - [x] Page (PDF) / line citation granularity — chunks carry page/line, surfaced in the citation chip and popup («стр. N» / «строка N»).
 - [x] Incremental index updates (append new sources without a full rebuild; rebuild on remove / embedding-model / chunk-size change).
 - [x] Retrieval-sized index chunks (~512 tokens, `notebook_index_chunk_tokens`) instead of the chat-model MAP size. Fixes grounded chat always answering «нет ответа»: 6000-token chunks (~12–14k chars) exceeded the embedding model's window, so vectors were dominated by identical `[FILE_PATH]` headers and retrieval was near-random. chunk_size is stored in `index_info.json`; legacy huge-chunk indexes migrate on the next «Построить/обновить».
+- [x] nomic task prefixes (`search_document:` at index time, `search_query:` at query time) — `nomic-embed-text-v1.5` is prefix-conditioned; embedding raw degrades recall. `prefix_scheme` is stored in `index_info.json` and a mismatch forces a full rebuild (must use the same scheme for docs and queries or the spaces don't match). Index chat top_k 8→16, context budget 12000.
+- [x] Embedding/index-build resilience: `EmbeddingClient._embed_batch` retries 5xx / «model is loading» with backoff + Retry-After (one 500 no longer discards a 200-file build); per-batch progress so a long embed isn't read as a freeze.
+- [x] Grounded chat keeps reasoning out of the answer: the notebook path no longer forces `reasoning:off`, so reasoning models (gemma-4) confine chain-of-thought to their reasoning channel instead of bleeding untagged prose into the answer.
 
 ## 7. Providers & distribution
 

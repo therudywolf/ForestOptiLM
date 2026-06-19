@@ -253,9 +253,15 @@ async def answer_question(
     history: list[dict[str, Any]] | None = None,
     max_context_tokens: int = 12000,
     max_answer_tokens: int = 1500,
+    prefer_reasoning_off: bool = False,
     on_log: Callable[[str], None] | None = None,
 ) -> ChatResult:
-    """Полный цикл: retrieval по блокноту → grounded-ответ с цитатами."""
+    """Полный цикл: retrieval по блокноту → grounded-ответ с цитатами.
+
+    prefer_reasoning_off=False (по умолчанию для чата): НЕ навязываем reasoning:off,
+    чтобы reasoning-модели (gemma-4 и т.п.) держали размышления в отдельном канале,
+    а не выливали chain-of-thought прозой в текст ответа.
+    """
     from processor import call_llm
 
     def _log(msg: str) -> None:
@@ -295,6 +301,7 @@ async def answer_question(
             semaphore,
             max_tokens=max_answer_tokens,
             api_mode=api_mode,
+            prefer_reasoning_off=prefer_reasoning_off,
         )
     except RuntimeError as exc:
         # Маленькие reasoning-модели c reasoning:off иногда отдают пустой вывод —

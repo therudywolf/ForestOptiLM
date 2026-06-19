@@ -17,6 +17,9 @@
 from __future__ import annotations
 
 import logging
+import random
+import time
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -24,6 +27,43 @@ import httpx
 from lmstudio_config import lmstudio_root_url, normalize_lmstudio_base_url, sanitize_for_log
 
 logger = logging.getLogger("nocturne")
+
+_EMB_MAX_RETRIES = 4
+
+
+def embedding_prefix_scheme(model: str) -> str:
+    """Схема префиксов эмбеддера (пишется в индекс; при смене → пересборка)."""
+    return "nomic-v1" if "nomic" in (model or "").lower() else "none"
+
+
+def _task_prefix(model: str, task: str | None) -> str:
+    """nomic-embed-text-v1.5 обучен с задачными префиксами; без них recall падает.
+
+    Для документов и запросов — РАЗНЫЕ префиксы; критично использовать их и при
+    индексации, и при поиске одинаково, иначе пространства не совпадут.
+    """
+    if task and "nomic" in (model or "").lower():
+        return "search_document: " if task == "document" else "search_query: "
+    return ""
+
+
+def _emb_is_model_loading(text: str) -> bool:
+    low = (text or "").lower()
+    return any(s in low for s in (
+        "failed to load", "operation cancel", "is loading", "currently loading",
+        "model is not loaded", "no model loaded",
+    ))
+
+
+def _emb_retry_delay(resp: httpx.Response | None, attempt: int) -> float:
+    if resp is not None:
+        try:
+            ra = resp.headers.get("Retry-After", "").strip()
+            if ra:
+                return max(0.5, float(ra))
+        except Exception:
+            pass
+    return min(15.0, (2 ** attempt) * (0.6 + random.uniform(0.0, 0.6)))
 
 # (root_url|model), для которых уже инициировали загрузку в этом процессе. Без него
 # LM Studio плодит по новому инстансу embedding-модели (text-embedding-...:N) на
@@ -93,49 +133,89 @@ class EmbeddingClient:
         except Exception as exc:
             logger.info("Embedding model auto-load unavailable: %s", sanitize_for_log(str(exc)))
 
-    def embed_texts(self, texts: list[str], batch_size: int = 32) -> list[list[float]]:
+    def embed_texts(
+        self,
+        texts: list[str],
+        batch_size: int = 32,
+        task: str | None = None,
+        on_batch: Callable[[int, int], None] | None = None,
+    ) -> list[list[float]]:
+        """task='document' при индексации, 'query' при поиске — для nomic-префиксов.
+
+        on_batch(done, total) — прогресс по обработанным текстам (эмбеддинг 200+
+        чанков иначе читается как зависание).
+        """
         try:  # пометить embedding-модель для выгрузки при закрытии (ленивый импорт)
             from processor import note_app_loaded_model
 
             note_app_loaded_model(self.model)
         except Exception:
             pass
+        prefix = _task_prefix(self.model, task)
+        total = len(texts)
         vectors: list[list[float]] = []
-        for start in range(0, len(texts), batch_size):
+        for start in range(0, total, batch_size):
             batch = texts[start : start + batch_size]
+            if prefix:
+                batch = [prefix + t for t in batch]
             vectors.extend(self._embed_batch(batch))
+            if on_batch:
+                try:
+                    on_batch(min(start + batch_size, total), total)
+                except Exception:
+                    pass
         return vectors
 
     def _embed_batch(self, texts: list[str]) -> list[list[float]]:
         url = f"{self.base_url}/embeddings"
-        payload: dict[str, Any] = {
-            "model": self.model,
-            "input": texts,
-        }
+        payload: dict[str, Any] = {"model": self.model, "input": texts}
         self._try_load_model()
-        r = self._client.post(url, headers=self._headers(), json=payload)
-        try:
-            r.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            detail = r.text[:500]
-            raise RuntimeError(
-                f"Embeddings request failed ({r.status_code}). "
-                f"Likely no embedding model loaded in LM Studio developer tab "
-                f"or selected model is chat-only. Detail: {detail}"
-            ) from e
-        data = r.json()
-        items = data.get("data", [])
-        out: list[list[float]] = []
-        for item in items:
-            emb = item.get("embedding")
-            if isinstance(emb, list):
-                out.append([float(v) for v in emb])
-        if len(out) != len(texts):
-            raise RuntimeError(
-                f"Embedding response size mismatch: expected {len(texts)} vectors, "
-                f"got {len(out)}. Check that the embedding model is loaded correctly."
-            )
-        return out
+        last_err: str = ""
+        for attempt in range(_EMB_MAX_RETRIES):
+            try:
+                r = self._client.post(url, headers=self._headers(), json=payload)
+                # Временные ошибки сервера / «модель ещё грузится» → ждём и повторяем,
+                # а не выбрасываем всю сборку индекса из-за одного 500.
+                if r.status_code in (500, 502, 503) or (
+                    r.status_code == 400 and _emb_is_model_loading(r.text)
+                ):
+                    last_err = f"HTTP {r.status_code}: {r.text[:200]}"
+                    delay = _emb_retry_delay(r, attempt)
+                    logger.info(
+                        "Embeddings transient %s — retry %d/%d in %.1fs",
+                        r.status_code, attempt + 1, _EMB_MAX_RETRIES, delay,
+                    )
+                    time.sleep(delay)
+                    continue
+                if r.status_code >= 400:
+                    # Постоянная 4xx (нет модели/не та модель/плохой payload) — без повторов.
+                    raise RuntimeError(
+                        f"Embeddings request failed ({r.status_code}). "
+                        f"Likely no embedding model loaded in LM Studio developer tab "
+                        f"or selected model is chat-only. Detail: {r.text[:500]}"
+                    )
+                data = r.json()
+                out: list[list[float]] = []
+                for item in data.get("data", []):
+                    emb = item.get("embedding")
+                    if isinstance(emb, list):
+                        out.append([float(v) for v in emb])
+                if len(out) != len(texts):
+                    raise RuntimeError(
+                        f"Embedding response size mismatch: expected {len(texts)} vectors, "
+                        f"got {len(out)}. Check that the embedding model is loaded correctly."
+                    )
+                return out
+            except (httpx.TimeoutException, httpx.HTTPError) as e:
+                last_err = f"{type(e).__name__}: {e}"
+                delay = _emb_retry_delay(None, attempt)
+                logger.info("Embeddings network error — retry %d/%d in %.1fs: %s",
+                            attempt + 1, _EMB_MAX_RETRIES, delay, sanitize_for_log(str(e)))
+                time.sleep(delay)
+        raise RuntimeError(
+            f"Embeddings failed after {_EMB_MAX_RETRIES} attempts (последняя ошибка: "
+            f"{sanitize_for_log(last_err)}). Сервер эмбеддингов недоступен/перегружен."
+        )
 
     def close(self) -> None:
         try:
