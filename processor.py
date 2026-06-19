@@ -652,6 +652,13 @@ def _try_unload_model(base_url: str, api_key: str, model_key: str) -> bool:
 
 def _classify_http_400(text: str) -> str:
     low = (text or "").lower()
+    # Тяжёлая модель ещё грузится / загрузка отменена — это ВРЕМЕННО, надо подождать
+    # и повторить, а не падать (проверяем до «model», т.к. сообщение содержит это слово).
+    if any(s in low for s in (
+        "failed to load", "operation cancel", "is loading", "currently loading",
+        "loading the model", "model is not loaded", "no model loaded", "model_not_loaded",
+    )):
+        return "model_loading"
     if any(s in low for s in ("unsupported", "unknown field", "invalid field", "schema")):
         return "payload_mismatch"
     if any(s in low for s in ("context", "token", "max_output_tokens", "length", "too long", "exceed")):
@@ -1421,6 +1428,13 @@ async def call_llm(
                 and exc.response is not None
                 and 400 <= exc.response.status_code < 500
             )
+            # 400 «модель ещё грузится / загрузка отменена» — временно: ждём и
+            # повторяем (тяжёлая модель грузится ~15с), а не падаем в ошибку.
+            is_model_loading = bool(
+                is_http_4xx
+                and exc.response.status_code == 400
+                and _classify_http_400(exc.response.text) == "model_loading"
+            )
             retry_after_s: float | None = None
             if (
                 isinstance(exc, httpx.HTTPStatusError)
@@ -1434,8 +1448,12 @@ async def call_llm(
                     retry_after_s = None
             if retry_after_s is not None:
                 delay = max(0.5, retry_after_s)
+            elif is_model_loading:
+                delay = min(15.0, 6.0 + 4.0 * attempt)  # ждём догрузки тяжёлой модели (~15с)
+            elif is_http_4xx:
+                delay = 0.0
             else:
-                delay = 0.0 if is_http_4xx else (2 ** attempt) * (0.5 + random.uniform(0, 1))
+                delay = (2 ** attempt) * (0.5 + random.uniform(0, 1))
             if (
                 isinstance(exc, httpx.HTTPStatusError)
                 and exc.response is not None
@@ -1448,6 +1466,8 @@ async def call_llm(
                 and exc.response.status_code in (500, 502, 503)
             ):
                 retry_kind = "server_5xx"
+            elif is_model_loading:
+                retry_kind = "model_loading"
             elif is_http_4xx:
                 retry_kind = "client_4xx"
             elif isinstance(exc, httpx.TimeoutException):
@@ -1477,8 +1497,9 @@ async def call_llm(
                     _classify_http_400(exc.response.text) if exc.response.status_code == 400 else "n/a",
                     body_preview,
                 )
-            # Для client 4xx дальнейшие ретраи обычно бесполезны, кроме 429.
-            if is_http_4xx and not (
+            # Для client 4xx дальнейшие ретраи обычно бесполезны, кроме 429 и
+            # «модель грузится» (там как раз надо подождать и повторить).
+            if is_http_4xx and not is_model_loading and not (
                 isinstance(exc, httpx.HTTPStatusError)
                 and exc.response is not None
                 and exc.response.status_code == 429

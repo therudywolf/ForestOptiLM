@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from unittest.mock import AsyncMock, patch
 
 import httpx
 
@@ -63,6 +64,26 @@ class TestReasoningAdapt(unittest.TestCase):
         out = _call(REASONING_MODEL, client)
         self.assertEqual(out, "ответ")
         self.assertEqual(client.payloads[0].get("reasoning"), "off")
+
+    def test_classify_model_loading_400(self) -> None:
+        # «Тяжёлая модель грузится» нужно отличать от прочих 400, чтобы дождаться её.
+        self.assertEqual(
+            processor._classify_http_400("Failed to load model X. Operation canceled."),
+            "model_loading")
+        self.assertEqual(processor._classify_http_400("the model is loading"), "model_loading")
+        # не путаем с другими 400
+        self.assertEqual(processor._classify_http_400("context length exceeded"), "context_limit")
+
+    @patch("processor.asyncio.sleep", new_callable=AsyncMock)
+    def test_retries_while_model_loading_then_answers(self, _sleep: AsyncMock) -> None:
+        # 400 «модель грузится» → НЕ падаем, ждём и повторяем; со второй попытки ответ.
+        r400 = _Resp({}, status=400)
+        r400.text = '{"error":{"message":"Failed to load model google/gemma-4-26b. Operation canceled."}}'
+        client = _FakeClient([r400, _Resp(_msg("Ответ по источникам [1]."))])
+        out = _call("google/gemma-4-26b-a4b-qat", client)
+        self.assertEqual(out, "Ответ по источникам [1].")
+        self.assertEqual(len(client.payloads), 2)  # повторил после ошибки загрузки
+        self.assertTrue(_sleep.await_count >= 1)    # подождал перед повтором
 
     def test_escalates_to_reasoning_on_when_empty(self) -> None:
         # Empty under reasoning:off -> retry WITHOUT reasoning:off (let it think).

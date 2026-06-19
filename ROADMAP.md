@@ -58,6 +58,7 @@
 - [x] Connection presets: LM Studio (native/OpenAI), Ollama, OpenAI-compatible, manual — one-click Base URL + API mode (`connection_presets.py`), with auto-detection and a GUI provider selector.
 - [x] CLI `--base-url` / `--api-key` / `--api-mode` so any server (incl. Ollama) works headless.
 - [x] Reasoning-model adaptation in `call_llm`: auto-escalate reasoning:off→on on empty output, strip inline `<think>` blocks, salvage from the reasoning channel; heuristic covers gemma-4+, gpt-oss, glm-4.6, o4. Verified live on gemma-4-e2b + gemma-12b (small MAP + big composer).
+- [x] Heavy-model load resilience: a `400 "Failed to load model … Operation canceled"` (a big model still loading, ~15s) is now classified as `model_loading` and retried with a backoff wait instead of failing the request — so a slow/contended LM Studio gets time to load the model.
 - [x] Optimization run-profiles: `balanced`, `precise`, `ollama_local` alongside the existing presets.
 - [x] Cross-platform PyInstaller builds (Windows/macOS/Linux) via CI matrix + per-OS scripts; release artifacts attached to GitHub Releases on tag.
 - [x] Name-based vision-model detection (llava / *-vl / qwen2.5-vl / minicpm-v / pixtral / gemma-3/4 …) so Ollama / OpenAI-compatible servers expose vision; the image_url path works on both transports.
