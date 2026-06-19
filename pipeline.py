@@ -20,6 +20,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import logging
 import os
+import threading
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -43,15 +44,31 @@ _INDEX_MAX_WORKERS = max(2, min(16, (os.cpu_count() or 4)))
 # внутренний кэш (FAISS-индекс + BM25) тогда не перестраивается на каждый вопрос
 # чата. Инвалидация — по mtime внутри самого стора (пересборка индекса меняет файлы).
 _STORE_CACHE: dict[str, LocalFaissStore] = {}
+_STORE_CACHE_LOCK = threading.Lock()
+
+
+def _store_key(index_dir: Path) -> str:
+    return str(Path(index_dir).resolve()).lower()  # Windows: пути регистронезависимы
 
 
 def _store_for(index_dir: Path) -> LocalFaissStore:
-    key = str(Path(index_dir).resolve()).lower()  # Windows: пути регистронезависимы
-    store = _STORE_CACHE.get(key)
-    if store is None:
-        store = LocalFaissStore(index_dir=index_dir)
-        _STORE_CACHE[key] = store
-    return store
+    key = _store_key(index_dir)
+    # get/create/put под локом — иначе две вкладки (Блокноты + RAG) в своих потоках
+    # могут одновременно увидеть None и создать по стору, и кэш не сработает.
+    with _STORE_CACHE_LOCK:
+        store = _STORE_CACHE.get(key)
+        if store is None:
+            store = LocalFaissStore(index_dir=index_dir)
+            _STORE_CACHE[key] = store
+        return store
+
+
+def _evict_store(index_dir: Path) -> None:
+    """Выкинуть кэш-стор после пересборки/дозаписи индекса (build/add создают
+    отдельный стор), чтобы следующий запрос гарантированно перечитал свежий индекс
+    независимо от гранулярности mtime файловой системы."""
+    with _STORE_CACHE_LOCK:
+        _STORE_CACHE.pop(_store_key(index_dir), None)
 _ALLOWED_SUFFIXES = (
     set(TEXT_EXTRACTORS.keys()) | set(TABLE_EXTRACTORS.keys())
     | set(ARCHIVE_EXTENSIONS) | {".tar.gz"} | IMAGE_EXTENSIONS
@@ -178,10 +195,12 @@ def build_index(
     _embed_texts = [strip_chunk_headers(c.text) or c.text for c in unique_chunks]
     vectors = emb_client.embed_texts(_embed_texts, batch_size=16, task="document", on_batch=_embp)
     store = LocalFaissStore(index_dir=index_dir)
-    return store.build(unique_chunks, vectors, embedding_model=embedding_model,
-                       chunk_size_tokens=chunk_size_tokens,
-                       prefix_scheme=embedding_prefix_scheme(embedding_model),
-                       has_vision=bool(describer))
+    stats = store.build(unique_chunks, vectors, embedding_model=embedding_model,
+                        chunk_size_tokens=chunk_size_tokens,
+                        prefix_scheme=embedding_prefix_scheme(embedding_model),
+                        has_vision=bool(describer))
+    _evict_store(index_dir)  # пересобрали на диске → выкинуть устаревший кэш-стор
+    return stats
 
 
 def add_to_index(
@@ -285,7 +304,9 @@ def add_to_index(
     _embed_texts = [strip_chunk_headers(c.text) or c.text for c in unique]
     vectors = emb_client.embed_texts(_embed_texts, batch_size=16, task="document", on_batch=_embp)
     logger.info("Incremental index add: new_files=%s new_chunks=%s", len(new_files), len(unique))
-    return store.append(unique, vectors), True
+    stats = store.append(unique, vectors)
+    _evict_store(index_dir)  # дозаписали индекс → выкинуть устаревший кэш-стор
+    return stats, True
 
 
 def query_index(

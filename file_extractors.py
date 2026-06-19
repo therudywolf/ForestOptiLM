@@ -220,6 +220,52 @@ def extract_docx_images(path: Path) -> list[bytes]:
     return blobs
 
 
+def extract_pdf_images(path: Path, max_images: int = 40, min_side: int = 64) -> list[bytes]:
+    """Блобы растровых изображений, встроенных в PDF (диаграммы/схемы/скриншоты).
+
+    Через PyMuPDF (fitz): извлекает каждый image-XObject отдельно в его родном
+    формате. Мелкие декоративные картинки (иконки/буллеты < ``min_side`` px)
+    пропускаем, число — ограничиваем ``max_images`` (картинко-тяжёлые PDF могут
+    содержать сотни). Если PyMuPDF не установлен — тихо возвращаем пусто.
+    """
+    try:
+        import fitz  # PyMuPDF
+    except Exception:
+        return []
+    blobs: list[bytes] = []
+    seen: set[int] = set()
+    try:
+        doc = fitz.open(str(path))
+    except Exception:
+        return []
+    try:
+        for page in doc:
+            try:
+                images = page.get_images(full=True)
+            except Exception:
+                continue
+            for img in images:
+                if len(blobs) >= max_images:
+                    return blobs
+                xref = int(img[0])
+                if xref in seen:
+                    continue
+                seen.add(xref)
+                try:
+                    info = doc.extract_image(xref)
+                except Exception:
+                    continue
+                blob = info.get("image")
+                if not blob:
+                    continue
+                if int(info.get("width", 0)) < min_side or int(info.get("height", 0)) < min_side:
+                    continue  # иконка/буллет — не диаграмма
+                blobs.append(blob)
+    finally:
+        doc.close()
+    return blobs
+
+
 def _read_odt(path: Path) -> str:
     if odf_load is None or odf_text is None:
         raise ParseError("odfpy is not installed")
@@ -297,10 +343,19 @@ def _read_all_sheets(path: Path, engine: str) -> pd.DataFrame:
     for name, df in sheets.items():
         if df is None or df.empty:
             continue
-        df = df.copy()
-        df.insert(0, "__sheet__", str(name))
+        # object-dtype до concat: иначе при разных схемах листов pandas делает
+        # outer-join, int-колонки превращаются в float (1 → "1.0"), а пропуски — в
+        # NaN. astype(object) сохраняет «1» и пустые ячейки. Метку листа делаем
+        # уникальной — иначе df.insert падает, если в листе уже есть такой столбец.
+        df = df.copy().astype(object)
+        label = "__sheet__"
+        while label in df.columns:
+            label += "_"
+        df.insert(0, label, str(name))
         frames.append(df)
-    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True).fillna("")
 
 
 def _read_xlsx(path: Path) -> pd.DataFrame:

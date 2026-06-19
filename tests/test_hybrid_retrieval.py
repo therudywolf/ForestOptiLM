@@ -77,6 +77,54 @@ class TestHybridSearch(unittest.TestCase):
             b = pipeline._store_for(Path(td))
             self.assertIs(a, b)  # тот же инстанс → кэш FAISS/BM25 переживает запросы
 
+    def test_missing_index_mid_query_returns_empty(self) -> None:
+        # Ревью beta.8: блокнот удалили в соседнем потоке между .exists() и stat()
+        # → раньше летел FileNotFoundError. Теперь — пустой результат, без падения.
+        with tempfile.TemporaryDirectory() as td:
+            store = self._store(Path(td))
+            store.index_file.unlink()
+            store.meta_file.unlink()
+            self.assertEqual(store.hybrid_search("x", [1.0, 0.0, 0.0, 0.0], top_k=3), [])
+            self.assertEqual(store.search([1.0, 0.0, 0.0, 0.0], top_k=3), [])
+
+    def test_evict_store_drops_cache_entry(self) -> None:
+        import pipeline
+        with tempfile.TemporaryDirectory() as td:
+            pipeline._STORE_CACHE.clear()
+            a = pipeline._store_for(Path(td))
+            pipeline._evict_store(Path(td))
+            b = pipeline._store_for(Path(td))
+            self.assertIsNot(a, b)  # после пересборки кэш сброшен → новый инстанс
+
+    def test_cache_invalidates_on_same_mtime_content_change(self) -> None:
+        # Регрессия (ревью beta.8): на FS с грубым mtime (FAT32/exFAT/USB/сеть)
+        # пересборка может попасть в тот же mtime. Инвалидация по mtime+РАЗМЕРУ
+        # файлов ловит смену содержимого даже без сдвига mtime → не отдаём устаревший
+        # корпус (та самая боль «нет ответа» после переиндексации).
+        import os
+
+        from retrieval import LocalFaissStore
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td)
+            store = self._store(d)  # c0,c1,c2
+            store.hybrid_search("memory leak", [1.0, 0.0, 0.0, 0.0], top_k=3)  # прогрев кэша
+            old_idx = store.index_file.stat().st_mtime_ns
+            old_meta = store.meta_file.stat().st_mtime_ns
+
+            # Пересобираем НА ДИСКЕ другим содержимым (1 чанк вместо 3 → другой размер).
+            LocalFaissStore(index_dir=d).build(
+                [DocumentChunk("z0", "z.txt", "completely different zebra content", 5, {})],
+                [[0.0, 0.0, 0.0, 1.0]], embedding_model="fake")
+            # Имитируем грубый mtime: возвращаем файлам СТАРОЕ время.
+            os.utime(store.index_file, ns=(old_idx, old_idx))
+            os.utime(store.meta_file, ns=(old_meta, old_meta))
+
+            # Тот же закэшированный стор обязан увидеть НОВОЕ содержимое (размер сменился).
+            hits = store.hybrid_search("zebra", [0.0, 0.0, 0.0, 1.0], top_k=3)
+            ids = [h.chunk_id for h in hits]
+            self.assertIn("z0", ids)
+            self.assertNotIn("c0", ids)
+
 
 if __name__ == "__main__":
     unittest.main()

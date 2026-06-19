@@ -61,6 +61,21 @@ try:
 except Exception:
     _HAS_PIL = False
 
+try:
+    import fitz as _fitz  # noqa: F401  (PyMuPDF)
+    _HAS_FITZ = True
+except Exception:
+    _HAS_FITZ = False
+
+
+def _png_bytes(size: int = 120, color: tuple = (30, 120, 200)) -> bytes:
+    from io import BytesIO
+
+    from PIL import Image
+    buf = BytesIO()
+    Image.new("RGB", (size, size), color).save(buf, format="PNG")
+    return buf.getvalue()
+
 
 @unittest.skipIf(fe.DocxDocument is None or not _HAS_PIL, "python-docx/Pillow not installed")
 class TestDocx(unittest.TestCase):
@@ -121,9 +136,54 @@ class TestDocx(unittest.TestCase):
         self.assertEqual(chunking._describe_doc_images(self._make_docx(True), None), "")
 
 
+@unittest.skipIf(not _HAS_FITZ or not _HAS_PIL, "PyMuPDF/Pillow not installed")
+class TestPdfImages(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+
+    def _make_pdf(self, img_size: int = 120) -> Path:
+        import fitz
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_image(fitz.Rect(20, 20, 20 + img_size, 20 + img_size),
+                          stream=_png_bytes(img_size))
+        p = Path(self._tmp.name) / "d.pdf"
+        doc.save(str(p))
+        doc.close()
+        return p
+
+    def test_extract_embedded_image(self) -> None:
+        blobs = fe.extract_pdf_images(self._make_pdf())
+        self.assertGreaterEqual(len(blobs), 1)
+        self.assertTrue(chunking._raster_ext(blobs[0]))  # растровый формат опознан
+
+    def test_tiny_image_skipped(self) -> None:
+        # Картинка меньше min_side (иконка) не попадает в выдачу.
+        blobs = fe.extract_pdf_images(self._make_pdf(img_size=24), min_side=64)
+        self.assertEqual(blobs, [])
+
+    def test_max_images_caps(self) -> None:
+        blobs = fe.extract_pdf_images(self._make_pdf(), max_images=0)
+        self.assertEqual(blobs, [])
+
+    def test_describe_pdf_images_appends(self) -> None:
+        path = self._make_pdf()
+        seen: list[Path] = []
+
+        def fake_vision(p: Path) -> str:
+            seen.append(p)
+            return "Схема архитектуры: ВМ и подсистемы"
+
+        block = chunking._describe_doc_images(path, fake_vision)
+        self.assertIn("Изображения из документа", block)
+        self.assertIn("Схема архитектуры", block)
+        self.assertEqual(len(seen), 1)
+
+
 class TestXlsxAllSheets(unittest.TestCase):
     def test_multiple_sheets_concatenated_with_label(self) -> None:
-        with TemporaryDirectory() as d:
+        with TemporaryDirectory(ignore_cleanup_errors=True) as d:
             p = Path(d) / "book.xlsx"
             with pd.ExcelWriter(str(p), engine="openpyxl") as w:
                 pd.DataFrame({"x": [1, 2]}).to_excel(w, sheet_name="Лист1", index=False)
@@ -134,12 +194,36 @@ class TestXlsxAllSheets(unittest.TestCase):
             self.assertEqual(len(df), 4)
 
     def test_single_sheet_unchanged(self) -> None:
-        with TemporaryDirectory() as d:
+        with TemporaryDirectory(ignore_cleanup_errors=True) as d:
             p = Path(d) / "one.xlsx"
             pd.DataFrame({"x": [1, 2]}).to_excel(str(p), index=False)
             df = fe._read_xlsx(p)
             self.assertNotIn("__sheet__", df.columns)
             self.assertEqual(len(df), 2)
+
+    def test_existing_sheet_column_does_not_crash(self) -> None:
+        # Ревью beta.8: лист со столбцом «__sheet__» ронял df.insert → весь файл
+        # молча выпадал из индекса. Метка делается уникальной.
+        with TemporaryDirectory(ignore_cleanup_errors=True) as d:
+            p = Path(d) / "clash.xlsx"
+            with pd.ExcelWriter(str(p), engine="openpyxl") as w:
+                pd.DataFrame({"__sheet__": [1, 2], "x": [3, 4]}).to_excel(w, sheet_name="S1", index=False)
+                pd.DataFrame({"y": [5, 6]}).to_excel(w, sheet_name="S2", index=False)
+            df = fe._read_xlsx(p)  # не падает
+            self.assertEqual(len(df), 4)
+            self.assertIn("__sheet__", df.columns)  # исходный столбец сохранён
+            self.assertTrue(any(c.startswith("__sheet___") for c in df.columns))  # метка-дубль
+
+    def test_heterogeneous_sheets_no_float_or_nan_pollution(self) -> None:
+        # Разные схемы листов раньше давали outer-join: int→float («1.0») и NaN.
+        with TemporaryDirectory(ignore_cleanup_errors=True) as d:
+            p = Path(d) / "het.xlsx"
+            with pd.ExcelWriter(str(p), engine="openpyxl") as w:
+                pd.DataFrame({"a": [1, 2]}).to_excel(w, sheet_name="S1", index=False)
+                pd.DataFrame({"b": [3, 4]}).to_excel(w, sheet_name="S2", index=False)
+            csv = fe._read_xlsx(p).to_csv(index=False)
+            self.assertNotIn("1.0", csv)        # int остался int
+            self.assertNotIn("nan", csv.lower())  # пропуски пустые, не NaN
 
 
 if __name__ == "__main__":

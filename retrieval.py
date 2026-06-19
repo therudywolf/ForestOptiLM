@@ -39,10 +39,14 @@ class LocalFaissStore:
         self.info_file = self.index_dir / "index_info.json"
         self._cached_index: faiss.Index | None = None
         self._cached_meta: list[dict] | None = None
-        self._cached_mtime_ns: int = -1
+        # Сигнатура — КОНТЕНТ-зависимая: (max mtime_ns, размер индекса, размер meta).
+        # Только mtime недостаточно: на FAT32/exFAT/USB/сетевых дисках (а данные у
+        # пользователя лежат рядом с exe) быстрая пересборка может попасть в тот же
+        # mtime-бакет → кэш бы не инвалидировался и отдавал устаревший корпус.
+        self._cached_sig: tuple = ()
         self._cached_dim: int | None = None
         self._cached_bm25: BM25Index | None = None
-        self._cached_bm25_sig: int = -1
+        self._cached_bm25_sig: tuple = ()
         # Стор переиспользуется между запросами (один на index_dir) → кэш FAISS/BM25
         # живёт, но к нему могут обращаться из нескольких потоков — защищаем загрузку.
         self._lock = threading.Lock()
@@ -144,8 +148,9 @@ class LocalFaissStore:
         # сбросить кэш, чтобы следующий поиск перечитал индекс+meta
         self._cached_index = None
         self._cached_meta = None
-        self._cached_mtime_ns = -1
+        self._cached_sig = ()
         self._cached_bm25 = None
+        self._cached_bm25_sig = ()
         return IndexStats(
             chunks_total=chunks_total,
             files_total=files_total,
@@ -156,7 +161,9 @@ class LocalFaissStore:
     def search(self, query_vector: list[float], top_k: int = 8) -> list[RetrievalHit]:
         if not self.index_file.exists() or not self.meta_file.exists():
             return []
-        index, meta, dim = self._load_cached_index_meta()
+        index, meta, dim, _sig = self._load_cached_index_meta()
+        if index is None or not meta:  # индекс исчез во время запроса → пусто, не падаем
+            return []
         if dim is not None and len(query_vector) != dim:
             raise ValueError(
                 f"Query vector dim mismatch: got {len(query_vector)}, expected {dim}. "
@@ -185,15 +192,18 @@ class LocalFaissStore:
     def _meta_id(pos: int, m: dict) -> str:
         return str(m.get("chunk_id") or pos)
 
-    def _ensure_bm25(self, meta: list[dict]) -> BM25Index:
+    def _ensure_bm25(self, meta: list[dict], signature: tuple) -> BM25Index:
+        # Штампуем BM25 ИМЕННО той сигнатурой, из meta которой он построен (а не
+        # текущим self._cached_sig — тот мог уйти вперёд из-за параллельного reload,
+        # и тогда BM25 от старого корпуса выдавался бы под новой сигнатурой).
         with self._lock:
-            if self._cached_bm25 is not None and self._cached_bm25_sig == self._cached_mtime_ns:
+            if self._cached_bm25 is not None and self._cached_bm25_sig == signature:
                 return self._cached_bm25
             ids = [self._meta_id(i, m) for i, m in enumerate(meta)]
             texts = [str(m.get("text") or "") for m in meta]
             bm = BM25Index().fit(ids, texts)
             self._cached_bm25 = bm
-            self._cached_bm25_sig = self._cached_mtime_ns
+            self._cached_bm25_sig = signature
             return bm
 
     def hybrid_search(
@@ -214,7 +224,7 @@ class LocalFaissStore:
         """
         if not self.index_file.exists() or not self.meta_file.exists():
             return []
-        index, meta, dim = self._load_cached_index_meta()
+        index, meta, dim, signature = self._load_cached_index_meta()
         if not meta:
             return []
         cand = candidate_k or max(top_k * 5, top_k)
@@ -229,7 +239,7 @@ class LocalFaissStore:
                 self._meta_id(i, meta[i]) for i in idx[0] if 0 <= i < len(meta)
             ]
 
-        bm = self._ensure_bm25(meta)
+        bm = self._ensure_bm25(meta, signature)
         bm_ids = [cid for cid, _ in bm.search(query_text, top_k=cand)]
 
         rankings = [r for r in (vec_ids, bm_ids) if r]
@@ -256,20 +266,35 @@ class LocalFaissStore:
             )
         return hits
 
-    def _load_cached_index_meta(self) -> tuple[faiss.Index, list[dict], int | None]:
-        idx_mtime = self.index_file.stat().st_mtime_ns
-        meta_mtime = self.meta_file.stat().st_mtime_ns
-        signature = max(idx_mtime, meta_mtime)
+    def _index_signature(self) -> tuple | None:
+        """Контент-зависимая сигнатура индекса: (max mtime_ns, размер .faiss, размер meta).
+        Размеры файлов ловят пересборку даже там, где mtime не изменился (грубая
+        гранулярность времени на FAT32/exFAT/сетевых дисках). None — файлов уже нет
+        (блокнот удалён прямо во время запроса в соседнем потоке)."""
+        try:
+            ix = self.index_file.stat()
+            mt = self.meta_file.stat()
+        except OSError:
+            return None
+        return (max(ix.st_mtime_ns, mt.st_mtime_ns), ix.st_size, mt.st_size)
+
+    def _load_cached_index_meta(self) -> tuple[faiss.Index | None, list[dict], int | None, tuple]:
+        signature = self._index_signature()
+        if signature is None:
+            return None, [], None, ()  # индекс исчез между .exists() и stat() → пусто
         with self._lock:
             if (
                 self._cached_index is not None
                 and self._cached_meta is not None
-                and self._cached_mtime_ns == signature
+                and self._cached_sig == signature
             ):
-                return self._cached_index, self._cached_meta, self._cached_dim
+                return self._cached_index, self._cached_meta, self._cached_dim, signature
 
-            index = faiss.read_index(str(self.index_file))
-            meta = self._read_meta()
+            try:
+                index = faiss.read_index(str(self.index_file))
+                meta = self._read_meta()
+            except OSError:
+                return None, [], None, ()  # каталог подменили/удалили после stat()
             dim = None
             try:
                 info = json.loads(self.info_file.read_text(encoding="utf-8"))
@@ -280,9 +305,9 @@ class LocalFaissStore:
                 dim = None
             self._cached_index = index
             self._cached_meta = meta
-            self._cached_mtime_ns = signature
+            self._cached_sig = signature
             self._cached_dim = dim
-        return index, meta, dim
+        return index, meta, dim, signature
 
     def _read_meta(self) -> list[dict]:
         out: list[dict] = []

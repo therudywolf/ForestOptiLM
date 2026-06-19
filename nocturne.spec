@@ -27,6 +27,8 @@ for pkg in (
     "faiss",           # native libs
     "pdfminer",        # cmap data (pdfplumber backend)
     "pdfplumber",
+    "fitz",            # PyMuPDF — native libs (PDF embedded-image extraction)
+    "pymupdf",
     "odf",             # odfpy (ODT)
     "ebooklib",        # EPUB
     "striprtf",        # RTF

@@ -676,7 +676,7 @@ class NotebookUIMixin:
         self._nb_add_message_row("user", question, [])
         self._nb_question.delete("1.0", "end")
         self._nb_chat_stop.clear()  # новый запрос → сбрасываем флаг отмены
-        self._nb_set_busy(True)
+        self._nb_set_busy(True, cancellable=True)  # чат можно прервать «Стоп»
         self._nb_set_status("Ищу в источниках и формирую ответ…")
         thinking = self._nb_add_message_row("assistant", "…думаю…", [], placeholder=True)
 
@@ -706,12 +706,15 @@ class NotebookUIMixin:
         threading.Thread(target=work, daemon=True).start()
 
     def _nb_finish_answer(self, placeholder: ctk.CTkFrame, result: ChatResult, nb: Any) -> None:
-        # Историю сохраняем всегда — в тот блокнот, по которому спрашивали.
-        # Блокнот мог быть удалён, пока шёл ответ → не роняем поток.
-        try:
-            nb.append_chat_turn("assistant", result.answer, result.citations)
-        except Exception as exc:  # noqa: BLE001
-            self._append_log_line(f"[NB] не удалось сохранить ответ: {sanitize_for_log(str(exc))}", "error")
+        cancelled = bool(result.extra.get("cancelled"))
+        # Историю сохраняем в тот блокнот, по которому спрашивали (мог быть удалён,
+        # пока шёл ответ → не роняем поток). Отменённый запрос НЕ пишем — иначе
+        # «⏹ Запрос остановлен.» осело бы в истории и подмешивалось в контекст.
+        if not cancelled:
+            try:
+                nb.append_chat_turn("assistant", result.answer, result.citations)
+            except Exception as exc:  # noqa: BLE001
+                self._append_log_line(f"[NB] не удалось сохранить ответ: {sanitize_for_log(str(exc))}", "error")
         # В UI дорисовываем только если пользователь не успел переключить блокнот.
         if self._nb_current is None or self._nb_current.id != nb.id:
             return
@@ -964,21 +967,24 @@ class NotebookUIMixin:
         except Exception as exc:  # noqa: BLE001
             self._nb_set_status(f"Не удалось открыть: {sanitize_for_log(str(exc))}", "#f87171")
 
-    def _nb_set_busy(self, busy: bool) -> None:
+    def _nb_set_busy(self, busy: bool, cancellable: bool = False) -> None:
         self._nb_busy = busy
         try:
             self._nb_ask_btn.configure(state="disabled" if busy else "normal")
         except Exception:
             pass
-        # Во время запроса показываем «Стоп» вместо «Спросить».
+        # «Стоп» показываем ТОЛЬКО для отменяемой операции (чат). Для сборки/URL/
+        # генерации материалов кнопка-обманка не нужна — там отмены нет, просто
+        # дизейблим «Спросить».
         try:
-            if busy:
+            if busy and cancellable:
                 self._nb_ask_btn.pack_forget()
                 self._nb_stop_btn.configure(state="normal", text="⏹ Стоп")
                 self._nb_stop_btn.pack(side="left")
-            else:
+            elif not busy:
                 self._nb_stop_btn.pack_forget()
-                self._nb_ask_btn.pack(side="left")
+                if not self._nb_ask_btn.winfo_ismapped():
+                    self._nb_ask_btn.pack(side="left")
         except Exception:
             pass
 

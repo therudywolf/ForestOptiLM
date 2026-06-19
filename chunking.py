@@ -46,12 +46,18 @@ def _raster_ext(blob: bytes) -> str:
 
 
 def _describe_doc_images(path: Path, vision_describe: Callable[[Path], str] | None) -> str:
-    """Описать картинки, ВСТРОЕННЫЕ в .docx (диаграммы/схемы), vision-моделью."""
-    if vision_describe is None or path.suffix.lower() != ".docx":
+    """Описать картинки, ВСТРОЕННЫЕ в документ (.docx/.pdf — диаграммы/схемы)."""
+    if vision_describe is None:
         return ""
+    suffix = path.suffix.lower()
     try:
-        from file_extractors import extract_docx_images
-        blobs = extract_docx_images(path)
+        from file_extractors import extract_docx_images, extract_pdf_images
+        if suffix == ".docx":
+            blobs = extract_docx_images(path)
+        elif suffix == ".pdf":
+            blobs = extract_pdf_images(path)
+        else:
+            return ""
     except Exception:
         return ""
     import tempfile
@@ -178,6 +184,11 @@ def build_document_chunks(
         # Картинки, встроенные в документ (диаграммы/схемы в .docx), описываем
         # vision-моделью и дописываем к тексту → их содержимое тоже ищется.
         img_block = _describe_doc_images(path, vision_describe)
+        # Смещение, с которого начинается блок описаний картинок: у него нет своих
+        # \f, поэтому по позиции он попал бы на ПОСЛЕДНЮЮ страницу. Для таких чанков
+        # номер страницы неизвестен → не проставляем (иначе диаграмму со стр. 3
+        # процитировали бы как «стр. N-последняя»).
+        img_start = len(text) if img_block else None
         if img_block:
             text = (text + img_block).strip()
         if not text:
@@ -212,7 +223,8 @@ def build_document_chunks(
                 if mloc < 0 and mid_probe:
                     mloc = text.find(mid_probe)
                 anchor = mloc if mloc >= 0 else loc
-                if anchor >= 0:
+                # Чанки из блока описаний картинок (anchor ≥ img_start) — без страницы.
+                if anchor >= 0 and (img_start is None or anchor < img_start):
                     cmeta["page"] = sum(1 for b in page_breaks if b < anchor) + 1
             if page_breaks:
                 c = c.replace("\f", "\n")  # don't leak the page-break marker into chunks
