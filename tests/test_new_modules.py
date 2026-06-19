@@ -105,7 +105,7 @@ class TestFirstRun(unittest.TestCase):
     def test_first_run_marker_isolated(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             marker = Path(tmp) / "first_run_done.json"
-            with patch("first_run._MARKER", marker):
+            with patch("first_run._marker_path", return_value=marker):
                 self.assertTrue(is_first_run())
                 mark_first_run_complete({"base_url": "http://127.0.0.1:1234/v1"})
                 self.assertFalse(is_first_run())

@@ -118,11 +118,26 @@ class TestIncrementalIndex(unittest.TestCase):
         self._add([f1], model="text-embedding-nomic-embed-text-v1.5")
         info_p = self.index_dir / "index_info.json"
         info = json.loads(info_p.read_text(encoding="utf-8"))
-        self.assertEqual(info.get("prefix_scheme"), "nomic-v1")
+        self.assertEqual(info.get("prefix_scheme"), "nomic-v2")
         info.pop("prefix_scheme", None)  # эмулируем legacy-индекс
         info_p.write_text(json.dumps(info), encoding="utf-8")
         _s, inc = self._add([f1], model="text-embedding-nomic-embed-text-v1.5")
         self.assertFalse(inc)  # полная пересборка-миграция
+
+    def test_rebuild_when_vision_toggled(self) -> None:
+        # Включение «описывать картинки» меняет содержимое индекса → нужна
+        # полная пересборка, иначе картинки не будут переописаны.
+        f1 = self.root / "a.txt"
+        f1.write_text("обычный текст без картинок", encoding="utf-8")
+        self._add([f1])  # без vision
+        info = json.loads((self.index_dir / "index_info.json").read_text(encoding="utf-8"))
+        self.assertFalse(info.get("has_vision"))
+        _s, inc = pipeline.add_to_index(
+            input_paths=[f1], index_dir=self.index_dir, base_url="u", api_key="",
+            embedding_model="emb-1", chunk_size_tokens=2000, vision_model="qwen2.5-vl")
+        self.assertFalse(inc)  # полная пересборка из-за смены vision-флага
+        info2 = json.loads((self.index_dir / "index_info.json").read_text(encoding="utf-8"))
+        self.assertTrue(info2.get("has_vision"))
 
     def test_query_after_incremental(self) -> None:
         f1 = self.root / "a.txt"

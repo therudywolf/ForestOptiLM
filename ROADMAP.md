@@ -55,6 +55,9 @@
 - [x] nomic task prefixes (`search_document:` at index time, `search_query:` at query time) — `nomic-embed-text-v1.5` is prefix-conditioned; embedding raw degrades recall. `prefix_scheme` is stored in `index_info.json` and a mismatch forces a full rebuild (must use the same scheme for docs and queries or the spaces don't match). Index chat top_k 8→16, context budget 12000.
 - [x] Embedding/index-build resilience: `EmbeddingClient._embed_batch` retries 5xx / «model is loading» with backoff + Retry-After (one 500 no longer discards a 200-file build); per-batch progress so a long embed isn't read as a freeze.
 - [x] Grounded chat keeps reasoning out of the answer: the notebook path no longer forces `reasoning:off`, so reasoning models (gemma-4) confine chain-of-thought to their reasoning channel instead of bleeding untagged prose into the answer.
+- [x] Vision at index time (`vision_index.py`): image sources (schemas/diagrams/screenshots) are described by a vision model during indexing and the description is stored as the chunk text, so "what's on this diagram / in this table" becomes answerable. Opt-in checkbox in the notebook UI; `has_vision` in `index_info.json` forces a rebuild when toggled; descriptions cached per image content.
+- [x] Embedding signal cleanup: strip `[FILE_PATH]/[FILE_TITLE]/[Файл:…]` header boilerplate from the text sent to the embedder (kept in the stored chunk for citations) — scheme bumped to `nomic-v2`, legacy indexes migrate.
+- [x] Friendlier failures: notebook chat shows a server-health message for 5xx/timeout instead of raw `Ошибка: Server error 500`; first-run marker moved next to the exe (NocturneData) so the wizard stops reappearing after each rebuild.
 
 ## 7. Providers & distribution
 

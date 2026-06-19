@@ -32,7 +32,7 @@ from file_extractors import (
     _SKIP_EXTENSIONS,
 )
 from models import DocumentChunk, IndexStats, RetrievalHit
-from chunking import build_document_chunks
+from chunking import build_document_chunks, strip_chunk_headers
 from retrieval import LocalFaissStore
 
 logger = logging.getLogger("nocturne")
@@ -79,6 +79,7 @@ def _to_chunks(
     overlap_tokens: int = 200,
     root_dir: Path | None = None,
     extract_meta: bool = True,
+    vision_describe: Callable[[Path], str] | None = None,
 ) -> list[DocumentChunk]:
     return build_document_chunks(
         path,
@@ -86,6 +87,7 @@ def _to_chunks(
         overlap_tokens,
         root_dir=root_dir,
         extract_meta=extract_meta,
+        vision_describe=vision_describe,
     )
 
 
@@ -98,6 +100,7 @@ def build_index(
     chunk_size_tokens: int,
     on_progress: Callable[[int, int, str], None] | None = None,
     max_workers: int | None = None,
+    vision_model: str = "",
 ) -> IndexStats:
     all_files = _iter_files(input_paths)
     if not all_files:
@@ -110,12 +113,18 @@ def build_index(
     elif len(input_paths) == 1 and input_paths[0].is_file():
         root_dir = input_paths[0].parent
 
-    pool_workers = max(1, min(32, max_workers if max_workers is not None else _INDEX_MAX_WORKERS))
+    # Описатель картинок (vision-модель) — общий, с кешем; None если модель не задана.
+    from vision_index import make_image_describer
+    describer = make_image_describer(vision_model, base_url, api_key)
+
+    # Картинки описываем vision-моделью последовательно (1 тяжёлый инференс/картинка,
+    # чтобы не завалить сервер); текстовые файлы — параллельно.
+    pool_workers = 1 if describer else max(1, min(32, max_workers if max_workers is not None else _INDEX_MAX_WORKERS))
     all_chunks: list[DocumentChunk] = []
     processed_files = 0
     with ThreadPoolExecutor(max_workers=pool_workers) as pool:
         futures = {
-            pool.submit(_to_chunks, file_path, chunk_size_tokens, 200, root_dir, True): file_path
+            pool.submit(_to_chunks, file_path, chunk_size_tokens, 200, root_dir, True, describer): file_path
             for file_path in all_files
         }
         for fut in as_completed(futures):
@@ -150,13 +159,15 @@ def build_index(
     _embp = (lambda done, total: on_progress(done, total, "index_embed")) if on_progress else None
     if on_progress:
         on_progress(0, max(1, len(unique_chunks)), "index_embed")
-    # task="document" → nomic-префикс для документов (recall ↑); прогресс по батчам.
-    vectors = emb_client.embed_texts(
-        [c.text for c in unique_chunks], batch_size=16, task="document", on_batch=_embp)
+    # task="document" → nomic-префикс; эмбеддим БЕЗ служебных заголовков (они забивают
+    # окно nomic), но в индексе/цитатах остаётся полный текст. Прогресс по батчам.
+    _embed_texts = [strip_chunk_headers(c.text) or c.text for c in unique_chunks]
+    vectors = emb_client.embed_texts(_embed_texts, batch_size=16, task="document", on_batch=_embp)
     store = LocalFaissStore(index_dir=index_dir)
     return store.build(unique_chunks, vectors, embedding_model=embedding_model,
                        chunk_size_tokens=chunk_size_tokens,
-                       prefix_scheme=embedding_prefix_scheme(embedding_model))
+                       prefix_scheme=embedding_prefix_scheme(embedding_model),
+                       has_vision=bool(describer))
 
 
 def add_to_index(
@@ -168,6 +179,7 @@ def add_to_index(
     chunk_size_tokens: int,
     on_progress: Callable[[int, int, str], None] | None = None,
     max_workers: int | None = None,
+    vision_model: str = "",
 ) -> tuple[IndexStats, bool]:
     """Инкрементально дозаписать НОВЫЕ файлы в существующий индекс.
 
@@ -180,6 +192,9 @@ def add_to_index(
     info = store.info()
     prev_chunk = int(info.get("chunk_size_tokens") or 0)
     prev_prefix = str(info.get("prefix_scheme") or "none")
+    prev_vision = bool(info.get("has_vision"))
+    _vm = (vision_model or "").strip()
+    want_vision = bool(_vm) and not _vm.startswith("(")
     if (
         not store.has_index()
         or str(info.get("embedding_model") or "") != embedding_model
@@ -189,15 +204,17 @@ def add_to_index(
         # Сменилась схема префиксов эмбеддера (старый индекс без nomic-префиксов) →
         # пересборка, иначе пространства документов/запросов не совпадут.
         or prev_prefix != embedding_prefix_scheme(embedding_model)
+        # Включили/выключили описание картинок → пересобрать, чтобы (пере)описать.
+        or prev_vision != want_vision
     ):
         return build_index(input_paths, index_dir, base_url, api_key, embedding_model,
-                           chunk_size_tokens, on_progress, max_workers), False
+                           chunk_size_tokens, on_progress, max_workers, vision_model), False
 
     current = {str(f) for f in all_files}
     indexed = store.indexed_source_paths()
     if indexed - current:  # источник удалён → flat-index не умеет удалять → пересборка
         return build_index(input_paths, index_dir, base_url, api_key, embedding_model,
-                           chunk_size_tokens, on_progress, max_workers), False
+                           chunk_size_tokens, on_progress, max_workers, vision_model), False
 
     new_files = [f for f in all_files if str(f) not in indexed]
     if not new_files:
@@ -213,11 +230,13 @@ def add_to_index(
     elif len(input_paths) == 1 and input_paths[0].is_file():
         root_dir = input_paths[0].parent
 
+    from vision_index import make_image_describer
+    describer = make_image_describer(vision_model, base_url, api_key)
     new_chunks: list[DocumentChunk] = []
-    pool_workers = max(1, min(32, max_workers if max_workers is not None else _INDEX_MAX_WORKERS))
+    pool_workers = 1 if describer else max(1, min(32, max_workers if max_workers is not None else _INDEX_MAX_WORKERS))
     done = 0
     with ThreadPoolExecutor(max_workers=pool_workers) as pool:
-        futures = {pool.submit(_to_chunks, f, chunk_size_tokens, 200, root_dir, True): f
+        futures = {pool.submit(_to_chunks, f, chunk_size_tokens, 200, root_dir, True, describer): f
                    for f in new_files}
         for fut in as_completed(futures):
             done += 1
@@ -249,8 +268,8 @@ def add_to_index(
     _embp = (lambda done, total: on_progress(done, total, "index_embed")) if on_progress else None
     if on_progress:
         on_progress(0, len(unique), "index_embed")
-    vectors = emb_client.embed_texts(
-        [c.text for c in unique], batch_size=16, task="document", on_batch=_embp)
+    _embed_texts = [strip_chunk_headers(c.text) or c.text for c in unique]
+    vectors = emb_client.embed_texts(_embed_texts, batch_size=16, task="document", on_batch=_embp)
     logger.info("Incremental index add: new_files=%s new_chunks=%s", len(new_files), len(unique))
     return store.append(unique, vectors), True
 

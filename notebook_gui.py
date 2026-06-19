@@ -55,6 +55,22 @@ from url_ingest import UrlIngestError, fetch_url
 
 logger = logging.getLogger("nocturne")
 
+
+def _nb_friendly_error(exc: Exception) -> str:
+    """Понятное сообщение в чат вместо сырого 'Ошибка: Server error 500'."""
+    import httpx
+
+    if isinstance(exc, httpx.HTTPStatusError) and exc.response is not None:
+        code = exc.response.status_code
+        if code >= 500:
+            return (f"⚠️ Сервер LM Studio временно недоступен (HTTP {code}) — это здоровье "
+                    "сервера, не приложение. Повторите вопрос через несколько секунд "
+                    "(приложение уже пробовало несколько раз).")
+    if isinstance(exc, (httpx.TimeoutException, httpx.ConnectError)):
+        return ("⚠️ Не удалось связаться с сервером LM Studio (таймаут/нет соединения). "
+                "Проверьте, что сервер запущен и доступен, и повторите.")
+    return "Ошибка: " + sanitize_for_log(str(exc))
+
 # --- палитра (light, dark) ------------------------------------------------- #
 _ACCENT = "#2563eb"
 _ACCENT_HOVER = "#1d4ed8"
@@ -307,6 +323,12 @@ class NotebookUIMixin:
         self._nb_index_progress = ctk.CTkProgressBar(left)
         self._nb_index_progress.pack(fill="x", padx=12, pady=(3, 4))
         self._nb_index_progress.set(0)
+        # Описание картинок vision-моделью при индексации (схемы/таблицы/скриншоты
+        # становятся искомыми). Опционально — это тяжёлый инференс на каждую картинку.
+        self._nb_vision_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(left, text="🖼  Описывать картинки (vision)",
+                        variable=self._nb_vision_var,
+                        font=ctk.CTkFont(size=12)).pack(anchor="w", padx=12, pady=(0, 4))
         ctk.CTkButton(left, text="🔨  Построить / обновить индекс", command=self._nb_build_index,
                       fg_color=_ACCENT, hover_color=_ACCENT_HOVER).pack(fill="x", padx=12, pady=(0, 12))
 
@@ -580,8 +602,14 @@ class NotebookUIMixin:
         # под окно embedding-модели), а НЕ под контекст чат-модели. См.
         # notebook_store.notebook_index_chunk_tokens.
         chunk_size = nbs.notebook_index_chunk_tokens()
+        # Vision-модель из сайдбара — если включено «Описывать картинки».
+        vision_model = ""
+        if self._nb_vision_var.get():
+            vm = self._vision_model_var.get().strip()
+            if vm and not vm.startswith("("):
+                vision_model = vm
         self._nb_set_busy(True)
-        self._nb_set_status("Строю индекс…")
+        self._nb_set_status("Строю индекс…" + (" (с описанием картинок)" if vision_model else ""))
         self._nb_index_progress.set(0)
 
         def on_progress(cur: int, total: int, phase: str) -> None:
@@ -594,6 +622,7 @@ class NotebookUIMixin:
                 stats, incremental = nb.update_index(
                     base_url=base_url, api_key=api_key, embedding_model=emb,
                     chunk_size_tokens=chunk_size, on_progress=on_progress,
+                    vision_model=vision_model,
                 )
                 mode = "обновлён" if incremental else "пересобран"
                 self._nb_after(lambda: self._nb_set_status(
@@ -658,9 +687,9 @@ class NotebookUIMixin:
                     )
                 )
             except Exception as exc:  # noqa: BLE001
-                safe = sanitize_for_log(str(exc))
+                msg = _nb_friendly_error(exc)
                 self._nb_after(lambda: self._nb_finish_answer(
-                    thinking, ChatResult(answer=f"Ошибка: {safe}", citations=[], contexts=[]), nb))
+                    thinking, ChatResult(answer=msg, citations=[], contexts=[]), nb))
                 return
             finally:
                 loop.close()

@@ -3,11 +3,27 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from pathlib import Path
 
 from file_extractors import ParseError, extract_content, extract_file_metadata
 from models import DocumentChunk
 from parser import chunk_text_for_map_file, count_tokens
+
+_HEADER_RE = re.compile(
+    r"^\s*\[(FILE_PATH|FILE_TITLE|FILE_LABELS|FILE_FORMAT|FILE_PART|CHUNK_INDEX|"
+    r"VISION_FILE|SOURCE_URL|SOURCE_TITLE|Файл)\b")
+
+
+def strip_chunk_headers(text: str) -> str:
+    """Убрать служебные [FILE_PATH]/[FILE_TITLE]/[Файл:…]-строки — для ЭМБЕДДИНГА.
+
+    Сами чанки хранят заголовки (нужны для цитат/привязки), но эмбеддить их вредно:
+    у nomic окно ~2048 ток., и одинаковые заголовки в начале каждого чанка делают
+    векторы неразличимыми. В индекс/цитаты идёт полный текст, в эмбеддер — очищенный.
+    """
+    lines = [ln for ln in (text or "").splitlines() if not _HEADER_RE.match(ln)]
+    return "\n".join(lines).strip()
 
 
 def build_document_chunks(
@@ -17,6 +33,7 @@ def build_document_chunks(
     root_dir: Path | None = None,
     *,
     extract_meta: bool = True,
+    vision_describe: Callable[[Path], str] | None = None,
 ) -> list[DocumentChunk]:
     """
     Извлечь файл и вернуть DocumentChunk (текст, vision, table).
@@ -87,6 +104,15 @@ def build_document_chunks(
             f"[FILE_PATH: {display_path}]\n{meta_line}"
             f"[Файл: {display_path}]\n[VISION_FILE: {img_path.resolve()}]\n"
         )
+        # Описать картинку vision-моделью → её содержимое становится искомым
+        # (схемы/таблицы/диаграммы, а не только имя файла).
+        if vision_describe is not None:
+            try:
+                desc = vision_describe(img_path)
+            except Exception:
+                desc = ""
+            if desc:
+                t += "\n" + desc
         cid = hashlib.sha256(f"{path}:vision".encode()).hexdigest()[:24]
         meta: dict = {"kind": "vision", "chunk_index": 0}
         if file_meta:

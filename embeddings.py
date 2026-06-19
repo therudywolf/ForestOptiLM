@@ -32,8 +32,13 @@ _EMB_MAX_RETRIES = 4
 
 
 def embedding_prefix_scheme(model: str) -> str:
-    """Схема префиксов эмбеддера (пишется в индекс; при смене → пересборка)."""
-    return "nomic-v1" if "nomic" in (model or "").lower() else "none"
+    """Рецепт эмбеддинг-входа (пишется в индекс; при смене → пересборка).
+
+    nomic-v2 = задачные префиксы search_document:/search_query: + срез служебных
+    [FILE_PATH]-заголовков перед эмбеддингом. Бамп версии заставляет старые индексы
+    мигрировать на чистый эмбеддинг.
+    """
+    return "nomic-v2" if "nomic" in (model or "").lower() else "none"
 
 
 def _task_prefix(model: str, task: str | None) -> str:

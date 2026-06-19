@@ -24,7 +24,7 @@ def _emb_resp(status: int, n: int = 1):
 
 class TestNomicPrefixes(unittest.TestCase):
     def test_prefix_scheme(self) -> None:
-        self.assertEqual(embedding_prefix_scheme("text-embedding-nomic-embed-text-v1.5"), "nomic-v1")
+        self.assertEqual(embedding_prefix_scheme("text-embedding-nomic-embed-text-v1.5"), "nomic-v2")
         self.assertEqual(embedding_prefix_scheme("bge-m3"), "none")
 
     def test_task_prefix_only_for_nomic(self) -> None:

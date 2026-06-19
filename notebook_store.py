@@ -349,6 +349,7 @@ class Notebook:
         embedding_model: str,
         chunk_size_tokens: int,
         on_progress: Callable[[int, int, str], None] | None = None,
+        vision_model: str = "",
     ) -> "IndexStats":
         """Полная пересборка FAISS+BM25 индекса из всех источников.
 
@@ -375,6 +376,7 @@ class Notebook:
             embedding_model=embedding_model,
             chunk_size_tokens=chunk_size_tokens,
             on_progress=on_progress,
+            vision_model=vision_model,
         )
         self.embedding_model = embedding_model
         self.index_chunks = stats.chunks_total
@@ -391,6 +393,7 @@ class Notebook:
         embedding_model: str,
         chunk_size_tokens: int,
         on_progress: Callable[[int, int, str], None] | None = None,
+        vision_model: str = "",
     ) -> "tuple[IndexStats, bool]":
         """Обновить индекс инкрементально (дозаписать новые источники), иначе —
         полная пересборка. Возвращает (stats, incremental)."""
@@ -408,6 +411,7 @@ class Notebook:
             embedding_model=embedding_model,
             chunk_size_tokens=chunk_size_tokens,
             on_progress=on_progress,
+            vision_model=vision_model,
         )
         self.embedding_model = embedding_model
         self.index_chunks = stats.chunks_total
