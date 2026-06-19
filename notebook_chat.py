@@ -253,14 +253,15 @@ async def answer_question(
     history: list[dict[str, Any]] | None = None,
     max_context_tokens: int = 12000,
     max_answer_tokens: int = 1500,
-    prefer_reasoning_off: bool = False,
+    prefer_reasoning_off: bool = True,
     on_log: Callable[[str], None] | None = None,
 ) -> ChatResult:
     """Полный цикл: retrieval по блокноту → grounded-ответ с цитатами.
 
-    prefer_reasoning_off=False (по умолчанию для чата): НЕ навязываем reasoning:off,
-    чтобы reasoning-модели (gemma-4 и т.п.) держали размышления в отдельном канале,
-    а не выливали chain-of-thought прозой в текст ответа.
+    prefer_reasoning_off=True: для grounded-чата это даёт ЧИСТЫЙ ответ — проверено
+    живьём на gemma-4-12b (с reasoning:on модель парротит ограничения промпта и
+    «думает вслух» прямо в текст ответа). call_llm при пустом выводе сам эскалирует
+    reasoning:off→on, так что маленькие reasoning-модели тоже не остаются без ответа.
     """
     from processor import call_llm
 

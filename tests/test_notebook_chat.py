@@ -136,9 +136,9 @@ class TestAnswerQuestion(unittest.TestCase):
             asyncio.run(nc.answer_question(nb, "q", base_url="u", api_key="", chat_model="m"))
         self.assertEqual(nb.last_top_k, 16)
 
-    def test_chat_does_not_force_reasoning_off(self) -> None:
-        # Регрессия: чат НЕ должен навязывать reasoning:off — иначе reasoning-модели
-        # (gemma-4) выливают chain-of-thought прозой в текст ответа.
+    def test_chat_uses_reasoning_off(self) -> None:
+        # Для grounded-чата prefer_reasoning_off=True даёт чистый ответ (проверено
+        # живьём: gemma-4 с reasoning:on парротит ограничения промпта в ответ).
         nb = _FakeNotebook([_Hit("grounding", "C:/x/a.txt")])
         captured: dict = {}
 
@@ -148,9 +148,8 @@ class TestAnswerQuestion(unittest.TestCase):
 
         with mock.patch("processor.call_llm", new=fake_call_llm):
             asyncio.run(nc.answer_question(
-                nb, "q", base_url="u", api_key="", chat_model="google/gemma-4-26b-a4b-qat"))
-        self.assertIn("prefer_reasoning_off", captured)
-        self.assertFalse(captured["prefer_reasoning_off"])
+                nb, "q", base_url="u", api_key="", chat_model="google/gemma-4-12b-qat"))
+        self.assertTrue(captured.get("prefer_reasoning_off"))
 
     def test_grounded_answer_with_citations(self) -> None:
         nb = _FakeNotebook([_Hit("xz backdoor CVE-2024-3094", "C:/x/a.txt")])
