@@ -127,6 +127,23 @@ class TelegramHtmlImporter:
         label = " — ".join(parts) if parts else "вложение"
         return f"[медиа: {label}]"
 
+    @staticmethod
+    def _forwarded_marker(msg) -> str:
+        fwd = msg.find("div", class_="forwarded")
+        if fwd is None:
+            return ""
+        fn = fwd.find("div", class_="from_name")
+        name = fn.get_text(strip=True) if fn is not None else ""
+        return f"[переслано от: {name}]" if name else "[переслано]"
+
+    @staticmethod
+    def _reply_marker(msg) -> str:
+        rt = msg.find("div", class_="reply_to")
+        if rt is None:
+            return ""
+        t = rt.get_text(" ", strip=True)
+        return f"[{t}]" if t else "[в ответ на сообщение]"
+
     def extract(self, path: Path) -> str:
         from bs4 import BeautifulSoup
 
@@ -144,7 +161,10 @@ class TelegramHtmlImporter:
             if "service" in classes:
                 continue  # даты-разделители, пины и т.п. — пропускаем
 
-            fn = msg.find("div", class_="from_name")
+            # Автор — первый from_name ВНЕ forwarded-блока (иначе подхватили бы
+            # имя источника пересылки вместо реального отправителя).
+            fn = next((c for c in msg.find_all("div", class_="from_name")
+                       if c.find_parent("div", class_="forwarded") is None), None)
             if fn is not None:
                 sender = fn.get_text(strip=True) or last_sender
                 last_sender = sender
@@ -154,6 +174,13 @@ class TelegramHtmlImporter:
             date = self._msg_date(msg)
 
             body_parts: list[str] = []
+            # Сохраняем структуру треда: на что отвечают и откуда переслано.
+            reply = self._reply_marker(msg)
+            if reply:
+                body_parts.append(reply)
+            fwd = self._forwarded_marker(msg)
+            if fwd:
+                body_parts.append(fwd)
             text_div = msg.find("div", class_="text")
             if text_div is not None:
                 text = text_div.get_text(separator="\n").strip()

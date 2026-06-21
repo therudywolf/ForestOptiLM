@@ -36,10 +36,14 @@ Licensed under **AGPL-3.0-or-later** — see [LICENSE](LICENSE), [NOTICE](NOTICE
 ## Features
 
 - **Notebooks (NotebookLM-style)** — persistent named source collections with a
-  **grounded chat** that answers *only* from that notebook's sources, with
-  clickable `[N]` citations (open the file / see the cited passage) and an honest
-  *"not in the sources"* refusal. Plus a **Studio** panel that generates study
-  guides, FAQs, timelines, briefings and flashcards over the corpus. See
+  **grounded chat** (streamed, with clickable `[N]` citations and an honest
+  *"not in the sources"* refusal) that answers *only* from that notebook. A
+  **Studio** panel generates study guides, FAQs, timelines, briefings, flashcards
+  and a corpus **Lint**. Plus a **compiled-knowledge wiki layer** (Andrej
+  Karpathy's *LLM-Wiki* pattern): the LLM compiles your sources into linked,
+  editable markdown pages that chat then prefers — knowledge that **compounds**
+  instead of being re-derived on every question. Optional **🎯 Точный поиск**
+  (query-expansion + LLM re-ranking) sharpens recall and precision. See
   [Notebooks](#notebooks).
 - **Smart import** — recognized chat exports are normalized to clean,
   LLM-friendly `[date] sender: text` blocks *before* indexing instead of being
@@ -392,6 +396,9 @@ detects known export formats and rewrites them into clean, per-message text
 - **WhatsApp** (`_chat.txt`), **Slack** and **Discord** JSON exports — same clean
   `[date] sender: text` normalization (`whatsapp_txt`, `slack_json`,
   `discord_json` importers in `smart_import.py`).
+- **Generic chat logs** (`name: message`, no timestamps) — a conservative
+  heuristic importer (`generic_chatlog`) picks up plain dialogue dumps while
+  ignoring `key: value` configs and prose; runs last so the specific importers win.
 
 Detection and conversion happen inside
 [`file_extractors.extract_content`](file_extractors.py), so smart import benefits
@@ -419,17 +426,43 @@ three-pane **workspace** — **Источники · Чат · Studio** — mirr
 4. **Chat:** ask in plain language. Answers are **grounded** — retrieval runs
    *only* over this notebook, every claim carries a `[N]` citation, and clicking
    a citation chip shows the exact passage with a button to open the source. If
-   the answer isn't in the sources, the assistant says so instead of inventing it.
+   the answer isn't in the sources, the assistant says so instead of inventing it
+   (and still shows the retrieved candidate fragments so you can judge). The
+   answer **streams** token-by-token, **⏹ Стоп** cancels it mid-flight, and
+   **📌 В знания** files a good answer back into the wiki as a permanent page.
+   - **🎯 Точный поиск** (toggle, off by default — adds ~2 model calls): the LLM
+     rewrites your question into 1-2 paraphrases (higher recall), and a listwise
+     LLM re-ranker reorders the merged candidates by real relevance (higher
+     precision). Inspired by Karpathy's LLM-Wiki recommendations and `qmd`.
 5. **Studio:** one click generates a **study guide**, **FAQ**, **timeline**,
    **briefing/synopsis** or **flashcards** over the corpus; results are saved as
-   notes inside the notebook.
+   notes. **🔍 Проверить блокнот** (Lint) audits the corpus for contradictions,
+   stale/duplicate facts and gaps.
+6. **📚 Скомпилировать знания (вики):** instead of re-deriving everything from raw
+   chunks on every question (amnesiac RAG), the LLM compiles the corpus once into
+   a small set of linked, **editable** markdown pages — **Обзор / Сущности /
+   Понятия / Глоссарий** — under `wiki/`, plus a human-readable `index.md` catalog
+   and an append-only `log.md` journal. The wiki is indexed separately and grounded
+   chat **prefers this compiled knowledge** (citing the readable wiki page), with
+   raw chunks following for detail. This is Andrej Karpathy's *LLM-Wiki* pattern —
+   knowledge that **compounds** instead of being rediscovered each time. Opt-in and
+   non-destructive (raw sources are untouched); the `wiki/` folder opens cleanly in
+   Obsidian.
+
+A per-notebook **schema** (set in **Изменить**: a short free-text domain
+description — what the data is, which entities matter) steers both the chat system
+prompt and wiki compilation. Embedded **images inside `.docx`/`.pdf`** (diagrams,
+schemas) are described by a vision model at index time when **🖼 Описывать
+картинки** is on, so "what's on this diagram" becomes answerable.
 
 Notebooks live in `NocturneData/notebooks/` next to the packaged `.exe`, or in
 `.local/notebooks/` when running from source (override with
-`NOCTURNE_NOTEBOOKS_DIR`). Layout per notebook: `notebook.json` (metadata),
-`index/` (FAISS + BM25), `sources/` (URL/derived text), `notes/` (Studio output),
-`chat.jsonl` (chat history). Adding a source rebuilds the index (FAISS is
-immutable). Audio files (`.mp3/.wav/.m4a/.ogg/.flac/.opus/.aac/.wma`) are
+`NOCTURNE_NOTEBOOKS_DIR`). Layout per notebook: `notebook.json` (metadata incl.
+the optional `schema`), `index/` (FAISS + BM25 over raw sources), `sources/`
+(URL/derived text), `notes/` (Studio output), `wiki/` (compiled-knowledge pages +
+`index.md`/`log.md` + `answers/` from 📌 В знания), `wiki_index/` (separate index
+over the wiki), `chat.jsonl` (chat history). Adding a source rebuilds the index
+(FAISS is immutable). Audio files (`.mp3/.wav/.m4a/.ogg/.flac/.opus/.aac/.wma`) are
 transcribed locally via the optional `faster-whisper` dependency and become text
 sources; only TTS / audio-video "overviews" are intentionally out of scope.
 

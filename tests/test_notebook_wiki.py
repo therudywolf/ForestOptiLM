@@ -131,6 +131,17 @@ class TestCompileWiki(unittest.TestCase):
         log_md = (wiki / wk.WIKI_LOG_FILE).read_text(encoding="utf-8")
         self.assertIn("## [2026-06-21] compile", log_md)
 
+    def test_pages_have_obsidian_wikilinks_footer(self) -> None:
+        async def fake_call_llm(messages, model, base_url, api_key, semaphore, **kw):
+            return "# Стр\n\nконтент"
+
+        with mock.patch("processor.call_llm", new=fake_call_llm):
+            asyncio.run(wk.compile_wiki(self.nb, base_url="u", api_key="", chat_model="m", ts="2026-06-21"))
+        overview = (self.nb.wiki_dir / "overview.md").read_text(encoding="utf-8")
+        self.assertIn("См. также", overview)
+        self.assertIn("[[entities]]", overview)       # ссылка на соседнюю страницу
+        self.assertNotIn("[[overview]]", overview)    # не ссылается сам на себя
+
     def test_log_is_append_only_across_runs(self) -> None:
         async def fake_call_llm(messages, model, base_url, api_key, semaphore, **kw):
             return "# X\n\nтекст"

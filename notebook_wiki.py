@@ -116,6 +116,16 @@ def page_summary(markdown: str, max_len: int = 120) -> str:
     return ""
 
 
+def wikilinks_footer(current_filename: str) -> str:
+    """Футер «См. также» с Obsidian-ссылками [[page]] на ОСТАЛЬНЫЕ вики-страницы —
+    чтобы граф в Obsidian был связным (бэклинки между Обзором/Сущностями/…)."""
+    links = [f"[[{spec.filename.rsplit('.', 1)[0]}]]"
+             for spec in WIKI_PAGES if spec.filename != current_filename]
+    if not links:
+        return ""
+    return "\n\n---\n*См. также:* " + " · ".join(links) + "\n"
+
+
 def build_wiki_index(entries: list[tuple[str, str, str]], notebook_name: str = "") -> str:
     """Каталог вики (index.md): по странице — ссылка + однострочное резюме."""
     head = "# Вики блокнота" + (f": {notebook_name}" if notebook_name else "")
@@ -236,7 +246,9 @@ async def compile_wiki(
         )
         content = (raw or "").strip()
         if content:
-            (wiki_dir / spec.filename).write_text(content, encoding="utf-8")
+            # Obsidian-футер со ссылками на соседние страницы (связный граф).
+            (wiki_dir / spec.filename).write_text(
+                content + wikilinks_footer(spec.filename), encoding="utf-8")
             entries.append((spec.title, spec.filename, page_summary(content)))
         if on_progress:
             on_progress(i + 1, len(WIKI_PAGES), spec.title)

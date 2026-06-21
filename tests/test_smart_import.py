@@ -43,6 +43,25 @@ TELEGRAM_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8"></head><body
 
 PLAIN_HTML = "<html><head><title>T</title></head><body><h1>Заголовок</h1><p>Обычная страница</p></body></html>"
 
+# Ответ на сообщение + пересланное (forwarded) — проверка сохранения структуры треда.
+TELEGRAM_REPLY_FWD = """<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>
+<div class="history">
+  <div class="message default clearfix" id="m4"><div class="body">
+    <div class="pull_right date details" title="03.10.2025 13:00:00 UTC+03:00">13:00</div>
+    <div class="from_name">Boris</div>
+    <div class="reply_to details">In reply to <a href="#m1">Sergey</a></div>
+    <div class="text">Согласен</div>
+  </div></div>
+  <div class="message default clearfix" id="m5"><div class="body">
+    <div class="pull_right date details" title="03.10.2025 13:01:00 UTC+03:00">13:01</div>
+    <div class="from_name">Anna</div>
+    <div class="forwarded body">
+      <div class="from_name">External Source</div>
+      <div class="text">Пересланный текст</div>
+    </div>
+  </div></div>
+</div></body></html>"""
+
 
 def _write(tmp: Path, name: str, content: str) -> Path:
     p = tmp / name
@@ -94,6 +113,20 @@ class TestTelegramImporter(unittest.TestCase):
         text = si.smart_extract_text(p) or ""
         self.assertIn("[03.10.2025 12:34:18 UTC+03:00] Sergey Medvedev:", text)
         self.assertIn("Есть вопрос по статусам", text)
+
+    def test_reply_and_forwarded_markers(self) -> None:
+        p = _write(self.tmp, "messages.html", TELEGRAM_REPLY_FWD)
+        text = si.smart_extract_text(p) or ""
+        # reply сохранён
+        self.assertIn("Boris:", text)
+        self.assertIn("[In reply to Sergey]", text)
+        self.assertIn("Согласен", text)
+        # forwarded: автор = пересылающий (Anna), плюс атрибуция источника
+        self.assertIn("Anna:", text)
+        self.assertIn("[переслано от: External Source]", text)
+        self.assertIn("Пересланный текст", text)
+        # имя источника пересылки НЕ стало автором сообщения
+        self.assertNotIn("External Source:", text)
 
     def test_plain_html_returns_none(self) -> None:
         p = _write(self.tmp, "page.html", PLAIN_HTML)
