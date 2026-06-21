@@ -57,7 +57,7 @@ class TestSaveAnswerPage(unittest.TestCase):
         self.nb = nbs.create_notebook("nb")
 
     def test_slug_is_filename_safe(self) -> None:
-        self.assertEqual(wk._slug("На каких ВМ?! / Alpha"), "на-каких-вм-Alpha")
+        self.assertEqual(wk._slug("На каких узлах?! / alpha"), "на-каких-узлах-alpha")
         self.assertEqual(wk._slug("   "), "answer")
 
     def test_saves_page_and_logs(self) -> None:
