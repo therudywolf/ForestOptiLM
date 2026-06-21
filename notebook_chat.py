@@ -218,8 +218,17 @@ def build_chat_messages(
     *,
     history_turns: int = 4,
     history_chars: int = 600,
+    schema: str = "",
 ) -> list[dict[str, str]]:
-    """Собрать messages для call_llm: system + единый grounded user-промпт."""
+    """Собрать messages для call_llm: system + единый grounded user-промпт.
+
+    ``schema`` (B4) — свободное описание домена блокнота; добавляется к system-
+    промпту как контекст, помогая модели правильно трактовать сущности/термины.
+    """
+    system = CHAT_SYSTEM_PROMPT
+    s = schema.strip()[:2000]  # кап: свободный текст схемы не должен раздувать контекст
+    if s:
+        system += "\n\n[Контекст домена этого блокнота]\n" + s
     parts: list[str] = []
     hist = _format_history(history or [], history_turns, history_chars)
     if hist:
@@ -240,7 +249,7 @@ def build_chat_messages(
     )
     user = "\n\n".join(parts)
     return [
-        {"role": "system", "content": CHAT_SYSTEM_PROMPT},
+        {"role": "system", "content": system},
         {"role": "user", "content": user},
     ]
 
@@ -283,6 +292,7 @@ async def answer_question(
     on_log: Callable[[str], None] | None = None,
     stop_flag: Callable[[], bool] | None = None,
     enhanced: bool = False,
+    on_token: Callable[[str], None] | None = None,
 ) -> ChatResult:
     """Полный цикл: retrieval по блокноту → grounded-ответ с цитатами.
 
@@ -367,38 +377,69 @@ async def answer_question(
     if _stopped():  # успели нажать «Стоп» ещё на этапе поиска
         return _cancelled_result(contexts)
 
-    messages = build_chat_messages(question, contexts, history)
-    try:
-        raw = await _await_with_stop(
-            call_llm(
-                messages,
-                chat_model,
-                base_url,
-                api_key,
-                semaphore,
-                max_tokens=max_answer_tokens,
-                api_mode=api_mode,
-                prefer_reasoning_off=prefer_reasoning_off,
-            ),
-            _stopped,
-        )
-    except ChatCancelled:
-        return _cancelled_result(contexts)
-    except RuntimeError as exc:
-        # Маленькие reasoning-модели c reasoning:off иногда отдают пустой вывод —
-        # не роняем чат, а возвращаем понятное сообщение (ретраи внутри call_llm
-        # уже отработали). Прочие ошибки (сеть/HTTP) пробрасываем.
-        if "empty content" in str(exc).lower():
-            return ChatResult(
-                answer="Модель вернула пустой ответ. Попробуйте переформулировать "
-                       "вопрос или выбрать модель побольше.",
-                citations=[],
-                contexts=[c.to_citation() for c in contexts],
-                refused=False,
-                model=chat_model,
-                extra={"empty_output": True},
+    schema = str(getattr(notebook, "schema", "") or "")
+    messages = build_chat_messages(question, contexts, history, schema=schema)
+
+    raw: str | None = None
+    # C4: потоковый вывод. Стрим идёт по openai-совместимому пути (LM Studio его
+    # отдаёт и в native-режиме), кроме «точного поиска» (там свой много-вызовный
+    # цикл). Любой сбой стрима → тихий откат на обычный call_llm.
+    if on_token and not enhanced:
+        from processor import call_llm_stream
+        try:
+            # Оборачиваем в _await_with_stop: при «Стоп» задача отменяется и рвёт
+            # in-flight стрим даже если модель зависла между токенами (иначе Стоп
+            # ждал бы read-timeout). stop_flag внутри тоже проверяется по-строчно.
+            raw = await _await_with_stop(
+                call_llm_stream(
+                    messages, chat_model, base_url, api_key,
+                    max_tokens=max_answer_tokens, api_mode=api_mode,
+                    on_token=on_token, stop_flag=_stopped,
+                ),
+                _stopped,
             )
-        raise
+        except ChatCancelled:
+            return _cancelled_result(contexts)
+        except Exception as exc:  # noqa: BLE001
+            _log(f"стриминг недоступен, обычный режим: {exc}")
+            raw = None
+        if _stopped():
+            return _cancelled_result(contexts)
+
+    if raw is not None:
+        pass  # получили ответ стримингом
+    else:
+        try:
+            raw = await _await_with_stop(
+                call_llm(
+                    messages,
+                    chat_model,
+                    base_url,
+                    api_key,
+                    semaphore,
+                    max_tokens=max_answer_tokens,
+                    api_mode=api_mode,
+                    prefer_reasoning_off=prefer_reasoning_off,
+                ),
+                _stopped,
+            )
+        except ChatCancelled:
+            return _cancelled_result(contexts)
+        except RuntimeError as exc:
+            # Маленькие reasoning-модели c reasoning:off иногда отдают пустой вывод
+            # — не роняем чат, а возвращаем понятное сообщение (ретраи внутри
+            # call_llm уже отработали). Прочие ошибки (сеть/HTTP) пробрасываем.
+            if "empty content" in str(exc).lower():
+                return ChatResult(
+                    answer="Модель вернула пустой ответ. Попробуйте переформулировать "
+                           "вопрос или выбрать модель побольше.",
+                    citations=[],
+                    contexts=[c.to_citation() for c in contexts],
+                    refused=False,
+                    model=chat_model,
+                    extra={"empty_output": True},
+                )
+            raise
     answer = (raw or "").strip()
     used = parse_used_citations(answer, contexts)
     return ChatResult(

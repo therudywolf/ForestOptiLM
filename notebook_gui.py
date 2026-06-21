@@ -458,7 +458,7 @@ class NotebookUIMixin:
             return
         top = ctk.CTkToplevel(self)
         top.title("Изменить исследование")
-        top.geometry("480x420")
+        top.geometry("480x560")
         top.transient(self)
         chosen_emoji = {"v": nb.emoji or "📓"}
 
@@ -467,9 +467,15 @@ class NotebookUIMixin:
         ctk.CTkEntry(top, textvariable=name_var).pack(fill="x", padx=16)
 
         ctk.CTkLabel(top, text="Описание", anchor="w").pack(anchor="w", padx=16, pady=(12, 2))
-        desc_box = ctk.CTkTextbox(top, height=110, wrap="word")
+        desc_box = ctk.CTkTextbox(top, height=90, wrap="word")
         desc_box.pack(fill="x", padx=16)
         desc_box.insert("1.0", nb.description)
+
+        ctk.CTkLabel(top, text="Схема домена (что за данные, какие сущности важны)",
+                     anchor="w", text_color=_MUTED).pack(anchor="w", padx=16, pady=(12, 2))
+        schema_box = ctk.CTkTextbox(top, height=90, wrap="word")
+        schema_box.pack(fill="x", padx=16)
+        schema_box.insert("1.0", nb.schema)
 
         ctk.CTkLabel(top, text="Иконка", anchor="w").pack(anchor="w", padx=16, pady=(12, 2))
         emoji_row = ctk.CTkFrame(top, fg_color="transparent")
@@ -493,7 +499,7 @@ class NotebookUIMixin:
 
         def save() -> None:
             nb.set_meta(name=name_var.get(), description=desc_box.get("1.0", "end-1c"),
-                        emoji=chosen_emoji["v"])
+                        emoji=chosen_emoji["v"], schema=schema_box.get("1.0", "end-1c"))
             self._nb_render_workspace_header()
             self._nb_set_status("Сохранено", "lightgreen")
             top.destroy()
@@ -694,6 +700,26 @@ class NotebookUIMixin:
         self._nb_set_status("Ищу в источниках и формирую ответ…")
         thinking = self._nb_add_message_row("assistant", "…думаю…", [], placeholder=True)
 
+        # C4: потоковый вывод — обновляем пузырь-плейсхолдер по мере прихода токенов.
+        # Тротлинг: пока обновление запланировано, новые токены просто копятся.
+        stream_state = {"text": "", "pending": False}
+
+        def on_token(delta: str) -> None:
+            stream_state["text"] += delta
+            if stream_state["pending"]:
+                return
+            stream_state["pending"] = True
+
+            def upd() -> None:
+                stream_state["pending"] = False
+                try:
+                    if thinking.winfo_exists():
+                        thinking._nb_label.configure(text=stream_state["text"])
+                        self._nb_scroll_chat_to_end()
+                except Exception:
+                    pass
+            self._nb_after(upd)
+
         def work() -> None:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
@@ -706,6 +732,7 @@ class NotebookUIMixin:
                         on_log=lambda m: self._append_log_line(f"[NB chat] {m}", "general"),
                         stop_flag=self._nb_chat_stop.is_set,
                         enhanced=precise,
+                        on_token=on_token,
                     )
                 )
             except Exception as exc:  # noqa: BLE001
@@ -716,11 +743,12 @@ class NotebookUIMixin:
             finally:
                 loop.close()
                 self._nb_after(lambda: self._nb_set_busy(False))
-            self._nb_after(lambda: self._nb_finish_answer(thinking, result, nb))
+            self._nb_after(lambda: self._nb_finish_answer(thinking, result, nb, question))
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _nb_finish_answer(self, placeholder: ctk.CTkFrame, result: ChatResult, nb: Any) -> None:
+    def _nb_finish_answer(self, placeholder: ctk.CTkFrame, result: ChatResult, nb: Any,
+                          question: str = "") -> None:
         cancelled = bool(result.extra.get("cancelled"))
         # Историю сохраняем в тот блокнот, по которому спрашивали (мог быть удалён,
         # пока шёл ответ → не роняем поток). Отменённый запрос НЕ пишем — иначе
@@ -738,7 +766,8 @@ class NotebookUIMixin:
         except Exception:
             pass
         self._nb_add_message_row("assistant", result.answer, result.citations,
-                                 contexts=result.contexts, refused=result.refused)
+                                 contexts=result.contexts, refused=result.refused,
+                                 question=question)
         if result.extra.get("cancelled"):
             self._nb_set_status("Запрос остановлен", "#f59e0b")
         elif result.refused:
@@ -759,17 +788,21 @@ class NotebookUIMixin:
                               "со ссылками [N] на фрагменты. Если ответа в источниках нет — скажу честно.",
                          text_color=_HINT, justify="left").pack(anchor="w", padx=10, pady=10)
             return
+        prev_user = ""  # вопрос, на который отвечал ассистент (для «В знания»)
         for turn in history:
+            role = str(turn.get("role") or "assistant")
+            content = str(turn.get("content") or "")
             self._nb_add_message_row(
-                str(turn.get("role") or "assistant"),
-                str(turn.get("content") or ""),
-                list(turn.get("citations") or []),
+                role, content, list(turn.get("citations") or []),
+                question=prev_user if role == "assistant" else "",
             )
+            if role == "user":
+                prev_user = content
 
     def _nb_add_message_row(
         self, role: str, content: str, citations: list[dict[str, Any]],
         *, contexts: list[dict[str, Any]] | None = None,
-        placeholder: bool = False, refused: bool = False,
+        placeholder: bool = False, refused: bool = False, question: str = "",
     ) -> ctk.CTkFrame:
         is_user = role == "user"
         outer = ctk.CTkFrame(self._nb_chat_frame, fg_color="transparent")
@@ -780,8 +813,10 @@ class NotebookUIMixin:
                               corner_radius=12)
         bubble.pack(fill="x", anchor="w")
         text_color = "white" if is_user else ("#111827", "#f3f4f6")
-        ctk.CTkLabel(bubble, text=content, wraplength=560, justify="left",
-                     text_color=text_color, anchor="w").pack(anchor="w", padx=12, pady=9, fill="x")
+        lbl = ctk.CTkLabel(bubble, text=content, wraplength=560, justify="left",
+                           text_color=text_color, anchor="w")
+        lbl.pack(anchor="w", padx=12, pady=9, fill="x")
+        outer._nb_label = lbl  # ссылка для инкрементального обновления при стриминге
 
         if citations and not placeholder:
             chips = ctk.CTkFrame(outer, fg_color="transparent")
@@ -811,8 +846,40 @@ class NotebookUIMixin:
                 ctk.CTkButton(found, text=label, height=24, font=ctk.CTkFont(size=11),
                               fg_color="transparent", border_width=1, anchor="w",
                               command=lambda c=cit: self._nb_show_citation(c)).pack(side="left", padx=2)
+        # B5: «Подшить ответ в знания» — только для полноценного ответа ассистента.
+        if (not is_user and not placeholder and not refused
+                and content.strip() and question.strip()):
+            ctk.CTkButton(outer, text="📌 В знания", height=22, width=110,
+                          font=ctk.CTkFont(size=11), fg_color="transparent", border_width=1,
+                          command=lambda q=question, a=content, c=citations:
+                              self._nb_save_to_wiki(q, a, c)).pack(anchor="w", pady=(3, 0))
         self.after(0, self._nb_scroll_chat_to_end)
         return outer
+
+    def _nb_save_to_wiki(self, question: str, answer: str, citations: list[dict[str, Any]]) -> None:
+        """Сохранить ответ чата как постоянную вики-страницу (B5). Если вики уже
+        проиндексирована — доиндексировать страницу в фоне (сетевой вызов)."""
+        nb = self._nb_current
+        if nb is None:
+            return
+        cites = [f"{c.get('display') or 'источник'}"
+                 + (f" · {c.get('locator')}" if c.get("locator") else "") for c in (citations or [])]
+        base_url = self._url_var.get().strip() or API_BASE
+        api_key = self._api_key_var.get().strip() or API_KEY
+        emb = self._pick_embedding_model()
+
+        def work() -> None:
+            try:
+                import notebook_wiki as wk
+                path = wk.save_answer_page(nb, question, answer, citations=cites,
+                                           base_url=base_url, api_key=api_key, embedding_model=emb)
+                self._nb_after(lambda: self._nb_set_status(
+                    f"Подшито в знания → {Path(path).name}", "lightgreen"))
+            except Exception as exc:  # noqa: BLE001
+                safe = sanitize_for_log(str(exc))
+                self._nb_after(lambda: self._nb_set_status(f"Не удалось подшить: {safe}", "#f87171"))
+
+        threading.Thread(target=work, daemon=True).start()
 
     def _nb_scroll_chat_to_end(self) -> None:
         try:
@@ -918,6 +985,7 @@ class NotebookUIMixin:
         base_url = self._url_var.get().strip() or API_BASE
         api_key = self._api_key_var.get().strip() or API_KEY
         api_mode = self._api_mode_var.get().strip().lower()
+        emb = self._pick_embedding_model()  # для индексации вики-страниц (B2)
         self._nb_set_busy(True)
         self._nb_set_status("Компилирую знания в вики…")
 
@@ -927,7 +995,8 @@ class NotebookUIMixin:
             asyncio.set_event_loop(loop)
             try:
                 res = loop.run_until_complete(wk.compile_wiki(
-                    nb, base_url=base_url, api_key=api_key, chat_model=model, api_mode=api_mode,
+                    nb, base_url=base_url, api_key=api_key, chat_model=model,
+                    embedding_model=emb, api_mode=api_mode,
                     on_progress=lambda d, t, title: self._nb_after(
                         lambda: self._nb_set_status(f"Вики: {title} ({d}/{t})…")),
                 ))

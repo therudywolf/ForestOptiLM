@@ -181,6 +181,9 @@ class Notebook:
     description: str = ""
     emoji: str = ""
     color: str = ""
+    # Схема блокнота (LLM-Wiki B4): свободный текст про домен — какие сущности
+    # важны, что подчёркивать. Рулит компиляцией вики и system-prompt чата.
+    schema: str = ""
 
     # --- пути внутри блокнота ------------------------------------------- #
     @property
@@ -202,6 +205,16 @@ class Notebook:
         return self.dir / "wiki"
 
     @property
+    def wiki_index_dir(self) -> Path:
+        # Отдельный маленький индекс по вики-страницам (B2): чат предпочитает
+        # скомпилированное знание, но цитирует читаемую вики-страницу как источник.
+        return self.dir / "wiki_index"
+
+    @property
+    def has_wiki_index(self) -> bool:
+        return (self.wiki_index_dir / "chunks_meta.jsonl").is_file()
+
+    @property
     def chat_path(self) -> Path:
         return self.dir / "chat.jsonl"
 
@@ -221,6 +234,7 @@ class Notebook:
             "description": self.description,
             "emoji": self.emoji,
             "color": self.color,
+            "schema": self.schema,
             "index": {
                 "chunks_total": self.index_chunks,
                 "files_total": self.index_files,
@@ -267,6 +281,7 @@ class Notebook:
             description=str(d.get("description") or ""),
             emoji=str(d.get("emoji") or auto_emoji),
             color=str(d.get("color") or auto_color),
+            schema=str(d.get("schema") or ""),
         )
 
     # --- управление источниками ----------------------------------------- #
@@ -434,17 +449,39 @@ class Notebook:
         api_key: str,
         embedding_model: str = "",
         top_k: int = 8,
+        include_wiki: bool = True,
     ) -> list["RetrievalHit"]:
         from pipeline import query_index
 
-        return query_index(
-            question=question,
-            index_dir=self.index_dir,
-            base_url=base_url,
-            api_key=api_key,
-            embedding_model=embedding_model or self.embedding_model,
-            top_k=top_k,
+        emb = embedding_model or self.embedding_model
+        raw = query_index(
+            question=question, index_dir=self.index_dir,
+            base_url=base_url, api_key=api_key, embedding_model=emb, top_k=top_k,
         )
+        # B2 (LLM-Wiki): если есть скомпилированная вики — достаём из неё немного
+        # плотного знания и ставим ВПЕРЁД сырых фрагментов (дедуп по chunk_id), но
+        # сырьё остаётся для деталей. Сбой вики-поиска не ломает обычный.
+        if include_wiki and self.has_wiki_index:
+            try:
+                wiki = query_index(
+                    question=question, index_dir=self.wiki_index_dir,
+                    base_url=base_url, api_key=api_key, embedding_model=emb,
+                    top_k=max(3, top_k // 3),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("wiki query failed, raw only: %s", exc)
+                wiki = []
+            if wiki:
+                seen: set[str] = set()
+                merged: list[RetrievalHit] = []
+                for h in list(wiki) + list(raw):
+                    cid = str(getattr(h, "chunk_id", "") or id(h))
+                    if cid in seen:
+                        continue
+                    seen.add(cid)
+                    merged.append(h)
+                return merged
+        return raw
 
     # --- история чата ---------------------------------------------------- #
     def append_chat_turn(
@@ -502,6 +539,7 @@ class Notebook:
         description: str | None = None,
         emoji: str | None = None,
         color: str | None = None,
+        schema: str | None = None,
     ) -> None:
         if name is not None and name.strip():
             self.name = name.strip()
@@ -511,6 +549,8 @@ class Notebook:
             self.emoji = emoji
         if color:
             self.color = color
+        if schema is not None:
+            self.schema = schema.strip()
         self.save()
 
     def total_source_bytes(self) -> int:

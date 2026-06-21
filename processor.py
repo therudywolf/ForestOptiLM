@@ -1240,6 +1240,81 @@ def _strip_think_blocks(text: str) -> str:
 _THINK_BLOCK_RE = re.compile(r"(?is)<(think|thinking)>.*?</\1>")
 
 
+def parse_sse_delta(line: str) -> str | None:
+    """Достать кусок текста из одной SSE-строки OpenAI-стрима (``data: {...}``).
+
+    Возвращает delta-content (может быть пустой строкой), ``None`` если строка не
+    несёт контента (пустая, не data:, [DONE], битый JSON, нет delta)."""
+    if not line:
+        return None
+    line = line.strip()
+    if not line.startswith("data:"):
+        return None
+    data = line[len("data:"):].strip()
+    if not data or data == "[DONE]":
+        return None
+    try:
+        obj = json.loads(data)
+        choice = (obj.get("choices") or [{}])[0]
+        delta = choice.get("delta") or {}
+        content = delta.get("content")
+        return content if isinstance(content, str) else None
+    except Exception:
+        return None
+
+
+async def call_llm_stream(
+    messages: list[dict[str, Any]],
+    model: str,
+    base_url: str,
+    api_key: str,
+    *,
+    max_tokens: int = 1500,
+    api_mode: str = "native",
+    on_token: Callable[[str], None],
+    stop_flag: Callable[[], bool] | None = None,
+) -> str:
+    """Стриминговый чат через OpenAI-совместимый SSE. ``on_token(delta)`` на каждый
+    кусок текста. Возвращает полный ответ (с вырезанными <think>). При любой
+    проблеме поднимает исключение — вызывающий откатывается на обычный call_llm.
+
+    Стримим ВСЕГДА через openai-совместимый ``/v1/chat/completions`` (LM Studio и
+    большинство серверов его отдают независимо от выбранного режима чата); если
+    сервер его не поддерживает — стрим упадёт и вызывающий откатится на call_llm.
+    Reasoning-безопасно: payload идентичен НЕ-стриминговому openai-пути (там тоже
+    нет reasoning-параметра) + ``stream:true``; поведение модели то же.
+    ``api_mode`` оставлен для совместимости сигнатуры и не влияет на эндпоинт.
+    """
+    _ = api_mode  # стрим всегда по openai-совместимому пути
+    endpoint = _chat_endpoint(base_url, native=False)
+    payload = {"model": model, "messages": messages, "max_tokens": max_tokens,
+               "temperature": 0, "stream": True}
+    headers = {"Content-Type": "application/json", **_auth_headers(api_key)}
+    note_app_loaded_model(model)
+    # Короткий read-timeout: если модель зависла между токенами, чтение проснётся
+    # (а не висит до 600с) → стрим упадёт и вызывающий откатится на call_llm.
+    timeout_cfg = httpx.Timeout(connect=15.0, read=120.0, write=30.0, pool=15.0)
+    parts: list[str] = []
+    async with httpx.AsyncClient(timeout=timeout_cfg) as client:
+        async with client.stream("POST", endpoint, json=payload, headers=headers) as r:
+            r.raise_for_status()
+            async for line in r.aiter_lines():
+                if stop_flag and stop_flag():
+                    break
+                delta = parse_sse_delta(line)
+                if not delta:
+                    continue
+                parts.append(delta)
+                try:
+                    on_token(delta)
+                except Exception:
+                    pass
+    full = _strip_think_blocks("".join(parts))
+    if not full.strip():
+        raise RuntimeError("Model returned empty content (stream)")
+    return full
+
+
 def _model_is_reasoning(model_id: str) -> bool:
     try:
         from reasoning_models import is_no_reasoning_param, model_has_reasoning_capability

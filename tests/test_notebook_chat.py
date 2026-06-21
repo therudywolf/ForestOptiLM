@@ -65,6 +65,24 @@ class TestPureFunctions(unittest.TestCase):
         self.assertIn("мой вопрос", msgs[1]["content"])
         self.assertIn("Предыдущий диалог", msgs[1]["content"])
 
+    def test_build_messages_includes_schema(self) -> None:
+        ctx = nc.select_contexts([_Hit("содержимое", "C:/x/a.txt")], max_tokens=1000)
+        msgs = nc.build_chat_messages("q", ctx, schema="Домен: архитектура; сущности — ВМ и подсистемы.")
+        self.assertIn("[Контекст домена этого блокнота]", msgs[0]["content"])
+        self.assertIn("сущности — ВМ", msgs[0]["content"])
+
+    def test_build_messages_caps_long_schema(self) -> None:
+        # Ревью beta.11 #3: длинная схема не должна раздувать system-промпт.
+        ctx = nc.select_contexts([_Hit("c", "C:/x/a.txt")], max_tokens=1000)
+        msgs = nc.build_chat_messages("q", ctx, schema="Д" * 5000)
+        # system = базовый промпт + блок схемы (≤2000 символов схемы)
+        self.assertLessEqual(msgs[0]["content"].count("Д"), 2000)
+
+    def test_build_messages_no_schema_block_when_empty(self) -> None:
+        ctx = nc.select_contexts([_Hit("x", "C:/x/a.txt")], max_tokens=1000)
+        msgs = nc.build_chat_messages("q", ctx, schema="   ")
+        self.assertNotIn("Контекст домена", msgs[0]["content"])
+
     def test_build_messages_no_history_block_when_empty(self) -> None:
         ctx = nc.select_contexts([_Hit("x", "C:/x/a.txt")], max_tokens=1000)
         msgs = nc.build_chat_messages("q", ctx, history=[])
@@ -242,6 +260,94 @@ class TestAnswerQuestion(unittest.TestCase):
         self.assertEqual([c["n"] for c in res.citations], [1])
         self.assertEqual(len(res.contexts), 1)
         self.assertEqual(nb.last_query, "что такое xz?")
+
+
+class TestSSEParse(unittest.TestCase):
+    def test_extracts_delta_content(self) -> None:
+        import processor
+        line = 'data: {"choices":[{"delta":{"content":"Привет"}}]}'
+        self.assertEqual(processor.parse_sse_delta(line), "Привет")
+
+    def test_done_and_blank_and_garbage_return_none(self) -> None:
+        import processor
+        self.assertIsNone(processor.parse_sse_delta("data: [DONE]"))
+        self.assertIsNone(processor.parse_sse_delta(""))
+        self.assertIsNone(processor.parse_sse_delta(": keep-alive"))
+        self.assertIsNone(processor.parse_sse_delta("data: not-json"))
+        self.assertIsNone(processor.parse_sse_delta('data: {"choices":[{"delta":{}}]}'))
+
+
+class TestStreamingChat(unittest.TestCase):
+    def test_streams_on_openai_and_calls_on_token(self) -> None:
+        nb = _FakeNotebook([_Hit("grounding", "C:/x/a.txt")])
+        tokens: list[str] = []
+
+        async def fake_stream(messages, model, base_url, api_key, *, on_token, **kw):
+            for t in ["Это ", "ответ ", "[1]."]:
+                on_token(t)
+            return "Это ответ [1]."
+
+        with mock.patch("processor.call_llm_stream", new=fake_stream):
+            res = asyncio.run(nc.answer_question(
+                nb, "q", base_url="u", api_key="", chat_model="m", api_mode="openai",
+                on_token=tokens.append))
+        self.assertEqual("".join(tokens), "Это ответ [1].")
+        self.assertEqual([c["n"] for c in res.citations], [1])
+
+    def test_falls_back_to_call_llm_when_stream_errors(self) -> None:
+        nb = _FakeNotebook([_Hit("grounding", "C:/x/a.txt")])
+
+        async def boom_stream(messages, model, base_url, api_key, *, on_token, **kw):
+            raise RuntimeError("stream blew up")
+
+        async def fake_call_llm(messages, model, base_url, api_key, semaphore, **kw):
+            return "обычный ответ [1]."
+
+        with mock.patch("processor.call_llm_stream", new=boom_stream), \
+                mock.patch("processor.call_llm", new=fake_call_llm):
+            res = asyncio.run(nc.answer_question(
+                nb, "q", base_url="u", api_key="", chat_model="m", api_mode="openai",
+                on_token=lambda _t: None))
+        self.assertEqual(res.answer, "обычный ответ [1].")
+        self.assertFalse(res.refused)
+
+    def test_streams_even_in_native_mode(self) -> None:
+        # LM Studio отдаёт openai-совместимый эндпоинт и в native-режиме → стримим.
+        nb = _FakeNotebook([_Hit("grounding", "C:/x/a.txt")])
+        used = {"stream": False}
+
+        async def fake_stream(messages, model, base_url, api_key, *, on_token, **kw):
+            used["stream"] = True
+            on_token("ответ [1].")
+            return "ответ [1]."
+
+        with mock.patch("processor.call_llm_stream", new=fake_stream):
+            asyncio.run(nc.answer_question(
+                nb, "q", base_url="u", api_key="", chat_model="m", api_mode="native",
+                on_token=lambda _t: None))
+        self.assertTrue(used["stream"])
+
+    def test_no_streaming_in_precise_mode(self) -> None:
+        # «Точный поиск» (enhanced) использует свой много-вызовный путь, не стрим.
+        nb = _FakeNotebook([_Hit("grounding", "C:/x/a.txt", chunk_id="c1")])
+        used = {"stream": False}
+
+        async def fake_stream(messages, model, base_url, api_key, *, on_token, **kw):
+            used["stream"] = True
+            return "x"
+
+        async def fake_call_llm(messages, model, base_url, api_key, semaphore, **kw):
+            sys = messages[0]["content"]
+            if "формулировк" in sys or "реранкер" in sys:
+                return "[]"
+            return "ответ [1]."
+
+        with mock.patch("processor.call_llm_stream", new=fake_stream), \
+                mock.patch("processor.call_llm", new=fake_call_llm):
+            asyncio.run(nc.answer_question(
+                nb, "q", base_url="u", api_key="", chat_model="m", api_mode="native",
+                enhanced=True, on_token=lambda _t: None))
+        self.assertFalse(used["stream"])
 
 
 if __name__ == "__main__":
