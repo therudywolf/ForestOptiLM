@@ -72,18 +72,25 @@ def _nb_friendly_error(exc: Exception) -> str:
     return "Ошибка: " + sanitize_for_log(str(exc))
 
 # --- палитра (light, dark) ------------------------------------------------- #
-_ACCENT = "#2563eb"
-_ACCENT_HOVER = "#1d4ed8"
-_DANGER = "#b91c1c"
-_DANGER_HOVER = "#991b1b"
-_CARD_BG = ("#ffffff", "#212836")
-_CARD_BORDER = ("#e2e8f0", "#2f3947")
-_PANEL_BG = ("#f1f5f9", "#171c26")
-_ROW_BG = ("#f8fafc", "#1b212c")
-_MUTED = ("#64748b", "#94a3b8")
-_HINT = "gray"
-_USER_BUBBLE = ("#2563eb", "#2563eb")
-_BOT_BUBBLE = ("#e7ebf3", "#28313f")
+import md3 as _md3  # noqa: E402
+
+# Material Design 3 roles (dark scheme). Filled accent = light primary + dark
+# on-primary text (authentic MD3 filled button), so accent buttons MUST also set
+# text_color=_ON_ACCENT — otherwise default white text is unreadable on light.
+_ACCENT = _md3.PRIMARY
+_ACCENT_HOVER = _md3.PRIMARY_HOVER
+_ON_ACCENT = _md3.ON_PRIMARY
+_DANGER = _md3.ERROR_CONTAINER
+_DANGER_HOVER = "#A8000C"
+_ON_DANGER = "#FFDAD6"
+_CARD_BG = _md3.SURFACE_CONTAINER
+_CARD_BORDER = _md3.OUTLINE_VARIANT
+_PANEL_BG = _md3.SURFACE_CONTAINER_LOW
+_ROW_BG = _md3.SURFACE_CONTAINER_LOW
+_MUTED = _md3.ON_SURFACE_VARIANT
+_HINT = _md3.ON_SURFACE_VARIANT
+_USER_BUBBLE = _md3.PRIMARY_CONTAINER
+_BOT_BUBBLE = _md3.SURFACE_CONTAINER_HIGH
 _EMOJI_CHOICES = ["📓", "📚", "🔬", "🗂️", "🧠", "📊", "🛰️", "🧩", "📡", "🗃️", "💼", "⚖️"]
 
 
@@ -141,7 +148,7 @@ class NotebookUIMixin:
         ctk.CTkLabel(header, text="📚  Архив исследований",
                      font=ctk.CTkFont(size=20, weight="bold")).pack(side="left")
         ctk.CTkButton(header, text="＋  Новое исследование", height=36,
-                      fg_color=_ACCENT, hover_color=_ACCENT_HOVER,
+                      fg_color=_ACCENT, hover_color=_ACCENT_HOVER, text_color=_ON_ACCENT,
                       command=self._nb_on_new).pack(side="right")
         ctk.CTkEntry(header, textvariable=self._nb_search_var, height=36, width=260,
                      placeholder_text="🔍  Поиск по названию и описанию…"
@@ -222,7 +229,7 @@ class NotebookUIMixin:
                               "постройте индекс и спрашивайте — со ссылками на источники.",
                      text_color=_MUTED, justify="center").pack(pady=(6, 14))
         ctk.CTkButton(box, text="＋  Новое исследование", height=38, width=220,
-                      fg_color=_ACCENT, hover_color=_ACCENT_HOVER,
+                      fg_color=_ACCENT, hover_color=_ACCENT_HOVER, text_color=_ON_ACCENT,
                       command=self._nb_on_new).pack()
 
     def _nb_build_card(self, parent: ctk.CTkFrame, nb: "nbs.Notebook") -> ctk.CTkFrame:
@@ -256,9 +263,9 @@ class NotebookUIMixin:
         ctk.CTkLabel(footer, text=stats, text_color=_MUTED, font=ctk.CTkFont(size=11)).pack(side="left")
         ctk.CTkLabel(footer, text="● индекс" if nb.has_index else "○ нет индекса",
                      font=ctk.CTkFont(size=10),
-                     text_color=("#16a34a", "#4ade80") if nb.has_index else _MUTED).pack(side="right")
+                     text_color=(_md3.SUCCESS, _md3.SUCCESS) if nb.has_index else _MUTED).pack(side="right")
         ctk.CTkButton(card, text="Открыть  →", height=30, fg_color=_ACCENT,
-                      hover_color=_ACCENT_HOVER,
+                      hover_color=_ACCENT_HOVER, text_color=_ON_ACCENT,
                       command=lambda: self._nb_open(nb.id)).pack(fill="x", padx=14, pady=(4, 12))
 
         for w in (cover, title):
@@ -332,7 +339,7 @@ class NotebookUIMixin:
                         variable=self._nb_vision_var,
                         font=ctk.CTkFont(size=12)).pack(anchor="w", padx=12, pady=(0, 4))
         ctk.CTkButton(left, text="🔨  Построить / обновить индекс", command=self._nb_build_index,
-                      fg_color=_ACCENT, hover_color=_ACCENT_HOVER).pack(fill="x", padx=12, pady=(0, 12))
+                      fg_color=_ACCENT, hover_color=_ACCENT_HOVER, text_color=_ON_ACCENT).pack(fill="x", padx=12, pady=(0, 12))
 
     def _nb_build_chat_panel(self, center: ctk.CTkFrame) -> None:
         bar = ctk.CTkFrame(center, fg_color="transparent")
@@ -346,7 +353,7 @@ class NotebookUIMixin:
         ctk.CTkCheckBox(bar, text="🎯 Точный поиск", variable=self._nb_precise_var,
                         font=ctk.CTkFont(size=12)).pack(side="right", padx=(0, 10))
 
-        self._nb_chat_frame = ctk.CTkScrollableFrame(center, fg_color=("#f8fafc", "#0f141c"))
+        self._nb_chat_frame = ctk.CTkScrollableFrame(center, fg_color=_md3.SURFACE_CONTAINER_LOWEST)
         self._nb_chat_frame.pack(fill="both", expand=True)
 
         input_row = ctk.CTkFrame(center, fg_color="transparent")
@@ -354,12 +361,12 @@ class NotebookUIMixin:
         self._nb_question = ctk.CTkTextbox(input_row, height=64, wrap="word")
         self._nb_question.pack(side="left", fill="both", expand=True, padx=(0, 8))
         self._nb_ask_btn = ctk.CTkButton(input_row, text="Спросить ▶", width=110,
-                                         fg_color=_ACCENT, hover_color=_ACCENT_HOVER,
+                                         fg_color=_ACCENT, hover_color=_ACCENT_HOVER, text_color=_ON_ACCENT,
                                          command=self._nb_on_ask)
         self._nb_ask_btn.pack(side="left")
         # Кнопка «Стоп» появляется на месте «Спросить», пока идёт запрос.
         self._nb_stop_btn = ctk.CTkButton(input_row, text="⏹ Стоп", width=110,
-                                          fg_color="#b91c1c", hover_color="#7f1d1d",
+                                          fg_color=_md3.ERROR_CONTAINER, hover_color="#A8000C",
                                           command=self._nb_on_stop)
         self._nb_question.bind("<Control-Return>", lambda _e: (self._nb_on_ask(), "break")[1])
 
@@ -375,7 +382,7 @@ class NotebookUIMixin:
 
         # Слой знаний (LLM-Wiki): компиляция + проверка корпуса.
         ctk.CTkButton(right, text="📚  Скомпилировать знания (вики)", anchor="w",
-                      fg_color=_ACCENT, hover_color=_ACCENT_HOVER,
+                      fg_color=_ACCENT, hover_color=_ACCENT_HOVER, text_color=_ON_ACCENT,
                       command=self._nb_compile_wiki).pack(fill="x", padx=12, pady=(8, 2))
         ctk.CTkButton(right, text="🔍  Проверить блокнот", anchor="w",
                       fg_color="transparent", border_width=1,
@@ -392,7 +399,7 @@ class NotebookUIMixin:
     def _nb_open(self, notebook_id: str) -> None:
         nb = nbs.load_notebook(notebook_id)
         if nb is None:
-            self._nb_set_status("Блокнот не найден", "#f59e0b")
+            self._nb_set_status("Блокнот не найден", _md3.WARNING)
             self._nb_render_archive()
             return
         self._nb_current = nb
@@ -403,7 +410,7 @@ class NotebookUIMixin:
         self._nb_render_chat()
         self._nb_render_notes()
         self._nb_update_index_info()
-        self._nb_set_status(f"Открыт блокнот «{nb.name}»", "lightgreen")
+        self._nb_set_status(f"Открыт блокнот «{nb.name}»", _md3.SUCCESS)
 
     def _nb_back_to_archive(self) -> None:
         self._nb_current = None
@@ -431,7 +438,7 @@ class NotebookUIMixin:
         try:
             nb = nbs.create_notebook(name)
         except Exception as exc:  # noqa: BLE001
-            self._nb_set_status(f"Не удалось создать: {sanitize_for_log(str(exc))}", "#f87171")
+            self._nb_set_status(f"Не удалось создать: {sanitize_for_log(str(exc))}", _md3.ERROR)
             return
         self._append_log_line(f"[NB] создан блокнот {nb.id}", "general")
         self._nb_open(nb.id)
@@ -485,7 +492,12 @@ class NotebookUIMixin:
         def pick(e: str) -> None:
             chosen_emoji["v"] = e
             for ev, b in emoji_btns.items():
-                b.configure(fg_color=_ACCENT if ev == e else "transparent")
+                # Выбранная — светлый filled (нужен тёмный текст), остальные —
+                # прозрачные со светлым текстом (контраст на тёмной поверхности).
+                if ev == e:
+                    b.configure(fg_color=_ACCENT, text_color=_ON_ACCENT)
+                else:
+                    b.configure(fg_color="transparent", text_color=_md3.ON_SURFACE)
 
         for e in _EMOJI_CHOICES:
             b = ctk.CTkButton(emoji_row, text=e, width=34, height=34, fg_color="transparent",
@@ -501,10 +513,10 @@ class NotebookUIMixin:
             nb.set_meta(name=name_var.get(), description=desc_box.get("1.0", "end-1c"),
                         emoji=chosen_emoji["v"], schema=schema_box.get("1.0", "end-1c"))
             self._nb_render_workspace_header()
-            self._nb_set_status("Сохранено", "lightgreen")
+            self._nb_set_status("Сохранено", _md3.SUCCESS)
             top.destroy()
 
-        ctk.CTkButton(bar, text="Сохранить", fg_color=_ACCENT, hover_color=_ACCENT_HOVER,
+        ctk.CTkButton(bar, text="Сохранить", fg_color=_ACCENT, hover_color=_ACCENT_HOVER, text_color=_ON_ACCENT,
                       command=save).pack(side="left")
         ctk.CTkButton(bar, text="Отмена", fg_color="transparent", border_width=1,
                       command=top.destroy).pack(side="right")
@@ -523,7 +535,7 @@ class NotebookUIMixin:
             self._nb_current.add_path_source(Path(p))  # type: ignore[union-attr]
         self._nb_render_sources()
         self._nb_render_workspace_header()
-        self._nb_set_status(f"Добавлено источников: {len(paths)}", "lightgreen")
+        self._nb_set_status(f"Добавлено источников: {len(paths)}", _md3.SUCCESS)
 
     def _nb_add_folder(self) -> None:
         if not self._nb_require_notebook() or not self._nb_check_idle():
@@ -534,7 +546,7 @@ class NotebookUIMixin:
         self._nb_current.add_path_source(Path(path))  # type: ignore[union-attr]
         self._nb_render_sources()
         self._nb_render_workspace_header()
-        self._nb_set_status("Папка добавлена в источники", "lightgreen")
+        self._nb_set_status("Папка добавлена в источники", _md3.SUCCESS)
 
     def _nb_add_url(self) -> None:
         if not self._nb_require_notebook() or not self._nb_check_idle():
@@ -554,14 +566,14 @@ class NotebookUIMixin:
                 self._nb_after(self._nb_render_sources)
                 self._nb_after(self._nb_render_workspace_header)
                 self._nb_after(lambda: self._nb_set_status(
-                    f"Добавлен URL: {doc.title or doc.url}", "lightgreen"))
+                    f"Добавлен URL: {doc.title or doc.url}", _md3.SUCCESS))
                 self._nb_after(lambda: self._append_log_line(
                     f"[NB] url добавлен: {doc.url} ({len(doc.text)} симв.)", "general"))
             except UrlIngestError as exc:
-                self._nb_after(lambda e=exc: self._nb_set_status(f"URL: {e}", "#f87171"))
+                self._nb_after(lambda e=exc: self._nb_set_status(f"URL: {e}", _md3.ERROR))
             except Exception as exc:  # noqa: BLE001
                 safe = sanitize_for_log(str(exc))
-                self._nb_after(lambda: self._nb_set_status(f"Ошибка URL: {safe}", "#f87171"))
+                self._nb_after(lambda: self._nb_set_status(f"Ошибка URL: {safe}", _md3.ERROR))
             finally:
                 self._nb_after(lambda: self._nb_set_busy(False))
 
@@ -614,11 +626,11 @@ class NotebookUIMixin:
         if not self._nb_check_idle():
             return
         if not nb.index_input_paths():
-            self._nb_set_status("Добавьте хотя бы один источник", "#f59e0b")
+            self._nb_set_status("Добавьте хотя бы один источник", _md3.WARNING)
             return
         emb = self._pick_embedding_model()
         if not emb:
-            self._nb_set_status("Не выбрана embedding-модель (сайдбар)", "#f59e0b")
+            self._nb_set_status("Не выбрана embedding-модель (сайдбар)", _md3.WARNING)
             return
         base_url = self._url_var.get().strip() or API_BASE
         api_key = self._api_key_var.get().strip() or API_KEY
@@ -651,7 +663,7 @@ class NotebookUIMixin:
                 mode = "обновлён" if incremental else "пересобран"
                 self._nb_after(lambda: self._nb_set_status(
                     f"Индекс {mode}: {stats.chunks_total} фрагм. / {stats.files_total} файлов",
-                    "lightgreen"))
+                    _md3.SUCCESS))
                 self._nb_after(self._nb_update_index_info)
                 self._nb_after(self._nb_render_workspace_header)
                 self._nb_after(lambda: self._append_log_line(
@@ -659,7 +671,7 @@ class NotebookUIMixin:
                     "summary"))
             except Exception as exc:  # noqa: BLE001
                 safe = sanitize_for_log(str(exc))
-                self._nb_after(lambda: self._nb_set_status(f"Ошибка индекса: {safe}", "#f87171"))
+                self._nb_after(lambda: self._nb_set_status(f"Ошибка индекса: {safe}", _md3.ERROR))
             finally:
                 self._nb_after(lambda: self._nb_set_busy(False))
 
@@ -676,14 +688,14 @@ class NotebookUIMixin:
             return
         question = self._nb_question.get("1.0", "end-1c").strip()
         if not question:
-            self._nb_set_status("Введите вопрос", "#f59e0b")
+            self._nb_set_status("Введите вопрос", _md3.WARNING)
             return
         if not nb.has_index:
-            self._nb_set_status("Сначала постройте индекс блокнота", "#f59e0b")
+            self._nb_set_status("Сначала постройте индекс блокнота", _md3.WARNING)
             return
         model = self._model_var.get().strip()
         if not model or model.startswith("("):
-            self._nb_set_status("Выберите LLM-модель (сайдбар)", "#f59e0b")
+            self._nb_set_status("Выберите LLM-модель (сайдбар)", _md3.WARNING)
             return
         emb = self._pick_embedding_model()
         base_url = self._url_var.get().strip() or API_BASE
@@ -769,11 +781,11 @@ class NotebookUIMixin:
                                  contexts=result.contexts, refused=result.refused,
                                  question=question)
         if result.extra.get("cancelled"):
-            self._nb_set_status("Запрос остановлен", "#f59e0b")
+            self._nb_set_status("Запрос остановлен", _md3.WARNING)
         elif result.refused:
-            self._nb_set_status("В источниках нет ответа", "#f59e0b")
+            self._nb_set_status("В источниках нет ответа", _md3.WARNING)
         else:
-            self._nb_set_status("Ответ готов", "lightgreen")
+            self._nb_set_status("Ответ готов", _md3.SUCCESS)
 
     def _nb_render_chat(self) -> None:
         for w in self._nb_chat_frame.winfo_children():
@@ -812,7 +824,7 @@ class NotebookUIMixin:
         bubble = ctk.CTkFrame(outer, fg_color=_USER_BUBBLE if is_user else _BOT_BUBBLE,
                               corner_radius=12)
         bubble.pack(fill="x", anchor="w")
-        text_color = "white" if is_user else ("#111827", "#f3f4f6")
+        text_color = "white" if is_user else _md3.ON_SURFACE
         lbl = ctk.CTkLabel(bubble, text=content, wraplength=560, justify="left",
                            text_color=text_color, anchor="w")
         lbl.pack(anchor="w", padx=12, pady=9, fill="x")
@@ -874,10 +886,10 @@ class NotebookUIMixin:
                 path = wk.save_answer_page(nb, question, answer, citations=cites,
                                            base_url=base_url, api_key=api_key, embedding_model=emb)
                 self._nb_after(lambda: self._nb_set_status(
-                    f"Подшито в знания → {Path(path).name}", "lightgreen"))
+                    f"Подшито в знания → {Path(path).name}", _md3.SUCCESS))
             except Exception as exc:  # noqa: BLE001
                 safe = sanitize_for_log(str(exc))
-                self._nb_after(lambda: self._nb_set_status(f"Не удалось подшить: {safe}", "#f87171"))
+                self._nb_after(lambda: self._nb_set_status(f"Не удалось подшить: {safe}", _md3.ERROR))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -907,7 +919,7 @@ class NotebookUIMixin:
         btn_row = ctk.CTkFrame(top, fg_color="transparent")
         btn_row.pack(fill="x", padx=12, pady=(0, 12))
         if path:
-            ctk.CTkButton(btn_row, text="Открыть источник", fg_color=_ACCENT, hover_color=_ACCENT_HOVER,
+            ctk.CTkButton(btn_row, text="Открыть источник", fg_color=_ACCENT, hover_color=_ACCENT_HOVER, text_color=_ON_ACCENT,
                           command=lambda: self._nb_open_path(path)).pack(side="left")
         ctk.CTkButton(btn_row, text="Закрыть", fg_color="transparent", border_width=1,
                       command=top.destroy).pack(side="right")
@@ -932,11 +944,11 @@ class NotebookUIMixin:
         if not self._nb_check_idle():
             return
         if not nb.has_index:
-            self._nb_set_status("Сначала постройте индекс блокнота", "#f59e0b")
+            self._nb_set_status("Сначала постройте индекс блокнота", _md3.WARNING)
             return
         model = self._model_var.get().strip()
         if not model or model.startswith("("):
-            self._nb_set_status("Выберите LLM-модель (сайдбар)", "#f59e0b")
+            self._nb_set_status("Выберите LLM-модель (сайдбар)", _md3.WARNING)
             return
         base_url = self._url_var.get().strip() or API_BASE
         api_key = self._api_key_var.get().strip() or API_KEY
@@ -957,11 +969,11 @@ class NotebookUIMixin:
                     )
                 )
                 self._nb_after(lambda: self._nb_set_status(
-                    f"Готово: {spec.title} → {Path(path).name}", "lightgreen"))
+                    f"Готово: {spec.title} → {Path(path).name}", _md3.SUCCESS))
                 self._nb_after(self._nb_render_notes)
             except Exception as exc:  # noqa: BLE001
                 safe = sanitize_for_log(str(exc))
-                self._nb_after(lambda: self._nb_set_status(f"Ошибка генерации: {safe}", "#f87171"))
+                self._nb_after(lambda: self._nb_set_status(f"Ошибка генерации: {safe}", _md3.ERROR))
             finally:
                 loop.close()
                 self._nb_after(lambda: self._nb_set_busy(False))
@@ -976,11 +988,11 @@ class NotebookUIMixin:
         if not self._nb_check_idle():
             return
         if not nb.has_index:
-            self._nb_set_status("Сначала постройте индекс блокнота", "#f59e0b")
+            self._nb_set_status("Сначала постройте индекс блокнота", _md3.WARNING)
             return
         model = self._model_var.get().strip()
         if not model or model.startswith("("):
-            self._nb_set_status("Выберите LLM-модель (сайдбар)", "#f59e0b")
+            self._nb_set_status("Выберите LLM-модель (сайдбар)", _md3.WARNING)
             return
         base_url = self._url_var.get().strip() or API_BASE
         api_key = self._api_key_var.get().strip() or API_KEY
@@ -1002,11 +1014,11 @@ class NotebookUIMixin:
                 ))
                 n = len(res.get("pages") or [])
                 self._nb_after(lambda: self._nb_set_status(
-                    f"Готово: {n} вики-страниц → wiki/", "lightgreen"))
+                    f"Готово: {n} вики-страниц → wiki/", _md3.SUCCESS))
                 self._nb_after(lambda: self._nb_open_folder(nb.wiki_dir))
             except Exception as exc:  # noqa: BLE001
                 safe = sanitize_for_log(str(exc))
-                self._nb_after(lambda: self._nb_set_status(f"Ошибка компиляции: {safe}", "#f87171"))
+                self._nb_after(lambda: self._nb_set_status(f"Ошибка компиляции: {safe}", _md3.ERROR))
             finally:
                 loop.close()
                 self._nb_after(lambda: self._nb_set_busy(False))
@@ -1046,7 +1058,7 @@ class NotebookUIMixin:
         try:
             content = path.read_text(encoding="utf-8")
         except Exception as exc:  # noqa: BLE001
-            self._nb_set_status(f"Не удалось открыть заметку: {sanitize_for_log(str(exc))}", "#f87171")
+            self._nb_set_status(f"Не удалось открыть заметку: {sanitize_for_log(str(exc))}", _md3.ERROR)
             return
         top = ctk.CTkToplevel(self)
         top.title(path.name)
@@ -1084,20 +1096,20 @@ class NotebookUIMixin:
 
     def _nb_check_idle(self) -> bool:
         if self._nb_busy:
-            self._nb_set_status("Дождитесь завершения текущей операции", "#f59e0b")
+            self._nb_set_status("Дождитесь завершения текущей операции", _md3.WARNING)
             return False
         return True
 
     def _nb_require_notebook(self) -> bool:
         if self._nb_current is None:
-            self._nb_set_status("Сначала откройте или создайте блокнот", "#f59e0b")
+            self._nb_set_status("Сначала откройте или создайте блокнот", _md3.WARNING)
             return False
         return True
 
     def _nb_open_path(self, path: str) -> None:
         p = Path(path)
         if not p.exists():
-            self._nb_set_status(f"Файл недоступен: {p.name}", "#f59e0b")
+            self._nb_set_status(f"Файл недоступен: {p.name}", _md3.WARNING)
             return
         try:
             if os.name == "nt":
@@ -1107,7 +1119,7 @@ class NotebookUIMixin:
             else:
                 subprocess.Popen(["xdg-open", str(p)])
         except Exception as exc:  # noqa: BLE001
-            self._nb_set_status(f"Не удалось открыть: {sanitize_for_log(str(exc))}", "#f87171")
+            self._nb_set_status(f"Не удалось открыть: {sanitize_for_log(str(exc))}", _md3.ERROR)
 
     def _nb_set_busy(self, busy: bool, cancellable: bool = False) -> None:
         self._nb_busy = busy
@@ -1137,7 +1149,7 @@ class NotebookUIMixin:
             self._nb_stop_btn.configure(state="disabled", text="Останавливаю…")
         except Exception:
             pass
-        self._nb_set_status("Останавливаю запрос…", "#f59e0b")
+        self._nb_set_status("Останавливаю запрос…", _md3.WARNING)
 
     def _nb_set_status(self, text: str, color: str = _HINT) -> None:
         try:

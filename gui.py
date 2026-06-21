@@ -99,36 +99,21 @@ TAB_RESULT: Final = "📊  Результат"
 TAB_LOGS: Final = "🧾  Логи"
 TAB_RAG: Final = "🔎  RAG"
 
-# Фирменный акцент — фиолетово-индиго, как иконка (полумесяц на индиго-сквиркле).
-_BRAND_ACCENT = ["#7c6cf0", "#6d5dfc"]
-_BRAND_ACCENT_HOVER = ["#6354e0", "#5a4bd6"]
+import md3 as _md3  # noqa: E402
+
+# Material Design 3 status colours (used for transient status-line messages).
+_STATUS_OK = _md3.SUCCESS
+_STATUS_WARN = _md3.WARNING
+_STATUS_ERR = _md3.ERROR
 
 
 def _apply_brand_theme() -> None:
-    """Перекрасить акцент CustomTkinter под бренд (вместо генерик-синего)."""
+    """Apply the Material Design 3 dark theme globally (colour roles, shape,
+    surfaces) — see md3.apply()."""
     try:
-        tm = ctk.ThemeManager.theme
+        _md3.apply()
     except Exception:
-        return
-
-    def setk(widget: str, **kw: object) -> None:
-        d = tm.get(widget)
-        if isinstance(d, dict):
-            for k, v in kw.items():
-                if k in d:
-                    d[k] = v
-
-    a, ah = _BRAND_ACCENT, _BRAND_ACCENT_HOVER
-    setk("CTkButton", fg_color=a, hover_color=ah)
-    setk("CTkOptionMenu", fg_color=a, button_color=ah, button_hover_color=a)
-    setk("CTkComboBox", button_color=a, button_hover_color=ah, border_color=a)
-    setk("CTkSegmentedButton", selected_color=a, selected_hover_color=ah)
-    setk("CTkProgressBar", progress_color=a)
-    setk("CTkSlider", progress_color=a, button_color=a, button_hover_color=ah)
-    setk("CTkCheckBox", fg_color=a, hover_color=ah)
-    setk("CTkRadioButton", fg_color=a, hover_color=ah)
-    setk("CTkSwitch", progress_color=a)
-    setk("CTkEntry", border_color=a)
+        pass
 
 
 class NocturneApp(NotebookUIMixin, ctk.CTk):
@@ -189,7 +174,7 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
     def _build_ui(self) -> None:
         # ---- sidebar ----
         sidebar_container = ctk.CTkFrame(self, width=300, corner_radius=0,
-                                         fg_color=("#dcdcdc", "#2b2b2b"))
+                                         fg_color=_md3.SURFACE_CONTAINER_HIGH)
         sidebar_container.pack(side="left", fill="y")
         sidebar_container.pack_propagate(False)
         sidebar = ctk.CTkScrollableFrame(
@@ -213,7 +198,7 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
                      font=ctk.CTkFont(size=15, weight="bold")
                      ).pack(anchor="w", pady=(14, 0), **pad)
         ctk.CTkLabel(sb, text="Массовая обработка файлов через LLM",
-                     text_color="gray", font=ctk.CTkFont(size=11)
+                     text_color=_md3.ON_SURFACE_VARIANT, font=ctk.CTkFont(size=11)
                      ).pack(anchor="w", pady=(0, 10), **pad)
 
         # Провайдер — быстрая настройка сервера (LM Studio / Ollama / OpenAI-совм.)
@@ -227,7 +212,7 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
         )
         self._provider_menu.pack(fill="x", pady=3, **pad)
         self._provider_hint = ctk.CTkLabel(
-            sb, text="", text_color="gray", font=ctk.CTkFont(size=11),
+            sb, text="", text_color=_md3.ON_SURFACE_VARIANT, font=ctk.CTkFont(size=11),
             wraplength=250, justify="left",
         )
         self._provider_hint.pack(anchor="w", pady=(0, 4), **pad)
@@ -266,7 +251,7 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
         )
         self._model_menu.pack(fill="x", pady=3, **pad)
         ctk.CTkLabel(sb, text="Чат-модель для генерации ответов.",
-                     text_color="gray", font=ctk.CTkFont(size=11),
+                     text_color=_md3.ON_SURFACE_VARIANT, font=ctk.CTkFont(size=11),
                      wraplength=250, justify="left",
                      ).pack(anchor="w", pady=(0, 4), **pad)
         ctk.CTkButton(
@@ -282,7 +267,7 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
         # Context length — auto-detected label
         self._ctx_label = ctk.CTkLabel(
             sb, text="Контекст модели: не определён",
-            text_color="gray", font=ctk.CTkFont(size=11),
+            text_color=_md3.ON_SURFACE_VARIANT, font=ctk.CTkFont(size=11),
             wraplength=250, justify="left",
         )
         self._ctx_label.pack(anchor="w", pady=(8, 4), **pad)
@@ -291,7 +276,7 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
             sb,
             text="Контекст берётся автоматически из LM Studio "
                  "(loaded_context_length/context_length).",
-            text_color="gray",
+            text_color=_md3.ON_SURFACE_VARIANT,
             font=ctk.CTkFont(size=11),
             wraplength=250,
             justify="left",
@@ -303,7 +288,7 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
                      ).pack(anchor="w", pady=(8, 0), **pad)
         ctk.CTkLabel(
             sb, text="Сколько чанков обрабатывать одновременно.",
-            text_color="gray", font=ctk.CTkFont(size=11),
+            text_color=_md3.ON_SURFACE_VARIANT, font=ctk.CTkFont(size=11),
             wraplength=250, justify="left",
         ).pack(anchor="w", pady=(0, 2), **pad)
         self._workers_var = ctk.StringVar(value="3")
@@ -444,15 +429,15 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
         ).pack(side="left", padx=(0, 4))
         ctk.CTkButton(
             mode_row, text="1M+", width=56, height=26,
-            fg_color="#1d4ed8",
+            fg_color=_md3.PRIMARY_CONTAINER,
             command=lambda: self._apply_run_profile("large_corpus"),
         ).pack(side="left")
         ctk.CTkButton(
             sb,
             text="Пресет: корпус 1M+",
             height=28,
-            fg_color="#1d4ed8",
-            hover_color="#1e40af",
+            fg_color=_md3.PRIMARY_CONTAINER,
+            hover_color=_md3.PRIMARY_CONTAINER_HOVER,
             command=self._on_large_corpus_preset,
         ).pack(fill="x", pady=(2, 4), **pad)
 
@@ -473,7 +458,7 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
 
         self._file_label = ctk.CTkLabel(
             panel, text="Файл или папка не выбраны",
-            text_color="gray", anchor="w",
+            text_color=_md3.ON_SURFACE_VARIANT, anchor="w",
         )
         self._file_label.pack(anchor="w", pady=(2, 10), fill="x")
 
@@ -488,13 +473,13 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
         act_row.pack(anchor="w", fill="x", pady=(0, 8))
         self._start_btn = ctk.CTkButton(
             act_row, text="▶  СТАРТ", width=120,
-            fg_color="#1d4ed8", hover_color="#1e40af",
+            fg_color=_md3.PRIMARY_CONTAINER, hover_color=_md3.PRIMARY_CONTAINER_HOVER,
             command=self._on_start,
         )
         self._start_btn.pack(side="left", padx=(0, 8))
         self._stop_btn = ctk.CTkButton(
             act_row, text="■  Стоп", width=90,
-            fg_color="#7f1d1d", hover_color="#991b1b",
+            fg_color=_md3.ERROR_CONTAINER, hover_color="#A8000C",
             state="disabled", command=self._on_stop,
         )
         self._stop_btn.pack(side="left")
@@ -512,8 +497,8 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
         ).pack(side="left", padx=(6, 0))
         ctk.CTkButton(
             act_row, text="Продолжить", width=100,
-            fg_color="#1d4ed8",
-            hover_color="#1e40af",
+            fg_color=_md3.PRIMARY_CONTAINER,
+            hover_color=_md3.PRIMARY_CONTAINER_HOVER,
             command=self._on_resume_job,
         ).pack(side="left", padx=(6, 0))
 
@@ -522,14 +507,14 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
         self._progress_bar.pack(fill="x", pady=(0, 2))
         self._progress_bar.set(0)
         self._status_label = ctk.CTkLabel(
-            panel, text="Готов к работе", anchor="w", text_color="gray",
+            panel, text="Готов к работе", anchor="w", text_color=_md3.ON_SURFACE_VARIANT,
         )
         self._status_label.pack(anchor="w", pady=(0, 4))
         self._preflight_label = ctk.CTkLabel(
             panel,
             text="Preflight: выберите файл и модель",
             anchor="w",
-            text_color="gray",
+            text_color=_md3.ON_SURFACE_VARIANT,
             wraplength=820,
             justify="left",
         )
@@ -538,7 +523,7 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
             panel,
             text="Активная модель в LM Studio: неизвестно",
             anchor="w",
-            text_color="gray",
+            text_color=_md3.ON_SURFACE_VARIANT,
         )
         self._loaded_model_label.pack(anchor="w", pady=(0, 8))
 
@@ -547,7 +532,7 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
             panel,
             text="",
             anchor="w",
-            text_color="#6ee7b7",
+            text_color=_STATUS_OK,
             wraplength=820,
             justify="left",
         )
@@ -809,7 +794,7 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
             pass
         try:
             if not self._closing and self.winfo_exists():
-                self._set_status("Внутренняя ошибка интерфейса (см. лог) — приложение продолжит работу", "#f59e0b")
+                self._set_status("Внутренняя ошибка интерфейса (см. лог) — приложение продолжит работу", _STATUS_WARN)
         except Exception:
             pass
 
@@ -912,14 +897,14 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
 
     def _on_build_index(self) -> None:
         if self._running:
-            self._set_status("Дождитесь завершения текущей задачи", "#f59e0b")
+            self._set_status("Дождитесь завершения текущей задачи", _STATUS_WARN)
             return
         if self._folder_path is None and self._file_path is None:
-            self._set_status("Выберите файл или папку для индекса", "#f59e0b")
+            self._set_status("Выберите файл или папку для индекса", _STATUS_WARN)
             return
         emb = self._pick_embedding_model()
         if not emb:
-            self._set_status("Не выбрана embedding-модель", "#f59e0b")
+            self._set_status("Не выбрана embedding-модель", _STATUS_WARN)
             return
         index_dir = Path(self._rag_index_dir_var.get().strip() or ".nocturne_index")
         base_url = self._url_var.get().strip() or API_BASE
@@ -943,7 +928,7 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
                     chunk_size_tokens=chunk_size,
                 )
                 self.after(0, lambda: self._set_status(
-                    f"Индекс готов: chunks={stats.chunks_total}, files={stats.files_total}", "lightgreen"
+                    f"Индекс готов: chunks={stats.chunks_total}, files={stats.files_total}", _STATUS_OK
                 ))
                 self.after(0, lambda: self._append_log_line(
                     f"[RAG] index built dir={stats.index_dir} chunks={stats.chunks_total} files={stats.files_total}",
@@ -951,22 +936,22 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
                 ))
             except Exception as exc:
                 safe = sanitize_for_log(str(exc))
-                self.after(0, lambda: self._set_status(f"Ошибка индекса: {safe}", "#f87171"))
+                self.after(0, lambda: self._set_status(f"Ошибка индекса: {safe}", _STATUS_ERR))
 
         threading.Thread(target=do_build, daemon=True).start()
 
     def _on_rag_ask(self) -> None:
         question = self._rag_question_text.get("1.0", "end-1c").strip()
         if not question:
-            self._set_status("Введите вопрос для RAG", "#f59e0b")
+            self._set_status("Введите вопрос для RAG", _STATUS_WARN)
             return
         emb = self._pick_embedding_model()
         if not emb:
-            self._set_status("Не выбрана embedding-модель", "#f59e0b")
+            self._set_status("Не выбрана embedding-модель", _STATUS_WARN)
             return
         model = self._model_var.get().strip()
         if not model or model.startswith("("):
-            self._set_status("Выберите LLM модель", "#f59e0b")
+            self._set_status("Выберите LLM модель", _STATUS_WARN)
             return
         try:
             top_k = max(1, int(self._rag_top_k_var.get().strip() or "8"))
@@ -993,7 +978,7 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
                 if not contexts:
                     self.after(0, lambda: self._rag_answer_text.delete("1.0", "end"))
                     self.after(0, lambda: self._rag_answer_text.insert("1.0", "Контексты не найдены в индексе."))
-                    self.after(0, lambda: self._set_status("RAG: контексты не найдены", "#f59e0b"))
+                    self.after(0, lambda: self._set_status("RAG: контексты не найдены", _STATUS_WARN))
                     return
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
@@ -1013,17 +998,17 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
                     loop.close()
                 self.after(0, lambda: self._rag_answer_text.delete("1.0", "end"))
                 self.after(0, lambda a=answer: self._rag_answer_text.insert("1.0", a))
-                self.after(0, lambda: self._set_status("RAG: ответ готов", "lightgreen"))
+                self.after(0, lambda: self._set_status("RAG: ответ готов", _STATUS_OK))
             except Exception as exc:
                 safe = sanitize_for_log(str(exc))
-                self.after(0, lambda: self._set_status(f"RAG ошибка: {safe}", "#f87171"))
+                self.after(0, lambda: self._set_status(f"RAG ошибка: {safe}", _STATUS_ERR))
 
         threading.Thread(target=do_ask, daemon=True).start()
 
     def _on_recalc_selected_model_context(self) -> None:
         model = self._model_var.get().strip()
         if not model or model.startswith("("):
-            self._set_status("Сначала выберите модель", "#f59e0b")
+            self._set_status("Сначала выберите модель", _STATUS_WARN)
             return
         base_url = self._url_var.get().strip() or API_BASE
         api_key = self._api_key_var.get().strip() or API_KEY
@@ -1046,7 +1031,7 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
                     0,
                     lambda: self._set_status(
                         f"Контекст {model}: {ctx:,} (source={source}, state={state})".replace(",", " "),
-                        "lightgreen",
+                        _STATUS_OK,
                     ),
                 )
                 self.after(
@@ -1061,7 +1046,7 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
                     0,
                     lambda: self._set_status(
                         f"Не удалось пересчитать контекст {model} (state={state})",
-                        "#f59e0b",
+                        _STATUS_WARN,
                     ),
                 )
 
@@ -1169,7 +1154,7 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
             pass
         self._persist_runtime_state()
         self._update_preflight_label()
-        self._set_status(f"Режим: {name}", "lightgreen")
+        self._set_status(f"Режим: {name}", _STATUS_OK)
 
     def _on_large_corpus_preset(self) -> None:
         """Пресет для анализа очень больших папок/архивов: scout + composer + меньшие чанки."""
@@ -1225,7 +1210,7 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
                             "status": st.get("status", "running"),
                         }]
         if not jobs:
-            self._set_status("Нет незавершённых задач для продолжения", "#f59e0b")
+            self._set_status("Нет незавершённых задач для продолжения", _STATUS_WARN)
             return
 
         dlg = ctk.CTkToplevel(self)
@@ -1241,7 +1226,7 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
         def _pick(job: dict[str, object]) -> None:
             src = str(job.get("source_path") or "").strip()
             if not src or not Path(src).exists():
-                self._set_status("Исходный путь недоступен — выберите тот же файл/папку вручную", "#f59e0b")
+                self._set_status("Исходный путь недоступен — выберите тот же файл/папку вручную", _STATUS_WARN)
                 dlg.destroy()
                 return
             self._apply_source_path(Path(src))
@@ -1265,7 +1250,7 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
             total = int(job.get("chunks_total") or 0)
             src = str(job.get("source_path") or "")
             preview = str(job.get("query_preview") or "")[:120]
-            row = ctk.CTkFrame(scroll, fg_color="#1e293b")
+            row = ctk.CTkFrame(scroll, fg_color=_md3.SURFACE_CONTAINER)
             row.pack(fill="x", pady=4)
             ctk.CTkLabel(
                 row,
@@ -1282,7 +1267,7 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
     def _on_dry_run(self) -> None:
         selected = self._file_path or self._folder_path
         if not selected:
-            self._set_status("Выберите файл или папку для оценки", "#f59e0b")
+            self._set_status("Выберите файл или папку для оценки", _STATUS_WARN)
             return
         query = self._query_text.get("1.0", "end").strip() or "(без запроса)"
         model = self._model_var.get().strip()
@@ -1306,10 +1291,10 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
                 )
                 text = format_plan_ru(plan)
                 self.after(0, lambda: self._preflight_label.configure(text=f"Оценка: {text}"))
-                self.after(0, lambda: self._set_status("Dry-run готов (без вызовов LLM)", "lightgreen"))
+                self.after(0, lambda: self._set_status("Dry-run готов (без вызовов LLM)", _STATUS_OK))
             except Exception as exc:
                 safe = sanitize_for_log(str(exc))
-                self.after(0, lambda: self._set_status(f"Оценка: {safe}", "#f87171"))
+                self.after(0, lambda: self._set_status(f"Оценка: {safe}", _STATUS_ERR))
 
         self._set_status("Считаю чанки и объём…")
         threading.Thread(target=work, daemon=True).start()
@@ -1398,7 +1383,7 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
         )
         ok, err = self._validate_lm_connection_fields()
         if not ok:
-            self._set_status(err, "#f59e0b")
+            self._set_status(err, _STATUS_WARN)
             return
 
         def do_fetch() -> None:
@@ -1418,7 +1403,7 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
                 )
             except Exception as exc:
                 safe = sanitize_for_log(str(exc))
-                self.after(0, lambda s=safe: self._set_status(f"Ошибка: {s}", "#f87171"))
+                self.after(0, lambda s=safe: self._set_status(f"Ошибка: {s}", _STATUS_ERR))
 
         self._set_status(f"Загружаю список моделей… ({mode_state.get('api_mode', 'native')})")
         threading.Thread(target=do_fetch, daemon=True).start()
@@ -1490,7 +1475,7 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
             )
             self._ctx_label.configure(
                 text=f"Контекст модели: {ctx:,} токенов ({source_hint})".replace(",", " "),
-                text_color="lightgreen",
+                text_color=_STATUS_OK,
             )
         else:
             self._ctx_label.configure(
@@ -1498,7 +1483,7 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
                     "Контекст модели: не определён, используется fallback "
                     f"{CONTEXT_FALLBACK:,}".replace(",", " ")
                 ),
-                text_color="#f59e0b",
+                text_color=_STATUS_WARN,
             )
 
     def _get_context_budget(self) -> int:
@@ -1532,7 +1517,7 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
             f"url={preset.base_url if preset.autofills_url else '(вручную)'}",
             "preflight",
         )
-        self._set_status(f"Провайдер: {preset.label}", "lightgreen")
+        self._set_status(f"Провайдер: {preset.label}", _STATUS_OK)
 
     def _on_download_model_dialog(self) -> None:
         """Скачать модель в LM Studio (REST v1 /api/v1/models/download + status)."""
@@ -1550,11 +1535,11 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
         ctk.CTkLabel(
             dlg,
             text="Идентификатор модели (например, repo из каталога LM Studio / HF).",
-            text_color="gray", font=ctk.CTkFont(size=11), wraplength=420, justify="left",
+            text_color=_md3.ON_SURFACE_VARIANT, font=ctk.CTkFont(size=11), wraplength=420, justify="left",
         ).pack(pady=(0, 6))
         model_var = ctk.StringVar(value="")
         ctk.CTkEntry(dlg, textvariable=model_var, width=420).pack(pady=4)
-        status = ctk.CTkLabel(dlg, text="", text_color="gray", wraplength=420, justify="left")
+        status = ctk.CTkLabel(dlg, text="", text_color=_md3.ON_SURFACE_VARIANT, wraplength=420, justify="left")
         status.pack(pady=6)
 
         def _set(text: str, color: str = "gray") -> None:
@@ -1566,16 +1551,16 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
                 return  # диалог закрыт — прекращаем опрос (загрузка продолжится на сервере)
             st = lmsapi.get_model_download_status(root, api_key, job_id)
             if "error" in st:
-                self.after(0, lambda: _set(f"Статус недоступен: {st['error']}", "#f59e0b"))
+                self.after(0, lambda: _set(f"Статус недоступен: {st['error']}", _STATUS_WARN))
                 return
             state = str(st.get("status") or st.get("state") or "").lower()
             prog = st.get("progress")
             pct = f" {float(prog) * 100:.0f}%" if isinstance(prog, (int, float)) else ""
             if state in ("completed", "done", "success", "finished"):
-                self.after(0, lambda: _set("Готово ✓ — обновите список моделей.", "lightgreen"))
+                self.after(0, lambda: _set("Готово ✓ — обновите список моделей.", _STATUS_OK))
                 return
             if state in ("failed", "error", "cancelled", "canceled"):
-                self.after(0, lambda: _set(f"Не удалось: {sanitize_for_log(str(st))[:200]}", "#f87171"))
+                self.after(0, lambda: _set(f"Не удалось: {sanitize_for_log(str(st))[:200]}", _STATUS_ERR))
                 return
             self.after(0, lambda: _set(f"Загрузка…{pct} ({state or 'в процессе'})"))
             if not self._closing and self.winfo_exists() and dlg.winfo_exists():
@@ -1585,20 +1570,20 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
         def _start() -> None:
             model = model_var.get().strip()
             if not model:
-                _set("Укажите идентификатор модели.", "#f59e0b")
+                _set("Укажите идентификатор модели.", _STATUS_WARN)
                 return
             _set("Запуск загрузки…")
 
             def _worker() -> None:
                 resp = lmsapi.start_model_download(root, api_key, model)
                 if "error" in resp:
-                    self.after(0, lambda: _set(f"Ошибка: {resp['error']}", "#f87171"))
+                    self.after(0, lambda: _set(f"Ошибка: {resp['error']}", _STATUS_ERR))
                     return
                 job_id = str(resp.get("job_id") or resp.get("id") or "").strip()
                 if not job_id:
                     self.after(0, lambda: _set(
                         "Загрузка запущена (job_id не вернулся). "
-                        "Проверьте прогресс в LM Studio.", "lightgreen"))
+                        "Проверьте прогресс в LM Studio.", _STATUS_OK))
                     return
                 threading.Thread(target=_poll, args=(job_id,), daemon=True).start()
 
@@ -1614,7 +1599,7 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
         )
         ok, err = self._validate_lm_connection_fields()
         if not ok:
-            self._set_status(err, "#f59e0b")
+            self._set_status(err, _STATUS_WARN)
             return
         base_url = self._url_var.get().strip() or API_BASE
         api_key  = self._api_key_var.get().strip() or API_KEY
@@ -1631,7 +1616,7 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
                 chat_model=chat if full else None,
             )
             msg = sanitize_for_log(msg)
-            color = "lightgreen" if ok else "#f87171"
+            color = _STATUS_OK if ok else _STATUS_ERR
             self.after(0, lambda: self._status_label.configure(
                 text=f"LM Studio: {msg}", text_color=color,
             ))
@@ -1647,19 +1632,19 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
         )
         ok, err = self._validate_lm_connection_fields()
         if not ok:
-            self._set_status(err, "#f59e0b")
+            self._set_status(err, _STATUS_WARN)
             return
         base_url = self._url_var.get().strip() or API_BASE
         api_key = self._api_key_var.get().strip() or API_KEY
         vm = self._vision_model_var.get().strip() or self._model_var.get().strip()
         if not vm or vm.startswith("("):
-            self._set_status("Выберите Vision-модель или основную LLM", "#f59e0b")
+            self._set_status("Выберите Vision-модель или основную LLM", _STATUS_WARN)
             return
 
         def do_test() -> None:
             ok, msg = check_vision_capability(base_url, api_key, vm)
             msg = sanitize_for_log(msg)
-            color = "lightgreen" if ok else "#f87171"
+            color = _STATUS_OK if ok else _STATUS_ERR
             self.after(0, lambda: self._append_log_line(f"[VISION check] {msg}", "vision_map"))
             self.after(0, lambda: self._status_label.configure(text=f"Vision: {msg}", text_color=color))
 
@@ -1691,7 +1676,7 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
         if ok:
             self._set_status(
                 f"Большой корпус ({reason}): при старте включим scout и пресет 1M+ автоматически",
-                "#93c5fd",
+                _md3.PRIMARY,
             )
 
     def _auto_apply_large_corpus_if_needed(self, selected: Path) -> str | None:
@@ -1746,7 +1731,7 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
 
         ok_lm, err_lm = self._validate_lm_connection_fields()
         if not ok_lm:
-            self._set_status(err_lm, "#f59e0b")
+            self._set_status(err_lm, _STATUS_WARN)
             return
 
         model = self._model_var.get().strip()
@@ -1983,7 +1968,7 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
                         thr = msg.get("scout_threshold", 0.35)
                         self._set_status(
                             f"Scout готов: deep MAP {deep}, пропущено {skipped} (порог {thr})",
-                            "lightgreen",
+                            _STATUS_OK,
                         )
                         self._append_log_line(
                             f"[SCOUT done] deep_map={deep} skipped={skipped} threshold={thr}",
@@ -2128,7 +2113,7 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
                             f"[SECTION REDUCE] {cur}/{total} file={sf}", "reduce"
                         )
                     elif phase == "synthesize":
-                        self._set_status("Синтез финального отчёта…", "lightgreen")
+                        self._set_status("Синтез финального отчёта…", _STATUS_OK)
                         self._append_log_line("[SYNTHESIZE] финальный синтез секций", "reduce")
                     elif phase == "reduce_merge":
                         ml = msg.get("merge_level", 0)
@@ -2153,7 +2138,7 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
                     elif phase == "meta_plan_done":
                         preview = str(msg.get("preview", ""))[:200]
                         self._append_log_line(f"[META PLAN done] directive={preview}…", "preflight")
-                        self._set_status("Оптимальный промт готов, запускаю MAP…", "lightgreen")
+                        self._set_status("Оптимальный промт готов, запускаю MAP…", _STATUS_OK)
                         # Show meta-prompt preview label
                         short = preview[:120] + ("…" if len(preview) >= 120 else "")
                         self._meta_prompt_label.configure(
@@ -2166,11 +2151,11 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
                         self._append_log_line(f"[RAG {phase}] {cur}/{total}", "general")
                     elif phase == "aggregate":
                         preview = str(msg.get("preview", ""))[:200]
-                        self._set_status("Агрегация (детерминированная)…", "lightgreen")
+                        self._set_status("Агрегация (детерминированная)…", _STATUS_OK)
                         self._append_log_line(f"[AGGREGATE] {preview}", "map_metrics")
                     elif phase == "run_diff":
                         preview = str(msg.get("preview", ""))[:200]
-                        self._set_status("Сравнение с прошлым прогоном…", "lightgreen")
+                        self._set_status("Сравнение с прошлым прогоном…", _STATUS_OK)
                         self._append_log_line(f"[RUN DIFF] {preview}", "map_metrics")
                     elif phase == "reduce":
                         self._set_status(f"REDUCE: группа {cur} / {total}…")
@@ -2182,7 +2167,7 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
                         self._set_status(
                             f"Остановлено: {cur}/{total} чанков в кэше — "
                             "нажмите «Продолжить» для возобновления",
-                            "#f59e0b",
+                            _STATUS_WARN,
                         )
                         self._append_log_line(
                             f"[STOPPED] map {cur}/{total} cached", "preflight",
@@ -2195,7 +2180,7 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
                     self._result_text.delete("1.0", "end")
                     self._result_text.insert("1.0", text)
                     self._progress_bar.set(1.0)
-                    self._set_status("Готово ✓", "lightgreen")
+                    self._set_status("Готово ✓", _STATUS_OK)
 
                 elif t == MSG_RESULT_DF:
                     df    = msg.get("df")
@@ -2211,7 +2196,7 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
                     self._progress_bar.set(1.0)
                     self._set_status(
                         f"Готово ✓  →  {saved}" if saved else "Готово ✓",
-                        "lightgreen",
+                        _STATUS_OK,
                     )
 
                 elif t == MSG_ERROR:
@@ -2226,7 +2211,7 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
                         pass
                     self._result_text.delete("1.0", "end")
                     self._result_text.insert("1.0", f"ОШИБКА:\n{err}\n\n{hint}")
-                    self._set_status(f"Ошибка: {err[:100]}", "#f87171")
+                    self._set_status(f"Ошибка: {err[:100]}", _STATUS_ERR)
                     self._append_log_line(f"[ERROR] {err}", "error")
 
                 elif t == MSG_JOB_ID:
@@ -2283,13 +2268,13 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
                     try:
                         self._export_to_docx(out_path, text)
                     except Exception as exc:
-                        self._set_status(f"DOCX экспорт недоступен: {sanitize_for_log(str(exc))}", "#f87171")
+                        self._set_status(f"DOCX экспорт недоступен: {sanitize_for_log(str(exc))}", _STATUS_ERR)
                         return
                 elif ext == ".pdf":
                     try:
                         self._export_to_pdf(out_path, text)
                     except Exception as exc:
-                        self._set_status(f"PDF экспорт недоступен: {sanitize_for_log(str(exc))}", "#f87171")
+                        self._set_status(f"PDF экспорт недоступен: {sanitize_for_log(str(exc))}", _STATUS_ERR)
                         return
                 else:
                     out_path.write_text(text, encoding="utf-8")
@@ -2351,7 +2336,7 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
             f"Preflight: ctx={ctx} chunk≈{chunk} scout={scout} workers={self._workers_var.get()} | {path_s}"
         )
         text = f"{base} || {plan_line}" if plan_line else base
-        self._preflight_label.configure(text=text.replace(",", " "), text_color="gray")
+        self._preflight_label.configure(text=text.replace(",", " "), text_color=_md3.ON_SURFACE_VARIANT)
 
     def _maybe_first_run_wizard(self) -> None:
         from first_run import is_first_run, mark_first_run_complete
@@ -2373,7 +2358,7 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
 
     def _export_result(self, ext: str) -> None:
         if not self._last_result_text:
-            self._set_status("Нет результата для экспорта", "#f59e0b")
+            self._set_status("Нет результата для экспорта", _STATUS_WARN)
             return
         p = ctk.filedialog.asksaveasfilename(defaultextension=ext, filetypes=[("All", "*.*")])
         if p:
