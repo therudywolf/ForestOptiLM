@@ -104,6 +104,7 @@ class NotebookUIMixin:
         self._nb_current = None
         self._nb_busy = False
         self._nb_chat_stop = threading.Event()  # кооперативная отмена запроса чата
+        self._nb_precise_var = ctk.BooleanVar(value=False)  # «Точный поиск» (expansion+rerank)
         self._nb_view = "archive"
         self._nb_relayout_after: str | None = None
         self._nb_search_var = ctk.StringVar(value="")
@@ -340,6 +341,10 @@ class NotebookUIMixin:
                      ).pack(side="left")
         ctk.CTkButton(bar, text="Очистить", width=92, fg_color="transparent", border_width=1,
                       command=self._nb_clear_chat).pack(side="right")
+        # «Точный поиск»: query-expansion + LLM-реранк (точнее, но на пару запросов
+        # к модели дольше) — по мотивам qmd/LLM-Wiki. По умолчанию выкл.
+        ctk.CTkCheckBox(bar, text="🎯 Точный поиск", variable=self._nb_precise_var,
+                        font=ctk.CTkFont(size=12)).pack(side="right", padx=(0, 10))
 
         self._nb_chat_frame = ctk.CTkScrollableFrame(center, fg_color=("#f8fafc", "#0f141c"))
         self._nb_chat_frame.pack(fill="both", expand=True)
@@ -367,6 +372,11 @@ class NotebookUIMixin:
             spec = MATERIALS[kind]
             ctk.CTkButton(right, text=spec.title, anchor="w",
                           command=lambda k=kind: self._nb_generate(k)).pack(fill="x", padx=12, pady=2)
+
+        # Lint-проверка корпуса (по мотивам LLM-Wiki): противоречия/устаревшее/пробелы.
+        ctk.CTkButton(right, text="🔍  Проверить блокнот", anchor="w",
+                      fg_color="transparent", border_width=1,
+                      command=lambda: self._nb_generate("lint")).pack(fill="x", padx=12, pady=(8, 2))
 
         ctk.CTkLabel(right, text="Заметки", text_color=_MUTED, font=ctk.CTkFont(size=12)
                      ).pack(anchor="w", padx=12, pady=(10, 2))
@@ -675,6 +685,7 @@ class NotebookUIMixin:
         nb.append_chat_turn("user", question)
         self._nb_add_message_row("user", question, [])
         self._nb_question.delete("1.0", "end")
+        precise = bool(self._nb_precise_var.get())  # читаем Tk-var в главном потоке
         self._nb_chat_stop.clear()  # новый запрос → сбрасываем флаг отмены
         self._nb_set_busy(True, cancellable=True)  # чат можно прервать «Стоп»
         self._nb_set_status("Ищу в источниках и формирую ответ…")
@@ -691,6 +702,7 @@ class NotebookUIMixin:
                         history=history,
                         on_log=lambda m: self._append_log_line(f"[NB chat] {m}", "general"),
                         stop_flag=self._nb_chat_stop.is_set,
+                        enhanced=precise,
                     )
                 )
             except Exception as exc:  # noqa: BLE001

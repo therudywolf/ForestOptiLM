@@ -47,6 +47,7 @@ for pkg in (
 # tiktoken registers encodings via the tiktoken_ext namespace + package metadata.
 hiddenimports += collect_submodules("tiktoken_ext")
 hiddenimports += ["tiktoken_ext.openai_public"]
+hiddenimports += ["retrieval_enhance"]  # лениво импортится в notebook_chat (точный поиск)
 try:
     datas += copy_metadata("tiktoken")
 except Exception:

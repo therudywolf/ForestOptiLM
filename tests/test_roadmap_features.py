@@ -33,6 +33,23 @@ class TestMegaFileChunking(unittest.TestCase):
         self.assertTrue(len(parts) >= 1)
 
 
+class TestHeadingBoundaryChunking(unittest.TestCase):
+    def test_heading_starts_new_segment(self) -> None:
+        # По мотивам qmd: markdown-заголовок начинает новый сегмент, даже без
+        # пустой строки до него → секции разных тем не сливаются в один чанк.
+        from parser import _segment_paragraphs_and_sentences
+        text = "# Beta\nсодержимое Beta\n## Alpha\nсодержимое Alpha"
+        segs = _segment_paragraphs_and_sentences(text, 8000)
+        heads = [s for s in segs if s.lstrip().startswith("#")]
+        self.assertEqual(len(heads), 2)
+        self.assertTrue(any("Alpha" in s and s.lstrip().startswith("##") for s in segs))
+
+    def test_no_headings_unchanged(self) -> None:
+        from parser import _segment_paragraphs_and_sentences
+        segs = _segment_paragraphs_and_sentences("Абзац один.\n\nАбзац два.", 8000)
+        self.assertEqual(segs, ["Абзац один.", "Абзац два."])
+
+
 class TestImageExtensions(unittest.TestCase):
     def test_image_kind_in_registry(self) -> None:
         from file_extractors import IMAGE_EXTENSIONS

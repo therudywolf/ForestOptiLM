@@ -63,8 +63,12 @@ class TestPureFunctions(unittest.TestCase):
     def test_parse_flashcards_invalid(self) -> None:
         self.assertEqual(st.parse_flashcards("совсем не json"), [])
 
-    def test_all_specs_have_order(self) -> None:
-        self.assertEqual(set(st.MATERIAL_ORDER), set(st.MATERIALS.keys()))
+    def test_order_is_subset_and_lint_is_separate(self) -> None:
+        # MATERIAL_ORDER задаёт кнопки-материалы; lint — отдельная операция-аудит
+        # (по мотивам LLM-Wiki), в реестре есть, но в авто-списке материалов нет.
+        self.assertTrue(set(st.MATERIAL_ORDER).issubset(st.MATERIALS))
+        self.assertIn("lint", st.MATERIALS)
+        self.assertNotIn("lint", st.MATERIAL_ORDER)
 
 
 class TestGenerateMaterial(unittest.TestCase):
@@ -102,6 +106,16 @@ class TestGenerateMaterial(unittest.TestCase):
         # Человекочитаемая версия тоже сохранена.
         names = [n.name for n in self.nb.list_notes()]
         self.assertIn("flashcards.md", names)
+
+    def test_generate_lint_report(self) -> None:
+        async def fake_call_llm(messages, model, base_url, api_key, semaphore, **kw):
+            return "## 🔴 Противоречия\n— не обнаружено\n## 🔵 Пробелы\n- добавить раздел X"
+
+        with mock.patch("processor.call_llm", new=fake_call_llm):
+            path, content = asyncio.run(st.generate_material(
+                self.nb, "lint", base_url="u", api_key="", chat_model="m"))
+        self.assertEqual(Path(path).name, "lint_report.md")
+        self.assertIn("Противоречия", content)
 
     def test_generate_raises_without_index(self) -> None:
         nb2 = nbs.create_notebook("empty")

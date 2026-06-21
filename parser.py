@@ -95,8 +95,13 @@ def _segment_paragraphs_and_sentences(text: str, chunk_size_tokens: int = 8000) 
     # Use chunk_size_tokens as the paragraph-size threshold; cap at 8000 to avoid excessive segments.
     para_limit = min(8000, chunk_size_tokens)
     segments: list[str] = []
-    paragraphs = re.split(r"\n\s*\n", text)
+    # Границы — пустые строки И начало markdown-заголовка (## ...): заголовок
+    # начинает новый сегмент, секции не сливаются через границу темы (как в qmd).
+    # Lookahead — разрыв БЕЗ поглощения, заголовок остаётся с его секцией.
+    paragraphs = re.split(r"\n\s*\n|(?=\n#{1,6}\s)", text)
     for para in paragraphs:
+        if para is None:
+            continue
         para = para.strip()
         if not para:
             continue

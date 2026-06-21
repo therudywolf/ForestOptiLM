@@ -185,6 +185,48 @@ class TestAnswerQuestion(unittest.TestCase):
         self.assertTrue(res.extra.get("cancelled"))
         self.assertFalse(called["v"])
 
+    def test_enhanced_runs_expansion_and_rerank(self) -> None:
+        # «Точный поиск»: expansion (3 запроса) → rerank → grounded-ответ.
+        nb = _FakeNotebook([_Hit("xz backdoor", "C:/x/a.txt", chunk_id="c1"),
+                            _Hit("другой фрагмент", "C:/x/b.txt", chunk_id="c2")])
+        calls = {"expansion": 0, "rerank": 0, "answer": 0}
+
+        async def dispatch(messages, model, base_url, api_key, semaphore, **kw):
+            sys = messages[0]["content"]
+            if "альтернативные формулировки" in sys:
+                calls["expansion"] += 1
+                return '["xz уязвимость", "cve бэкдор"]'
+            if "реранкер" in sys:
+                calls["rerank"] += 1
+                return "[2, 1]"
+            calls["answer"] += 1
+            return "Это бэкдор [1]."
+
+        with mock.patch("processor.call_llm", new=dispatch):
+            res = asyncio.run(nc.answer_question(
+                nb, "что такое xz?", base_url="u", api_key="", chat_model="m", enhanced=True))
+        self.assertEqual(calls["expansion"], 1)
+        self.assertEqual(calls["rerank"], 1)
+        self.assertEqual(calls["answer"], 1)
+        self.assertFalse(res.refused)
+        self.assertEqual([c["n"] for c in res.citations], [1])
+
+    def test_enhanced_falls_back_on_bad_json(self) -> None:
+        # Модель вернула не-JSON на expansion/rerank → мягкий фолбэк, ответ всё равно есть.
+        nb = _FakeNotebook([_Hit("grounding", "C:/x/a.txt", chunk_id="c1")])
+
+        async def dispatch(messages, model, base_url, api_key, semaphore, **kw):
+            sys = messages[0]["content"]
+            if "альтернативные формулировки" in sys or "реранкер" in sys:
+                return "извините, не понял"
+            return "ответ [1]."
+
+        with mock.patch("processor.call_llm", new=dispatch):
+            res = asyncio.run(nc.answer_question(
+                nb, "q", base_url="u", api_key="", chat_model="m", enhanced=True))
+        self.assertFalse(res.refused)
+        self.assertEqual(len(res.contexts), 1)
+
     def test_grounded_answer_with_citations(self) -> None:
         nb = _FakeNotebook([_Hit("xz backdoor CVE-2024-3094", "C:/x/a.txt")])
 

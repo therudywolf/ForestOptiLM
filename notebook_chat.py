@@ -282,6 +282,7 @@ async def answer_question(
     prefer_reasoning_off: bool = True,
     on_log: Callable[[str], None] | None = None,
     stop_flag: Callable[[], bool] | None = None,
+    enhanced: bool = False,
 ) -> ChatResult:
     """Полный цикл: retrieval по блокноту → grounded-ответ с цитатами.
 
@@ -309,13 +310,48 @@ async def answer_question(
             refused=False, model=chat_model, extra={"cancelled": True},
         )
 
-    hits = notebook.query(
-        question,
-        base_url=base_url,
-        api_key=api_key,
-        embedding_model=embedding_model,
-        top_k=top_k,
-    )
+    semaphore = asyncio.Semaphore(1)
+
+    async def _llm(msgs: list[dict[str, str]], max_tokens: int) -> str:
+        # Вспомогательные LLM-вызовы (expansion/rerank) — всегда reasoning:off
+        # (структурный JSON-вывод, не нужно «думать вслух»), с учётом «Стоп».
+        return await _await_with_stop(
+            call_llm(msgs, chat_model, base_url, api_key, semaphore,
+                     max_tokens=max_tokens, api_mode=api_mode, prefer_reasoning_off=True),
+            _stopped,
+        )
+
+    def _retrieve(q: str) -> list[Any]:
+        return notebook.query(q, base_url=base_url, api_key=api_key,
+                              embedding_model=embedding_model, top_k=top_k)
+
+    if enhanced:
+        # «Точный поиск» по мотивам qmd: query-expansion (выше recall) →
+        # listwise LLM-реранк (выше precision). Любой сбой → мягкий фолбэк на базу.
+        import retrieval_enhance as _re
+        queries = [question]
+        try:
+            queries = _re.parse_expansions(
+                await _llm(_re.build_expansion_messages(question), 200), question)
+        except ChatCancelled:
+            return _cancelled_result([])
+        except Exception as exc:  # noqa: BLE001
+            _log(f"expansion пропущен: {exc}")
+        _log(f"expansion: {len(queries)} запрос(ов)")
+        hits = _re.merge_hits([_retrieve(q) for q in queries], cap=30)
+        if len(hits) > 1 and not _stopped():
+            try:
+                order = _re.parse_rerank_order(
+                    await _llm(_re.build_rerank_messages(question, hits), 300), len(hits))
+                hits = _re.apply_rerank(hits, order, top_k=max(top_k, 16))
+                _log(f"rerank: {len(hits)} фрагмент(ов)")
+            except ChatCancelled:
+                return _cancelled_result([])
+            except Exception as exc:  # noqa: BLE001
+                _log(f"rerank пропущен: {exc}")
+                hits = hits[:max(top_k, 16)]
+    else:
+        hits = _retrieve(question)
     _log(f"retrieval: {len(hits)} фрагментов")
     contexts = select_contexts(hits, max_tokens=max_context_tokens, max_items=max(12, top_k))
 
@@ -332,7 +368,6 @@ async def answer_question(
         return _cancelled_result(contexts)
 
     messages = build_chat_messages(question, contexts, history)
-    semaphore = asyncio.Semaphore(1)
     try:
         raw = await _await_with_stop(
             call_llm(
