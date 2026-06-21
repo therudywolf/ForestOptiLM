@@ -2,6 +2,10 @@
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-brightgreen.svg)](https://www.python.org/)
+[![Platforms](https://img.shields.io/badge/platforms-Windows%20%C2%B7%20macOS%20%C2%B7%20Linux-555.svg)](#desktop-builds-windows--macos--linux)
+[![UI: Material Design 3](https://img.shields.io/badge/UI-Material%20Design%203-7c6cf0.svg)](#interface)
+
+> **English** · [Русский](README.ru.md)
 
 **ForestOptiLM** is the repository name; the product UI is **Nocturne Data Forge** —
 a desktop app for bulk asynchronous processing of large files and folders
@@ -30,8 +34,7 @@ corpora in the **~1M+ token** range with scout + hierarchical merge — not
 Licensed under **AGPL-3.0-or-later** — see [LICENSE](LICENSE), [NOTICE](NOTICE),
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-Десктопное приложение на Python: массовая обработка файлов через локальные LLM
-без отправки данных в облако (при использовании локального LM Studio).
+> 🇷🇺 Документация на русском: **[README.ru.md](README.ru.md)**.
 
 ## Features
 
@@ -466,11 +469,27 @@ over the wiki), `chat.jsonl` (chat history). Adding a source rebuilds the index
 transcribed locally via the optional `faster-whisper` dependency and become text
 sources; only TTS / audio-video "overviews" are intentionally out of scope.
 
+## Interface
+
+The UI follows **Material Design 3** (dark theme): a single token module
+[`md3.py`](md3.py) defines the colour roles (indigo-violet seed), type scale,
+shape/corner tokens and 4dp spacing, and `md3.apply()` themes every
+CustomTkinter widget at once — rounded corners, a tonal surface ladder, an
+authentic button hierarchy (filled / tonal / outlined / text), tonal chat
+bubbles and surface-elevation cards. Change the accent, radii or typography in
+one place.
+
+UI changes are verified **headlessly** (no real display needed) with
+[`tools/ui_shot.sh`](tools/ui_shot.sh) + [`tools/ui_preview.py`](tools/ui_preview.py),
+which render the key screens under Xvfb (e.g. WSL) and screenshot them; the
+preview imports the same `md3` tokens, so a shot faithfully reflects the app.
+
 ## Project Structure
 
 | File / dir | Purpose |
 |------------|---------|
 | `main.py` | GUI entry point |
+| `md3.py` | Material Design 3 design tokens (colour roles, type/shape scale) + theme |
 | `notebook_store.py` | Notebooks: persistent source collections, CRUD, per-notebook index/chat/notes |
 | `notebook_chat.py` | Grounded chat over a notebook with `[N]` citations + honest refusal |
 | `notebook_studio.py` | Studio: study guide / FAQ / timeline / briefing / flashcards generation |
