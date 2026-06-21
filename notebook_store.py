@@ -196,6 +196,12 @@ class Notebook:
         return self.dir / "notes"
 
     @property
+    def wiki_dir(self) -> Path:
+        # Слой скомпилированных знаний (LLM-Wiki): редактируемые markdown-страницы
+        # + index.md (каталог) + log.md (журнал операций).
+        return self.dir / "wiki"
+
+    @property
     def chat_path(self) -> Path:
         return self.dir / "chat.jsonl"
 

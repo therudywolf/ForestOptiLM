@@ -197,5 +197,65 @@ class TestIntegrationWithExtractContent(unittest.TestCase):
         self.assertIn("Обычная страница", content)
 
 
+_CHATLOG = (
+    "Аня: привет, ты видела новый отчёт?\n"
+    "Борис: да, посмотрел утром\n"
+    "Аня: что думаешь про раздел по ВМ?\n"
+    "Борис: норм, но не хватает деталей\n"
+    "это можно дописать позже\n"
+    "Аня: согласна, добавим\n"
+    "Борис: ок, тогда я возьму\n"
+)
+_CONFIG = (
+    "host: localhost\nport: 8080\ntimeout: 30\nretries: 5\n"
+    "name: service\nlevel: debug\npath: /var/log\n"
+)
+_PROSE = (
+    "Это обычный текст. Вот мысль: иногда бывает двоеточие.\n"
+    "Ещё предложение без структуры реплик.\n"
+)
+
+
+class TestGenericChatLog(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name)
+
+    def test_detects_chatlog(self) -> None:
+        p = _write(self.tmp, "chat.txt", _CHATLOG)
+        self.assertEqual(si.detect_format(p), "generic_chatlog")
+
+    def test_rejects_config_unique_keys(self) -> None:
+        # Конфиг: уникальные ключи, нет повторяющихся «собеседников» → не чат.
+        p = _write(self.tmp, "app.conf.txt", _CONFIG)
+        self.assertIsNone(si.detect_format(p))
+
+    def test_rejects_prose(self) -> None:
+        p = _write(self.tmp, "notes.txt", _PROSE)
+        self.assertIsNone(si.detect_format(p))
+
+    def test_extract_merges_continuation_lines(self) -> None:
+        p = _write(self.tmp, "chat.txt", _CHATLOG)
+        text = si.smart_extract_text(p)
+        self.assertIn("Аня:", text)
+        self.assertIn("Борис:", text)
+        # строка-продолжение приклеена к реплике Бориса, а не отдельным блоком
+        self.assertIn("не хватает деталей\nэто можно дописать позже", text)
+
+    def test_whatsapp_still_wins_over_generic(self) -> None:
+        # Файл с таймстампами WhatsApp должен опознаться как whatsapp_txt, не generic.
+        wa = (
+            "[12.10.2023, 14:30:15] Аня: привет\n"
+            "[12.10.2023, 14:31:00] Борис: здарова\n"
+            "[12.10.2023, 14:32:00] Аня: как дела\n"
+            "[12.10.2023, 14:33:00] Борис: норм\n"
+            "[12.10.2023, 14:34:00] Аня: ок\n"
+            "[12.10.2023, 14:35:00] Борис: пока\n"
+        )
+        p = _write(self.tmp, "_chat.txt", wa)
+        self.assertEqual(si.detect_format(p), "whatsapp_txt")
+
+
 if __name__ == "__main__":
     unittest.main()

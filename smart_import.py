@@ -318,12 +318,81 @@ class DiscordJsonImporter:
         return "\n\n".join(out)
 
 
-# Порядок важен: первый совпавший импортёр выигрывает.
+class GenericChatLogImporter:
+    """Неструктурированный чат-лог вида «Имя: сообщение» (без таймстампов).
+
+    Срабатывает ПОСЛЕДНИМ и консервативно: нужен высокий процент строк-реплик,
+    короткие имена-отправители И повторяющиеся собеседники — чтобы не перехватить
+    конфиги (`ключ: значение`), прозу с двоеточиями или код. Многострочные реплики
+    (строки без префикса «Имя:») приклеиваются к предыдущему сообщению.
+    """
+
+    name = "generic_chatlog"
+    # Имя: 1–30 символов, начинается с буквы/цифры, без предложений/пунктуации-в-конце.
+    _LINE = re.compile(r"^(?P<name>[\wА-Яа-яЁё][\w .\-]{0,29}):[ \t]+(?P<msg>\S.*)$")
+
+    def _scan(self, head: str) -> tuple[int, int, dict[str, int]]:
+        non_empty = 0
+        matched = 0
+        senders: dict[str, int] = {}
+        for line in head.splitlines()[:80]:
+            if not line.strip():
+                continue
+            non_empty += 1
+            m = self._LINE.match(line)
+            if m:
+                matched += 1
+                senders[m.group("name").strip()] = senders.get(m.group("name").strip(), 0) + 1
+        return non_empty, matched, senders
+
+    def detect(self, path: Path) -> bool:
+        if path.suffix.lower() not in {".txt", ".log"}:
+            return False
+        head = _read_head(path, 65536)
+        if not head:
+            return False
+        non_empty, matched, senders = self._scan(head)
+        if non_empty < 5 or matched < 6:
+            return False
+        if matched / non_empty < 0.6:  # большинство строк — реплики
+            return False
+        # Минимум 2 разных собеседника, и кто-то повторяется (признак диалога, не конфига).
+        recurring = [c for c in senders.values() if c >= 2]
+        return len(senders) >= 2 and bool(recurring)
+
+    def extract(self, path: Path) -> str:
+        from file_extractors import _decode
+
+        text = _decode(path.read_bytes())
+        out: list[str] = []
+        cur: list[str] = []
+        cur_header = ""
+
+        def flush() -> None:
+            if cur_header and cur:
+                out.append(cur_header + "\n" + "\n".join(cur).strip())
+
+        for line in text.splitlines():
+            m = self._LINE.match(line)
+            if m:
+                flush()
+                cur_header = f"{m.group('name').strip()}:"
+                cur = [m.group("msg").strip()]
+            elif cur_header and line.strip():
+                cur.append(line.rstrip())  # продолжение реплики
+        flush()
+        logger.info("smart_import generic_chatlog: %s → %d messages", path.name, len(out))
+        return "\n\n".join(out)
+
+
+# Порядок важен: первый совпавший импортёр выигрывает. Generic — последним
+# (самый широкий и потому наименее приоритетный).
 IMPORTERS: list[Importer] = [
     TelegramHtmlImporter(),
     WhatsAppTxtImporter(),
     SlackJsonImporter(),
     DiscordJsonImporter(),
+    GenericChatLogImporter(),
 ]
 
 

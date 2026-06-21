@@ -373,10 +373,13 @@ class NotebookUIMixin:
             ctk.CTkButton(right, text=spec.title, anchor="w",
                           command=lambda k=kind: self._nb_generate(k)).pack(fill="x", padx=12, pady=2)
 
-        # Lint-проверка корпуса (по мотивам LLM-Wiki): противоречия/устаревшее/пробелы.
+        # Слой знаний (LLM-Wiki): компиляция + проверка корпуса.
+        ctk.CTkButton(right, text="📚  Скомпилировать знания (вики)", anchor="w",
+                      fg_color=_ACCENT, hover_color=_ACCENT_HOVER,
+                      command=self._nb_compile_wiki).pack(fill="x", padx=12, pady=(8, 2))
         ctk.CTkButton(right, text="🔍  Проверить блокнот", anchor="w",
                       fg_color="transparent", border_width=1,
-                      command=lambda: self._nb_generate("lint")).pack(fill="x", padx=12, pady=(8, 2))
+                      command=lambda: self._nb_generate("lint")).pack(fill="x", padx=12, pady=2)
 
         ctk.CTkLabel(right, text="Заметки", text_color=_MUTED, font=ctk.CTkFont(size=12)
                      ).pack(anchor="w", padx=12, pady=(10, 2))
@@ -897,6 +900,64 @@ class NotebookUIMixin:
                 self._nb_after(lambda: self._nb_set_busy(False))
 
         threading.Thread(target=work, daemon=True).start()
+
+    def _nb_compile_wiki(self) -> None:
+        """Скомпилировать знания блокнота в вики-страницы (LLM-Wiki Карпатого)."""
+        nb = self._nb_current
+        if not self._nb_require_notebook() or nb is None:
+            return
+        if not self._nb_check_idle():
+            return
+        if not nb.has_index:
+            self._nb_set_status("Сначала постройте индекс блокнота", "#f59e0b")
+            return
+        model = self._model_var.get().strip()
+        if not model or model.startswith("("):
+            self._nb_set_status("Выберите LLM-модель (сайдбар)", "#f59e0b")
+            return
+        base_url = self._url_var.get().strip() or API_BASE
+        api_key = self._api_key_var.get().strip() or API_KEY
+        api_mode = self._api_mode_var.get().strip().lower()
+        self._nb_set_busy(True)
+        self._nb_set_status("Компилирую знания в вики…")
+
+        def work() -> None:
+            import notebook_wiki as wk
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                res = loop.run_until_complete(wk.compile_wiki(
+                    nb, base_url=base_url, api_key=api_key, chat_model=model, api_mode=api_mode,
+                    on_progress=lambda d, t, title: self._nb_after(
+                        lambda: self._nb_set_status(f"Вики: {title} ({d}/{t})…")),
+                ))
+                n = len(res.get("pages") or [])
+                self._nb_after(lambda: self._nb_set_status(
+                    f"Готово: {n} вики-страниц → wiki/", "lightgreen"))
+                self._nb_after(lambda: self._nb_open_folder(nb.wiki_dir))
+            except Exception as exc:  # noqa: BLE001
+                safe = sanitize_for_log(str(exc))
+                self._nb_after(lambda: self._nb_set_status(f"Ошибка компиляции: {safe}", "#f87171"))
+            finally:
+                loop.close()
+                self._nb_after(lambda: self._nb_set_busy(False))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _nb_open_folder(self, path: Any) -> None:
+        """Открыть папку в файловом менеджере ОС (best-effort)."""
+        try:
+            p = str(path)
+            if sys.platform == "win32":
+                os.startfile(p)  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                import subprocess
+                subprocess.Popen(["open", p])
+            else:
+                import subprocess
+                subprocess.Popen(["xdg-open", p])
+        except Exception:
+            pass
 
     def _nb_render_notes(self) -> None:
         for w in self._nb_notes_frame.winfo_children():
