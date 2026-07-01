@@ -150,7 +150,10 @@ class TelegramHtmlImporter:
         from file_extractors import _decode
 
         raw = path.read_bytes()
-        soup = BeautifulSoup(_decode(raw), "html.parser")
+        try:
+            soup = BeautifulSoup(_decode(raw), "lxml")   # C-парсер — кратно быстрее на больших экспортах
+        except Exception:
+            soup = BeautifulSoup(_decode(raw), "html.parser")
         messages = soup.find_all("div", class_="message")
 
         out: list[str] = []

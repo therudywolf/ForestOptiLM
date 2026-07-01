@@ -159,8 +159,12 @@ def build_index(
             for file_path in all_files
         }
         for fut in as_completed(futures):
-            file_chunks = fut.result()
             processed_files += 1
+            try:
+                file_chunks = fut.result()
+            except Exception as exc:  # noqa: BLE001 — один битый файл не должен рушить весь индекс
+                logger.warning("index: пропущен файл %s — %s", futures[fut].name, exc)
+                file_chunks = None
             if on_progress:
                 on_progress(processed_files, len(all_files), "index_extract")
             if file_chunks:
@@ -275,7 +279,10 @@ def add_to_index(
             done += 1
             if on_progress:
                 on_progress(done, len(new_files), "index_extract")
-            new_chunks.extend(fut.result() or [])
+            try:
+                new_chunks.extend(fut.result() or [])
+            except Exception as exc:  # noqa: BLE001 — битый файл не рушит дозапись
+                logger.warning("index: пропущен файл %s — %s", futures[fut].name, exc)
 
     # Дедуп новых чанков по содержимому + против уже проиндексированного.
     existing_hashes = {
