@@ -49,10 +49,15 @@ def get_encoding() -> tiktoken.Encoding:
 
 
 def count_tokens(text: str) -> int:
-    """Подсчёт токенов через tiktoken (cl100k_base)."""
+    """Подсчёт токенов через tiktoken (cl100k_base).
+
+    ``disallowed_special=()`` — пользовательский текст может СОДЕРЖАТЬ строки-
+    спецтокены (например, кто-то написал ``<|endoftext|>`` в чате); по умолчанию
+    tiktoken на них падает, поэтому трактуем их как обычный текст.
+    """
     if not text or not text.strip():
         return 0
-    return len(get_encoding().encode(text))
+    return len(get_encoding().encode(text, disallowed_special=()))
 
 
 def compute_dynamic_chunk_size(
@@ -138,7 +143,7 @@ def chunk_text_semantic(
     enc = get_encoding()
     segments = _segment_paragraphs_and_sentences(text, chunk_size_tokens=chunk_size_tokens)
     if not segments:
-        tokens = enc.encode(text)
+        tokens = enc.encode(text, disallowed_special=())
         if not tokens:
             return []
         step = max(1, chunk_size_tokens - overlap_tokens)
@@ -162,7 +167,7 @@ def chunk_text_semantic(
                 chunks.append("\n\n".join(current))
                 current = []
                 current_tokens = 0
-            enc_seg = enc.encode(seg)
+            enc_seg = enc.encode(seg, disallowed_special=())
             step = max(1, chunk_size_tokens - overlap_tokens)
             for start in range(0, len(enc_seg), step):
                 end = min(start + chunk_size_tokens, len(enc_seg))
@@ -189,7 +194,7 @@ def _chunk_text_by_tokens(
 ) -> list[str]:
     """Резерв: разбиение по токенам без учёта границ (для очень длинных сегментов уже внутри chunk_text_semantic)."""
     enc = get_encoding()
-    tokens = enc.encode(text)
+    tokens = enc.encode(text, disallowed_special=())
     if not tokens:
         return []
     step = max(1, chunk_size_tokens - overlap_tokens)

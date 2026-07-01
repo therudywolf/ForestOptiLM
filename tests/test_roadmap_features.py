@@ -33,6 +33,27 @@ class TestMegaFileChunking(unittest.TestCase):
         self.assertTrue(len(parts) >= 1)
 
 
+class TestSpecialTokenSafety(unittest.TestCase):
+    """Реальный баг (Telegram-экспорт): сообщение с литералом `<|endoftext|>`
+    роняло индексацию — tiktoken по умолчанию запрещает спецтокены. Теперь
+    трактуем их как обычный текст (disallowed_special=())."""
+
+    SPECIAL = "обычное сообщение\n<|endoftext|>\nещё <|im_start|> и <|fim_prefix|> внутри"
+
+    def test_count_tokens_does_not_crash(self) -> None:
+        from parser import count_tokens
+        self.assertGreater(count_tokens(self.SPECIAL), 0)
+
+    def test_semantic_chunking_does_not_crash(self) -> None:
+        from parser import chunk_text_semantic
+        self.assertTrue(chunk_text_semantic(self.SPECIAL * 40, 100, 20))
+
+    def test_map_file_chunking_does_not_crash(self) -> None:
+        chunks = chunk_text_for_map_file(Path("chat.html"), self.SPECIAL, 100, 20)
+        self.assertTrue(chunks)
+        self.assertTrue(any("endoftext" in c for c in chunks))  # текст сохранён как есть
+
+
 class TestHeadingBoundaryChunking(unittest.TestCase):
     def test_heading_starts_new_segment(self) -> None:
         # По мотивам qmd: markdown-заголовок начинает новый сегмент, даже без
