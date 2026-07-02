@@ -195,7 +195,48 @@ def screen_components(root):
         ctk.CTkLabel(srow, text=f"● {txt}", text_color=col, font=m.font("body")).pack(side="left", padx=12)
 
 
-SCREENS = {"archive": screen_archive, "workspace": screen_workspace, "components": screen_components}
+def screen_connection(root):
+    """Мок меню «Подключение и пресеты» — те же MD3-хелперы кнопок, что в gui.py."""
+    root.configure(fg_color=m.SURFACE_CONTAINER_LOW)
+    dlg = ctk.CTkFrame(root, fg_color=m.SURFACE, corner_radius=m.RADIUS_CARD,
+                       border_width=1, border_color=m.OUTLINE_VARIANT, width=480)
+    dlg.pack(padx=40, pady=16, fill="y", expand=True)
+    dlg.pack_propagate(False)
+    pad = {"padx": 18}
+    ctk.CTkLabel(dlg, text="Подключение к нейросети", font=m.font("title-lg"),
+                 text_color=m.ON_SURFACE).pack(anchor="w", pady=(14, 2), **pad)
+    ctk.CTkLabel(dlg, text="Сервер, ключ и модели. Сохраните набор как пресет и переключайтесь.",
+                 font=m.font("body"), text_color=m.ON_SURFACE_VARIANT,
+                 wraplength=430, justify="left").pack(anchor="w", pady=(0, 10), **pad)
+
+    ctk.CTkLabel(dlg, text="Пресет", font=m.font("label"), text_color=m.ON_SURFACE).pack(anchor="w", **pad)
+    prow = ctk.CTkFrame(dlg, fg_color="transparent"); prow.pack(fill="x", **pad)
+    ctk.CTkOptionMenu(prow, values=["Мой LM Studio"], width=200).pack(side="left")
+    ctk.CTkButton(prow, text="Загрузить", width=96, height=32, font=m.font("label"),
+                  **m.button_tonal()).pack(side="left", padx=6)
+    ctk.CTkButton(prow, text="🗑", width=40, height=32, **m.button_danger()).pack(side="left")
+
+    for lbl, val, show in [("API Base URL", "http://localhost:1234/v1", None),
+                           ("API Key (если требуется)", "••••••••••••••••", "*")]:
+        ctk.CTkLabel(dlg, text=lbl, font=m.font("label"), text_color=m.ON_SURFACE).pack(anchor="w", pady=(8, 0), **pad)
+        e = ctk.CTkEntry(dlg, width=250); e.insert(0, val); e.pack(fill="x", **pad)
+    ctk.CTkButton(dlg, text="🔄  Обновить модели", height=36, **m.button_filled()).pack(fill="x", pady=(10, 6), **pad)
+    for lbl, val in [("LLM модель (ответы)", "google/gemma-4-26b-a4b-qat"),
+                     ("Embedding-модель (поиск/RAG)", "text-embedding-nomic-embed-text-v1.5"),
+                     ("Vision-модель (картинки)", "google/gemma-4-26b-a4b-qat")]:
+        ctk.CTkLabel(dlg, text=lbl, font=m.font("label"), text_color=m.ON_SURFACE).pack(anchor="w", pady=(6, 0), **pad)
+        ctk.CTkComboBox(dlg, values=[val], width=250).pack(fill="x", **pad)
+    ctk.CTkButton(dlg, text="Применить контекст", height=30, **m.button_outlined()).pack(fill="x", pady=(8, 2), **pad)
+
+    srow = ctk.CTkFrame(dlg, fg_color="transparent"); srow.pack(fill="x", pady=(12, 8), **pad)
+    ctk.CTkButton(srow, text="💾  Сохранить изменения", height=34, **m.button_tonal()
+                  ).pack(side="left", expand=True, fill="x", padx=(0, 6))
+    ctk.CTkButton(srow, text="➕  Как новый…", width=128, height=34, **m.button_outlined()).pack(side="left")
+    ctk.CTkButton(dlg, text="Продолжить  ▶", height=38, **m.button_filled()).pack(fill="x", pady=(6, 14), **pad)
+
+
+SCREENS = {"archive": screen_archive, "workspace": screen_workspace,
+           "components": screen_components, "connection": screen_connection}
 
 
 def main() -> None:

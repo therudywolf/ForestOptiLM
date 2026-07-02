@@ -243,9 +243,8 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
                       fg_color="transparent", border_width=1,
                       command=self._on_download_model_dialog
                       ).pack(fill="x", pady=(0, 3), **pad)
-        ctk.CTkButton(sb, text="⚙️  Подключение и пресеты", height=28,
-                      fg_color=_md3.PRIMARY_CONTAINER, hover_color=_md3.PRIMARY_CONTAINER_HOVER,
-                      command=self._show_connection_menu
+        ctk.CTkButton(sb, text="⚙️  Подключение и пресеты", height=30,
+                      command=self._show_connection_menu, **_md3.button_tonal()
                       ).pack(fill="x", pady=(0, 8), **pad)
 
         # LLM model
@@ -2462,6 +2461,19 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
             self._refresh_preset_menu()
             self._set_status(f"Пресет удалён: {name}")
 
+    def _preset_save_changes(self) -> None:
+        """Перезаписать ВЫБРАННЫЙ пресет текущими настройками. Если пресет не
+        выбран (или список пуст) — предложить сохранить как новый."""
+        import user_presets as up
+        name = self._preset_sel_var.get().strip()
+        if not name or name.startswith("("):
+            self._preset_save_dialog()
+            return
+        up.upsert_preset(self._capture_connection_preset(name))
+        self._refresh_preset_menu()
+        self._preset_sel_var.set(name)
+        self._set_status(f"Пресет обновлён: {name}")
+
     def _preset_save_dialog(self) -> None:
         d = ctk.CTkInputDialog(text="Имя пресета:", title="Сохранить пресет подключения")
         name = (d.get_input() or "").strip()
@@ -2513,9 +2525,8 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
         ctk.CTkCheckBox(bottom, text="Показывать это меню при запуске",
                         variable=self._show_conn_startup_var,
                         command=self._persist_runtime_state).pack(anchor="w", pady=(6, 4), **pad)
-        ctk.CTkButton(bottom, text="Продолжить  ▶", fg_color=_md3.PRIMARY_CONTAINER,
-                      hover_color=_md3.PRIMARY_CONTAINER_HOVER,
-                      command=dlg.destroy).pack(fill="x", pady=(0, 12), **pad)
+        ctk.CTkButton(bottom, text="Продолжить  ▶", height=38, command=dlg.destroy,
+                      **_md3.button_filled()).pack(fill="x", pady=(0, 12), **pad)
 
         body = ctk.CTkScrollableFrame(dlg, fg_color="transparent")
         body.pack(side="top", fill="both", expand=True)
@@ -2530,11 +2541,12 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
         prow = ctk.CTkFrame(body, fg_color="transparent"); prow.pack(fill="x", **pad)
         names = [p.name for p in up.load_presets()] or ["(нет сохранённых)"]
         self._preset_sel_var = ctk.StringVar(value=names[0])
-        self._preset_menu = ctk.CTkOptionMenu(prow, variable=self._preset_sel_var, values=names, width=210)
+        self._preset_menu = ctk.CTkOptionMenu(prow, variable=self._preset_sel_var, values=names, width=200)
         self._preset_menu.pack(side="left")
-        ctk.CTkButton(prow, text="Загрузить", width=90, command=self._preset_load).pack(side="left", padx=6)
-        ctk.CTkButton(prow, text="🗑", width=36, fg_color="transparent", border_width=1,
-                      command=self._preset_delete).pack(side="left")
+        ctk.CTkButton(prow, text="Загрузить", width=96, height=32, font=ctk.CTkFont(size=12),
+                      command=self._preset_load, **_md3.button_tonal()).pack(side="left", padx=6)
+        ctk.CTkButton(prow, text="🗑", width=40, height=32, command=self._preset_delete,
+                      **_md3.button_danger()).pack(side="left")
 
         ctk.CTkLabel(body, text="Провайдер").pack(anchor="w", pady=(10, 0), **pad)
         ctk.CTkOptionMenu(body, variable=self._provider_var, values=cp.preset_labels(),
@@ -2546,8 +2558,8 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
         ctk.CTkLabel(body, text="Режим API").pack(anchor="w", pady=(6, 0), **pad)
         ctk.CTkOptionMenu(body, variable=self._api_mode_var, values=["native", "openai"],
                           width=250).pack(fill="x", **pad)
-        ctk.CTkButton(body, text="🔄  Обновить модели", command=self._on_fetch_models
-                      ).pack(fill="x", pady=(10, 6), **pad)
+        ctk.CTkButton(body, text="🔄  Обновить модели", height=36, command=self._on_fetch_models,
+                      **_md3.button_filled()).pack(fill="x", pady=(10, 6), **pad)
 
         # Модели — ПРЯМО в меню. CTkComboBox редактируем: можно выбрать из списка
         # (после «Обновить модели») ИЛИ вписать имя модели вручную.
@@ -2576,16 +2588,21 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
         cur_ctx = int((getattr(self, "_model_ctx", {}) or {}).get(self._model_var.get().strip(), 0) or 0)
         self._ctx_override_var = ctk.StringVar(value=str(cur_ctx))
         ctk.CTkEntry(crow, textvariable=self._ctx_override_var, width=90).pack(side="right")
-        ctk.CTkButton(body, text="Применить контекст", height=26, fg_color="transparent",
-                      border_width=1, command=self._apply_ctx_override).pack(fill="x", pady=(4, 2), **pad)
+        ctk.CTkButton(body, text="Применить контекст", height=30, command=self._apply_ctx_override,
+                      **_md3.button_outlined()).pack(fill="x", pady=(4, 2), **pad)
         self._dlg_ctx_hint = ctk.CTkLabel(
             body, text="", text_color=_md3.ON_SURFACE_VARIANT, font=ctk.CTkFont(size=11),
             wraplength=430, justify="left")
         self._dlg_ctx_hint.pack(anchor="w", **pad)
         self._refresh_dlg_ctx_hint()
 
-        ctk.CTkButton(body, text="💾  Сохранить как пресет…", fg_color="transparent", border_width=1,
-                      command=self._preset_save_dialog).pack(fill="x", pady=(10, 8), **pad)
+        # Явные кнопки сохранения: обновить выбранный пресет ИЛИ создать новый.
+        srow = ctk.CTkFrame(body, fg_color="transparent"); srow.pack(fill="x", pady=(12, 8), **pad)
+        ctk.CTkButton(srow, text="💾  Сохранить изменения", height=34,
+                      command=self._preset_save_changes, **_md3.button_tonal()
+                      ).pack(side="left", expand=True, fill="x", padx=(0, 6))
+        ctk.CTkButton(srow, text="➕  Как новый…", width=128, height=34,
+                      command=self._preset_save_dialog, **_md3.button_outlined()).pack(side="left")
 
     def _on_dlg_model_pick(self) -> None:
         """Выбрали LLM в меню → подтянуть её контекст в поле и обновить подсказку."""
