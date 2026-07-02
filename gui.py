@@ -378,7 +378,12 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
             variable=self._low_vram_var,
             command=self._on_runtime_mode_changed,
         )
-        self._low_vram_check.pack(anchor="w", pady=(2, 2), **pad)
+        self._low_vram_check.pack(anchor="w", pady=(2, 0), **pad)
+        ctk.CTkLabel(
+            mr, text="Грузить модели по очереди — экономит видеопамять, но медленнее.",
+            text_color=_md3.ON_SURFACE_VARIANT, font=ctk.CTkFont(size=11),
+            wraplength=250, justify="left",
+        ).pack(anchor="w", pady=(0, 4), **pad)
         self._advanced_visible = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(
             mr,
@@ -392,11 +397,13 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
         ctk.CTkLabel(
             self._advanced_frame, text="Лимиты токенов", font=ctk.CTkFont(size=12, weight="bold"),
         ).pack(anchor="w", pady=(4, 0), **pad)
-        ctk.CTkLabel(self._advanced_frame, text="MAX_REDUCE_INPUT_TOKENS").pack(anchor="w", pady=(4, 0), **pad)
+        ctk.CTkLabel(self._advanced_frame, text="Лимит входа сборки итога, токенов (MAX_REDUCE_INPUT_TOKENS)",
+                     wraplength=250, justify="left").pack(anchor="w", pady=(4, 0), **pad)
         ctk.CTkEntry(self._advanced_frame, textvariable=self._max_reduce_tokens_var).pack(
             fill="x", pady=(2, 4), **pad,
         )
-        ctk.CTkLabel(self._advanced_frame, text="NOCTURNE_MAX_CHUNK_TOKENS").pack(anchor="w", pady=(2, 0), **pad)
+        ctk.CTkLabel(self._advanced_frame, text="Макс. токенов в одном чанке (NOCTURNE_MAX_CHUNK_TOKENS)",
+                     wraplength=250, justify="left").pack(anchor="w", pady=(2, 0), **pad)
         ctk.CTkEntry(self._advanced_frame, textvariable=self._max_chunk_tokens_var).pack(
             fill="x", pady=(2, 4), **pad,
         )
@@ -410,7 +417,13 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
             variable=self._scout_var,
             command=self._persist_runtime_state,
         )
-        self._scout_check.pack(anchor="w", pady=(2, 2), **pad)
+        self._scout_check.pack(anchor="w", pady=(2, 0), **pad)
+        ctk.CTkLabel(
+            mr, text="Дешёвый проход отсеивает нерелевантные файлы до основного "
+                     "анализа — ускоряет обработку больших корпусов.",
+            text_color=_md3.ON_SURFACE_VARIANT, font=ctk.CTkFont(size=11),
+            wraplength=250, justify="left",
+        ).pack(anchor="w", pady=(0, 2), **pad)
         self._scout_threshold_var = ctk.StringVar(
             value=str(self._runtime_state.get("scout_threshold", 0.35))
         )
