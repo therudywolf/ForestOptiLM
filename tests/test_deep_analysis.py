@@ -31,6 +31,13 @@ class TestClassifier(unittest.TestCase):
                   "все упоминания системы X"]:
             self.assertTrue(da.is_analytical_question(q), q)
 
+    def test_enumeration_is_analytical(self):
+        # перечни лучше собирает deep (широкий сбор) — авто-детект их ловит
+        for q in ["перечисли все интеграции модуля",
+                  "какой список внешних систем связан с аналитикой",
+                  "какие все версии ПО нужны"]:
+            self.assertTrue(da.is_analytical_question(q), q)
+
     def test_factoid_false(self):
         for q in ["на каком сервере крутится API",
                   "сколько стоит лицензия",

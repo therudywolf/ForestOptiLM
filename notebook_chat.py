@@ -291,7 +291,10 @@ def build_chat_messages(
         "Ответь по источникам выше, ставя ссылку [N] к каждому факту. Сопоставляй "
         "фрагменты между собой (даты, авторы, причины/следствия): если ответ "
         "следует из их совокупности — сформулируй его как вывод со ссылками на "
-        "использованные фрагменты. Если ответ есть лишь частично — дай частичный "
+        "использованные фрагменты. ВАЖНО: приписывай факт ТОЛЬКО той системе/"
+        "сущности, о которой он в тексте; если фрагмент про ДРУГУЮ систему — не "
+        "переноси его данные на запрошенную (версии, инциденты и настройки у "
+        "разных систем свои). Если ответ есть лишь частично — дай частичный "
         "ответ и отметь, чего не хватает. Напиши ровно "
         f"\"{REFUSAL_TEXT}\" только если по теме во фрагментах нет ничего."
     )
@@ -422,14 +425,15 @@ async def answer_question(
         # Агрегирующие вопросы («какой человек X», «что по теме Y»): семантика
         # запроса далека от реальных сообщений сущности — добираем их отдельным
         # лексическим поиском по имени (BM25 внутри hybrid_search вытащит их).
-        hit_lists = [_retrieve(q) for q in queries]
+        # Шире per-query recall: узкий top_k=16 упускал канонические сообщения
+        # (напр. явный список интеграций) — берём по 60 на запрос и 80 на сущность.
+        hit_lists = [_retrieve(q, 60) for q in queries]
         for ent in entities:
-            hit_lists.append(_retrieve(ent))
-        cap = 40 if entities else 30
-        hits = _re.merge_hits(hit_lists, cap=cap)
-        # Для агрегирующих вопросов держим шире окно после реранка — портрет/сводку
-        # не собрать из 16 фрагментов (нужны десятки сообщений сущности).
-        rerank_keep = max(top_k, 30) if entities else max(top_k, 16)
+            hit_lists.append(_retrieve(ent, 80))
+        hits = _re.merge_hits(hit_lists, cap=60)
+        # Держим шире окно после реранка — перечень/сводку не собрать из 16
+        # фрагментов (нужны десятки).
+        rerank_keep = max(top_k, 40) if entities else max(top_k, 28)
         if len(hits) > 1 and not _stopped():
             try:
                 order = _re.parse_rerank_order(
@@ -444,7 +448,10 @@ async def answer_question(
     else:
         hits = _retrieve(question)
     _log(f"retrieval: {len(hits)} фрагментов")
-    contexts = select_contexts(hits, max_tokens=max_context_tokens, max_items=max(12, top_k))
+    # В «Точном поиске» держим больше фрагментов в контексте (перечни/факты
+    # тонут при 16); базовый режим — компактнее.
+    ctx_max = 20 if enhanced else max(12, top_k)
+    contexts = select_contexts(hits, max_tokens=max_context_tokens, max_items=ctx_max)
 
     if not contexts:
         return ChatResult(
