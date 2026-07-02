@@ -175,6 +175,59 @@ class TestHybridSearch(unittest.TestCase):
             self.assertIsInstance(payload, dict)
             self.assertIn("meta", payload)
 
+    def test_meta_cache_concurrent_writers_no_corruption_no_litter(self) -> None:
+        # Ревью beta.24: фикс. tmp-путь ронял конкурентные записи (WinError 32/5)
+        # и оставлял мусор. Уникальный tmp (pid+uuid) → много писателей разом дают
+        # валидный финальный pickle и НЕ оставляют *.tmp в каталоге индекса.
+        import pickle
+        import threading
+        from retrieval import LocalFaissStore
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td)
+            store = self._store(d)
+            sig = store._index_signature()
+            meta = store._read_meta()
+
+            barrier = threading.Barrier(6)
+
+            def writer() -> None:
+                barrier.wait()  # стартуем одновременно → максимальное перекрытие
+                store._write_meta_cache(sig, meta)
+
+            threads = [threading.Thread(target=writer) for _ in range(6)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+            # Финальный кэш валиден и совпадает по сигнатуре.
+            payload = pickle.loads(store.meta_cache_file.read_bytes())
+            self.assertEqual(tuple(payload["sig"]), tuple(sig))
+            self.assertEqual(len(payload["meta"]), len(meta))
+            # Ни одного осиротевшего tmp (уникальные имена + cleanup в finally).
+            leftovers = list(d.glob("meta_cache.pkl.*.tmp")) + list(d.glob("*.tmp"))
+            self.assertEqual(leftovers, [], f"осиротевшие tmp: {leftovers}")
+
+    def test_read_meta_cached_returns_needs_write_flag(self) -> None:
+        # Фикс #2: dump вынесен из-под лока. _read_meta_cached сигналит
+        # (meta, needs_write): miss → True (писать надо), hit → False.
+        from retrieval import LocalFaissStore
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td)
+            store = self._store(d)
+            sig = store._index_signature()
+            store.meta_cache_file.unlink(missing_ok=True)  # гарантируем промах
+
+            meta, needs_write = store._read_meta_cached(sig)
+            self.assertTrue(needs_write)               # промах → нужна запись
+            self.assertEqual(len(meta), 3)
+            self.assertFalse(store.meta_cache_file.exists())  # сам метод НЕ пишет
+
+            store._write_meta_cache(sig, meta)         # пишет вызывающая сторона
+            meta2, needs_write2 = store._read_meta_cached(sig)
+            self.assertFalse(needs_write2)             # попадание → писать нечего
+            self.assertEqual(len(meta2), 3)
+
 
 if __name__ == "__main__":
     unittest.main()

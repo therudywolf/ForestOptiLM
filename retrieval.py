@@ -18,8 +18,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import pickle
 import threading
+import uuid
 from pathlib import Path
 
 import faiss
@@ -328,6 +330,7 @@ class LocalFaissStore:
         signature = self._index_signature()
         if signature is None:
             return None, [], None, ()  # индекс исчез между .exists() и stat() → пусто
+        needs_write = False
         with self._lock:
             if (
                 self._cached_index is not None
@@ -338,7 +341,7 @@ class LocalFaissStore:
 
             try:
                 index = faiss.read_index(str(self.index_file))
-                meta = self._read_meta_cached(signature)  # pickle-кэш ускоряет холодный старт
+                meta, needs_write = self._read_meta_cached(signature)  # pickle-кэш ускоряет старт
             except OSError:
                 return None, [], None, ()  # каталог подменили/удалили после stat()
             dim = None
@@ -353,16 +356,26 @@ class LocalFaissStore:
             self._cached_meta = meta
             self._cached_sig = signature
             self._cached_dim = dim
+        # Сериализуем pickle ВНЕ лока: конкурентные запросы ждали лишь репарс JSONL,
+        # а не ~800MB dump. Только первый промахнувшийся поток пишет (остальные уже
+        # видят прогретый in-memory кэш); потеря записи безопасна — JSONL источник
+        # истины, кэш до-греется на следующем промахе.
+        if needs_write:
+            self._write_meta_cache(signature, meta)
         return index, meta, dim, signature
 
     @property
     def meta_cache_file(self) -> Path:
         return self.index_dir / "meta_cache.pkl"
 
-    def _read_meta_cached(self, signature: tuple) -> list[dict]:
+    def _read_meta_cached(self, signature: tuple) -> tuple[list[dict], bool]:
         """Meta через pickle-кэш: парс 455k JSON-строк ~7с → загрузка pickle ~2-3с.
-        Валидируется сигнатурой корпуса; несовпадение/сбой → перечитать JSONL и
-        перезаписать кэш. Источник истины остаётся chunks_meta.jsonl."""
+        Валидируется сигнатурой корпуса; несовпадение/сбой → перечитать JSONL.
+        Источник истины остаётся chunks_meta.jsonl.
+
+        Возвращает ``(meta, needs_write)``: needs_write=True, когда pickle пришлось
+        перечитать из JSONL и его надо записать. Саму запись делает вызывающая
+        сторона ВНЕ лока — dump на ~800MB не должен держать self._lock."""
         p = self.meta_cache_file
         try:
             with p.open("rb") as f:
@@ -370,27 +383,32 @@ class LocalFaissStore:
             if isinstance(payload, dict) and tuple(payload.get("sig") or ()) == tuple(signature):
                 meta = payload.get("meta")
                 if isinstance(meta, list):
-                    return meta
+                    return meta, False  # попадание в кэш — писать нечего
         except FileNotFoundError:
             pass
         except Exception as exc:  # noqa: BLE001
             logger.warning("meta cache %s не читается (%s) — перечитываю JSONL", p, exc)
-        meta = self._read_meta()
-        self._write_meta_cache(signature, meta)
-        return meta
+        return self._read_meta(), True  # перечитали JSONL → caller обязан записать кэш
 
     def _write_meta_cache(self, signature: tuple, meta: list[dict]) -> None:
-        """Атомарно записать pickle-кэш meta (tmp+replace). Сбой не критичен —
-        кэш перестроится на первом запросе."""
+        """Атомарно записать pickle-кэш meta через УНИКАЛЬНЫЙ tmp (pid+uuid) + replace.
+        Уникальное имя tmp — чтобы конкурентные писатели (build/append на отдельном
+        инстансе стора, второй процесс рядом с exe) не топтали общий tmp и не рвали
+        друг другу запись. Сбой не критичен — кэш перестроится на след. промахе."""
         p = self.meta_cache_file
+        tmp = p.with_name(f"{p.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
         try:
-            tmp = p.with_suffix(".tmp")
             with tmp.open("wb") as f:
                 pickle.dump({"sig": tuple(signature), "meta": meta}, f,
                             protocol=pickle.HIGHEST_PROTOCOL)
-            tmp.replace(p)
+            os.replace(tmp, p)
         except Exception as exc:  # noqa: BLE001
             logger.warning("meta cache: не удалось сохранить %s — %s", p, exc)
+        finally:
+            try:
+                tmp.unlink()  # если replace не забрал tmp (сбой/гонка) — не оставляем мусор
+            except OSError:
+                pass
 
     def _read_meta(self) -> list[dict]:
         out: list[dict] = []

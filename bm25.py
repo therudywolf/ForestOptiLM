@@ -29,8 +29,10 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import pickle
 import re
+import uuid
 from array import array
 from collections import Counter
 from pathlib import Path
@@ -146,10 +148,19 @@ class BM25Index:
                 "post_docs": self._post_docs, "post_tf": self._post_tf,
                 "denom_norm": self._denom_norm, "avgdl": self._avgdl,
             }
-            tmp = Path(path).with_suffix(".tmp")
-            with tmp.open("wb") as f:
-                pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
-            tmp.replace(path)
+            p = Path(path)
+            # Уникальный tmp (pid+uuid): конкурентные писатели (build/append на
+            # отдельном инстансе, второй процесс рядом с exe) не топчут общий tmp.
+            tmp = p.with_name(f"{p.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+            try:
+                with tmp.open("wb") as f:
+                    pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
+                os.replace(tmp, p)
+            finally:
+                try:
+                    tmp.unlink()  # если replace не забрал tmp — не оставляем мусор
+                except OSError:
+                    pass
         except Exception as exc:  # noqa: BLE001
             logger.warning("bm25: не удалось сохранить кэш %s — %s", path, exc)
 
