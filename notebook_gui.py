@@ -112,6 +112,7 @@ class NotebookUIMixin:
         self._nb_busy = False
         self._nb_chat_stop = threading.Event()  # кооперативная отмена запроса чата
         self._nb_precise_var = ctk.BooleanVar(value=False)  # «Точный поиск» (expansion+rerank)
+        self._nb_deep_var = ctk.StringVar(value="Авто")     # «Глубокий анализ» (map-reduce)
         self._nb_view = "archive"
         self._nb_relayout_after: str | None = None
         self._nb_search_var = ctk.StringVar(value="")
@@ -352,6 +353,13 @@ class NotebookUIMixin:
         # к модели дольше) — по мотивам qmd/LLM-Wiki. По умолчанию выкл.
         ctk.CTkCheckBox(bar, text="🎯 Точный поиск", variable=self._nb_precise_var,
                         font=ctk.CTkFont(size=12)).pack(side="right", padx=(0, 10))
+        # «Глубокий анализ»: map-reduce по всему следу сущности/темы для
+        # агрегирующих вопросов (портрет/сводка/«как устроен»). Авто — включается
+        # сам по формулировке вопроса; Вкл/Выкл — принудительно.
+        ctk.CTkOptionMenu(bar, variable=self._nb_deep_var, values=["Авто", "Вкл", "Выкл"],
+                          width=84, font=ctk.CTkFont(size=12)).pack(side="right", padx=(0, 6))
+        ctk.CTkLabel(bar, text="🔬 Глубокий анализ", font=ctk.CTkFont(size=12)
+                     ).pack(side="right", padx=(0, 4))
 
         self._nb_chat_frame = ctk.CTkScrollableFrame(center, fg_color=_md3.SURFACE_CONTAINER_LOWEST)
         self._nb_chat_frame.pack(fill="both", expand=True)
@@ -707,6 +715,8 @@ class NotebookUIMixin:
         self._nb_add_message_row("user", question, [])
         self._nb_question.delete("1.0", "end")
         precise = bool(self._nb_precise_var.get())  # читаем Tk-var в главном потоке
+        deep_mode = {"Авто": "auto", "Вкл": "on", "Выкл": "off"}.get(
+            self._nb_deep_var.get(), "auto")
         self._nb_chat_stop.clear()  # новый запрос → сбрасываем флаг отмены
         self._nb_set_busy(True, cancellable=True)  # чат можно прервать «Стоп»
         self._nb_set_status("Ищу в источниках и формирую ответ…")
@@ -745,6 +755,7 @@ class NotebookUIMixin:
                         stop_flag=self._nb_chat_stop.is_set,
                         enhanced=precise,
                         on_token=on_token,
+                        deep_mode=deep_mode,
                     )
                 )
             except Exception as exc:  # noqa: BLE001

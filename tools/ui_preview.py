@@ -141,7 +141,11 @@ def screen_workspace(root):
     bar.pack(fill="x")
     ctk.CTkLabel(bar, text="Чат по источникам", font=m.font("title"),
                  text_color=m.ON_SURFACE).pack(side="left")
-    _chip(bar, "🎯 Точный поиск", on=True).pack(side="right")
+    _chip(bar, "🎯 Точный поиск", on=True).pack(side="right", padx=(0, 8))
+    ctk.CTkOptionMenu(bar, values=["Авто", "Вкл", "Выкл"], width=84,
+                      font=m.font("small")).pack(side="right", padx=(0, 6))
+    ctk.CTkLabel(bar, text="🔬 Глубокий анализ", font=m.font("small"),
+                 text_color=m.ON_SURFACE).pack(side="right", padx=(0, 4))
     chat = ctk.CTkFrame(mid, fg_color=m.SURFACE_CONTAINER_LOWEST, corner_radius=m.RADIUS_CARD)
     chat.pack(fill="both", expand=True, pady=8)
     _bubble(chat, "Вы", "На каких ВМ развёрнута подсистема Alpha?", user=True)

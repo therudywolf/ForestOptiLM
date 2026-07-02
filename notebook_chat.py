@@ -560,7 +560,8 @@ async def _run_deep_analysis(
     schema = str(getattr(notebook, "schema", "") or "")
     if on_token:
         try:
-            on_token("🔬 Глубокий анализ: собираю данные по всему корпусу…\n")
+            on_token("🔬 Глубокий анализ (может занять пару минут): собираю данные "
+                     "по всему корпусу, анализирую по частям…\n")
         except Exception:
             pass
 
