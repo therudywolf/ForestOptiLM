@@ -122,6 +122,29 @@ class TestPrompts(unittest.TestCase):
         self.assertIn("набл 1", msgs[1]["content"])
         self.assertIn("цель", msgs[1]["content"])
 
+    def test_reduce_prompt_warns_against_name_conflation(self):
+        # анти-склейка имён (ник ≠ ФИО)
+        sysmsg = da.build_reduce_messages("цель", ["x"])[0]["content"].lower()
+        self.assertIn("ник", sysmsg)
+
+    def test_merge_messages_preserve_citations_hint(self):
+        msgs = da.build_merge_messages("цель", ["факт [1]", "факт [2]"])
+        self.assertIn("[N]", msgs[0]["content"])       # инструкция сохранять ссылки
+        self.assertIn("факт [1]", msgs[1]["content"])
+        self.assertIn("цель", msgs[1]["content"])
+
+
+class TestGroupList(unittest.TestCase):
+    def test_groups_by_size(self):
+        self.assertEqual(da.group_list([1, 2, 3, 4, 5], 2), [[1, 2], [3, 4], [5]])
+
+    def test_exact_multiple(self):
+        self.assertEqual(da.group_list([1, 2, 3, 4], 2), [[1, 2], [3, 4]])
+
+    def test_empty_and_size_guard(self):
+        self.assertEqual(da.group_list([], 3), [])
+        self.assertEqual(da.group_list([1, 2], 0), [[1], [2]])  # size≥1
+
 
 if __name__ == "__main__":
     unittest.main()

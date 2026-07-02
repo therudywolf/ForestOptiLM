@@ -546,8 +546,8 @@ async def _run_deep_analysis(
     max_context_tokens: int,
     max_answer_tokens: int,
     cap_units: int = 400,
-    max_batch_tokens: int = 3500,
-    max_batches: int = 24,
+    max_batch_tokens: int = 6000,
+    max_batches: int = 60,
 ) -> ChatResult | None:
     """Оркестратор глубокого анализа: identify → gather(+соседи) → map → reduce.
 
@@ -605,12 +605,15 @@ async def _run_deep_analysis(
     except Exception:  # pragma: no cover
         count_tokens = None
     batches = _da.batch_units(units, max_batch_tokens=max_batch_tokens, count_tokens=count_tokens)
+    # max_batches теперь — предохранитель от runaway, а не рабочая обрезка: при
+    # плотных пачках (6k токенов) все ~400 юнитов укладываются в лимит и
+    # обрабатываются полностью; иерархический reduce сводит все выжимки.
     truncated = 0
     if len(batches) > max_batches:
         truncated = len(batches) - max_batches
         batches = batches[:max_batches]
     log(f"deep: единиц={len(units)}, пачек={len(batches)}"
-        + (f" (+{truncated} пачек отсечено по лимиту)" if truncated else ""))
+        + (f" (+{truncated} за предохранителем)" if truncated else ""))
 
     # 5) MAP: выжать сигналы из каждой пачки (последовательно — один инстанс LLM).
     summaries: list[str] = []
@@ -637,8 +640,29 @@ async def _run_deep_analysis(
     if stopped():
         raise ChatCancelled()
 
-    # 6) REDUCE: синтез цельного разбора.
-    log(f"deep: reduce из {len(summaries)} выжимок")
+    # 6) REDUCE — иерархический: если выжимок много, сначала сводим их группами
+    # (по FANIN), потом финальный синтез. Так в ответ попадают ВСЕ пачки, а не
+    # первые сколько-то, и промпт финального reduce не переполняется.
+    FANIN = 10
+    tier = 0
+    while len(summaries) > FANIN:
+        tier += 1
+        groups = _da.group_list(summaries, FANIN)
+        merged: list[str] = []
+        for gi, g in enumerate(groups, 1):
+            if stopped():
+                raise ChatCancelled()
+            try:
+                r = await _llm(_da.build_merge_messages(question, g), 800)
+            except ChatCancelled:
+                raise
+            except Exception:  # слияние группы сорвалось — сохраняем сырьё группы
+                r = "\n".join(g)
+            merged.append((r or "").strip() or "\n".join(g))
+            log(f"deep: merge t{tier} {gi}/{len(groups)}")
+        summaries = merged
+
+    log(f"deep: финальный reduce из {len(summaries)} выжимок")
     reduce_msgs = _da.build_reduce_messages(question, summaries, schema=schema)
     try:
         raw = await _llm(reduce_msgs, max_answer_tokens)
