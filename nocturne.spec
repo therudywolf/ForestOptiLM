@@ -50,6 +50,7 @@ hiddenimports += ["tiktoken_ext.openai_public"]
 hiddenimports += ["retrieval_enhance"]  # лениво импортится в notebook_chat (точный поиск)
 hiddenimports += ["notebook_wiki"]      # лениво импортится в notebook_gui (компиляция вики)
 hiddenimports += ["md3"]                # MD3-тема, импортится в gui.py/notebook_gui.py
+hiddenimports += ["app_version"]        # версия для сайдбара (ленивый импорт в gui.py)
 try:
     datas += copy_metadata("tiktoken")
 except Exception:

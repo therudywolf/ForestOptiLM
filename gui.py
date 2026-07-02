@@ -198,7 +198,14 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
         ctk.CTkLabel(sb, text="Nocturne Data Forge",
                      font=ctk.CTkFont(size=15, weight="bold")
                      ).pack(anchor="w", pady=(14, 0), **pad)
-        ctk.CTkLabel(sb, text="Локальный анализ данных через LLM",
+        try:
+            from app_version import APP_VERSION as _app_ver
+        except Exception:
+            _app_ver = ""
+        _subtitle = "Локальный анализ данных через LLM"
+        if _app_ver:
+            _subtitle += f"  ·  v{_app_ver}"
+        ctk.CTkLabel(sb, text=_subtitle,
                      text_color=_md3.ON_SURFACE_VARIANT, font=ctk.CTkFont(size=11)
                      ).pack(anchor="w", pady=(0, 10), **pad)
 
