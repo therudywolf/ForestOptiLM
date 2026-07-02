@@ -55,7 +55,6 @@ from processor import (
     compute_job_id,
     fetch_models_info,
     categorize_models,
-    answer_with_context,
     set_runtime_modes,
     set_runtime_limits,
     summarize_model_tokens_by_category,
@@ -64,7 +63,6 @@ from processor import (
     run_map_reduce,
     test_lmstudio_connection,
 )
-from pipeline import build_index, query_index
 from run_config import RunConfig
 from notebook_gui import NotebookUIMixin
 import connection_presets as cp
@@ -669,29 +667,6 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
             self._analysis_panel.pack_forget()
             self._save_row.pack_forget()
 
-    def _build_rag_tab(self, parent: ctk.CTkFrame) -> None:
-        row1 = ctk.CTkFrame(parent, fg_color="transparent")
-        row1.pack(fill="x", pady=(0, 8))
-        ctk.CTkLabel(row1, text="Директория индекса").pack(side="left", padx=(0, 8))
-        self._rag_index_dir_var = ctk.StringVar(value=str(self._runtime_state.get("rag_index_dir", ".nocturne_index")))
-        ctk.CTkEntry(row1, textvariable=self._rag_index_dir_var).pack(side="left", fill="x", expand=True)
-
-        row2 = ctk.CTkFrame(parent, fg_color="transparent")
-        row2.pack(fill="x", pady=(0, 8))
-        ctk.CTkLabel(row2, text="top_k").pack(side="left", padx=(0, 8))
-        self._rag_top_k_var = ctk.StringVar(value=str(self._runtime_state.get("rag_top_k", 8)))
-        ctk.CTkEntry(row2, textvariable=self._rag_top_k_var, width=80).pack(side="left")
-        ctk.CTkButton(row2, text="Построить индекс", width=140, command=self._on_build_index).pack(side="left", padx=(12, 8))
-        ctk.CTkButton(row2, text="Задать вопрос", width=120, command=self._on_rag_ask).pack(side="left")
-
-        ctk.CTkLabel(parent, text="Вопрос к индексу").pack(anchor="w", pady=(4, 2))
-        self._rag_question_text = ctk.CTkTextbox(parent, height=100, wrap="word")
-        self._rag_question_text.pack(fill="x", pady=(0, 8))
-
-        ctk.CTkLabel(parent, text="Ответ RAG").pack(anchor="w", pady=(2, 2))
-        self._rag_answer_text = ctk.CTkTextbox(parent, wrap="word")
-        self._rag_answer_text.pack(fill="both", expand=True)
-
     # ------------------------------------------------------------------ #
     #  Event handlers
     # ------------------------------------------------------------------ #
@@ -926,116 +901,6 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
             self._model_poll_after_id = None
             return
         self._model_poll_after_id = self.after(4000, self._poll_loaded_model)
-
-    def _on_build_index(self) -> None:
-        if self._running:
-            self._set_status("Дождитесь завершения текущей задачи", _STATUS_WARN)
-            return
-        if self._folder_path is None and self._file_path is None:
-            self._set_status("Выберите файл или папку для индекса", _STATUS_WARN)
-            return
-        emb = self._pick_embedding_model()
-        if not emb:
-            self._set_status("Не выбрана embedding-модель", _STATUS_WARN)
-            return
-        index_dir = Path(self._rag_index_dir_var.get().strip() or ".nocturne_index")
-        base_url = self._url_var.get().strip() or API_BASE
-        api_key = self._api_key_var.get().strip() or API_KEY
-        context_budget = self._get_context_budget()
-        reserve = self._get_response_reserve(context_budget)
-        chunk_size = compute_dynamic_chunk_size(context_budget, SYSTEM_PROMPT_MAP, "index build", response_reserve=reserve)
-        input_paths = [self._folder_path] if self._folder_path else [self._file_path]  # type: ignore[list-item]
-
-        self._set_status("RAG: строю индекс…")
-        self._append_log_line(f"[RAG] build_index dir={index_dir} embedding={emb}", "general")
-
-        def do_build() -> None:
-            try:
-                stats = build_index(
-                    input_paths=input_paths,  # type: ignore[arg-type]
-                    index_dir=index_dir,
-                    base_url=base_url,
-                    api_key=api_key,
-                    embedding_model=emb,
-                    chunk_size_tokens=chunk_size,
-                )
-                self.after(0, lambda: self._set_status(
-                    f"Индекс готов: chunks={stats.chunks_total}, files={stats.files_total}", _STATUS_OK
-                ))
-                self.after(0, lambda: self._append_log_line(
-                    f"[RAG] index built dir={stats.index_dir} chunks={stats.chunks_total} files={stats.files_total}",
-                    "summary",
-                ))
-            except Exception as exc:
-                safe = sanitize_for_log(str(exc))
-                self.after(0, lambda: self._set_status(f"Ошибка индекса: {safe}", _STATUS_ERR))
-
-        threading.Thread(target=do_build, daemon=True).start()
-
-    def _on_rag_ask(self) -> None:
-        question = self._rag_question_text.get("1.0", "end-1c").strip()
-        if not question:
-            self._set_status("Введите вопрос для RAG", _STATUS_WARN)
-            return
-        emb = self._pick_embedding_model()
-        if not emb:
-            self._set_status("Не выбрана embedding-модель", _STATUS_WARN)
-            return
-        model = self._model_var.get().strip()
-        if not model or model.startswith("("):
-            self._set_status("Выберите LLM модель", _STATUS_WARN)
-            return
-        try:
-            top_k = max(1, int(self._rag_top_k_var.get().strip() or "8"))
-        except Exception:
-            top_k = 8
-        index_dir = Path(self._rag_index_dir_var.get().strip() or ".nocturne_index")
-        base_url = self._url_var.get().strip() or API_BASE
-        api_key = self._api_key_var.get().strip() or API_KEY
-
-        self._set_status("RAG: ищу контекст и формирую ответ…")
-        self._append_log_line(f"[RAG] query top_k={top_k} model={model} embedding={emb}", "general")
-
-        def do_ask() -> None:
-            try:
-                hits = query_index(
-                    question=question,
-                    index_dir=index_dir,
-                    base_url=base_url,
-                    api_key=api_key,
-                    embedding_model=emb,
-                    top_k=top_k,
-                )
-                contexts = [h.text for h in hits]
-                if not contexts:
-                    self.after(0, lambda: self._rag_answer_text.delete("1.0", "end"))
-                    self.after(0, lambda: self._rag_answer_text.insert("1.0", "Контексты не найдены в индексе."))
-                    self.after(0, lambda: self._set_status("RAG: контексты не найдены", _STATUS_WARN))
-                    return
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                try:
-                    answer = loop.run_until_complete(
-                        answer_with_context(
-                            question=question,
-                            contexts=contexts,
-                            base_url=base_url,
-                            api_key=api_key,
-                            model=model,
-                            workers=max(1, int(self._workers_var.get() or "1")),
-                            api_mode=self._api_mode_var.get().strip().lower(),
-                        )
-                    )
-                finally:
-                    loop.close()
-                self.after(0, lambda: self._rag_answer_text.delete("1.0", "end"))
-                self.after(0, lambda a=answer: self._rag_answer_text.insert("1.0", a))
-                self.after(0, lambda: self._set_status("RAG: ответ готов", _STATUS_OK))
-            except Exception as exc:
-                safe = sanitize_for_log(str(exc))
-                self.after(0, lambda: self._set_status(f"RAG ошибка: {safe}", _STATUS_ERR))
-
-        threading.Thread(target=do_ask, daemon=True).start()
 
     def _on_recalc_selected_model_context(self) -> None:
         model = self._model_var.get().strip()
