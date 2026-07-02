@@ -24,7 +24,7 @@ from pathlib import Path
 import faiss
 import numpy as np
 
-from bm25 import BM25Index, reciprocal_rank_fusion
+from bm25 import BM25Index, fuse_rankings
 from models import DocumentChunk, RetrievalHit, IndexStats
 
 logger = logging.getLogger("nocturne")
@@ -80,6 +80,16 @@ class LocalFaissStore:
             "has_vision": bool(has_vision),
         }
         self.info_file.write_text(json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8")
+        # Прогреть BM25-кэш прямо на сборке: первый поиск пользователя не будет
+        # платить за токенизацию всего корпуса (на сотнях тысяч чанков — десятки
+        # секунд). Ошибка прогрева не критична — кэш построится на первом запросе.
+        try:
+            sig = self._index_signature()
+            if sig:
+                bm = BM25Index().fit([c.chunk_id for c in chunks], [c.text for c in chunks])
+                bm.save(self.bm25_cache_file, sig)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("bm25: прогрев кэша при сборке не удался — %s", exc)
         return IndexStats(
             chunks_total=len(chunks),
             files_total=files_total,
@@ -151,6 +161,16 @@ class LocalFaissStore:
         self._cached_sig = ()
         self._cached_bm25 = None
         self._cached_bm25_sig = ()
+        # Перегреть BM25-кэш под новую сигнатуру: иначе первый поиск после
+        # добавления источника заново токенизирует весь корпус.
+        try:
+            sig = self._index_signature()
+            if sig:
+                ids = [self._meta_id(i, m) for i, m in enumerate(all_meta)]
+                texts = [str(m.get("text") or "") for m in all_meta]
+                BM25Index().fit(ids, texts).save(self.bm25_cache_file, sig)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("bm25: перегрев кэша при append не удался — %s", exc)
         return IndexStats(
             chunks_total=chunks_total,
             files_total=files_total,
@@ -192,6 +212,10 @@ class LocalFaissStore:
     def _meta_id(pos: int, m: dict) -> str:
         return str(m.get("chunk_id") or pos)
 
+    @property
+    def bm25_cache_file(self) -> Path:
+        return self.index_dir / "bm25_cache.pkl"
+
     def _ensure_bm25(self, meta: list[dict], signature: tuple) -> BM25Index:
         # Штампуем BM25 ИМЕННО той сигнатурой, из meta которой он построен (а не
         # текущим self._cached_sig — тот мог уйти вперёд из-за параллельного reload,
@@ -199,9 +223,14 @@ class LocalFaissStore:
         with self._lock:
             if self._cached_bm25 is not None and self._cached_bm25_sig == signature:
                 return self._cached_bm25
-            ids = [self._meta_id(i, m) for i, m in enumerate(meta)]
-            texts = [str(m.get("text") or "") for m in meta]
-            bm = BM25Index().fit(ids, texts)
+            # Дисковый кэш: на больших корпусах fit (токенизация всего корпуса)
+            # занимает десятки секунд — кэш срезает холодный старт до секунд.
+            bm = BM25Index.load(self.bm25_cache_file, signature)
+            if bm is None or len(bm.ids) != len(meta):
+                ids = [self._meta_id(i, m) for i, m in enumerate(meta)]
+                texts = [str(m.get("text") or "") for m in meta]
+                bm = BM25Index().fit(ids, texts)
+                bm.save(self.bm25_cache_file, signature)
             self._cached_bm25 = bm
             self._cached_bm25_sig = signature
             return bm
@@ -214,11 +243,15 @@ class LocalFaissStore:
         candidate_k: int | None = None,
         min_score_ratio: float = 0.0,
     ) -> list[RetrievalHit]:
-        """FAISS (вектор) + BM25 (лексика) → слияние RRF. Точные CVE/хосты/пакеты
-        ловит BM25, семантику — вектор.
+        """FAISS (вектор) + BM25 (лексика) → score-aware слияние (fuse_rankings).
+        Точные CVE/хосты/пакеты ловит BM25, семантику — вектор.
+
+        Слияние учитывает не только ранги (RRF), но и величину скоров: на больших
+        корпусах (сотни тысяч чанков) списки вектора и BM25 почти не пересекаются,
+        и чистый RRF вырождался в связки 1/(k+1) со случайным порядком.
 
         ``min_score_ratio`` (0 = выкл) отбрасывает «хвост» — фрагменты со слитым
-        RRF-скором ниже ``min_score_ratio × лучший_скор``. Консервативно (0.15)
+        скором ниже ``min_score_ratio × лучший_скор``. Консервативно (0.15)
         убирает явный шум, не задевая релевантные кандидаты — recall важнее для
         grounded-чата, поэтому по умолчанию фильтр выключен.
         """
@@ -227,25 +260,29 @@ class LocalFaissStore:
         index, meta, dim, signature = self._load_cached_index_meta()
         if not meta:
             return []
-        cand = candidate_k or max(top_k * 5, top_k)
+        # Глубокий пул кандидатов: на большом корпусе пересечения списков (главный
+        # сигнал слияния) при мелком пуле практически не случаются.
+        cand = candidate_k or max(top_k * 5, 50)
         cand = min(cand, len(meta))
 
-        vec_ids: list[str] = []
+        vec_ranked: list[tuple[str, float]] = []
         if query_vector and dim is not None and len(query_vector) == dim:
             q = np.asarray([query_vector], dtype="float32")
             faiss.normalize_L2(q)
-            _scores, idx = index.search(q, cand)
-            vec_ids = [
-                self._meta_id(i, meta[i]) for i in idx[0] if 0 <= i < len(meta)
+            scores, idx = index.search(q, cand)
+            vec_ranked = [
+                (self._meta_id(i, meta[i]), float(s))
+                for s, i in zip(scores[0], idx[0])
+                if 0 <= i < len(meta)
             ]
 
         bm = self._ensure_bm25(meta, signature)
-        bm_ids = [cid for cid, _ in bm.search(query_text, top_k=cand)]
+        bm_ranked = [(cid, float(s)) for cid, s in bm.search(query_text, top_k=cand)]
 
-        rankings = [r for r in (vec_ids, bm_ids) if r]
+        rankings = [r for r in (vec_ranked, bm_ranked) if r]
         if not rankings:
             return []
-        fused = reciprocal_rank_fusion(rankings, top_k=top_k)
+        fused = fuse_rankings(rankings, top_k=top_k)
         if fused and min_score_ratio > 0.0:
             floor = fused[0][1] * min_score_ratio
             fused = [(cid, s) for cid, s in fused if s >= floor]
