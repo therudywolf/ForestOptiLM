@@ -577,12 +577,16 @@ async def _run_deep_analysis(
     except Exception as exc:  # noqa: BLE001
         log(f"deep: expansion пропущен: {exc}")
 
-    # 2) Широкий сбор: семантика по вопросу + лексика по каждой сущности.
+    # 2) Широкий сбор: семантика по вопросу + ПЕРЕФРАЗИРОВКИ (другой словарь —
+    # ловят иную лексику причин/контекста, которую исходная формулировка упускает)
+    # + лексика по каждой сущности.
     hit_lists = [_retrieve(question, 150)]
+    for q in queries[1:4]:  # перефразировки без оригинала
+        hit_lists.append(_retrieve(q, 120))
     for ent in entities[:4]:
         hit_lists.append(_retrieve(ent, 250))
     hits = _re.merge_hits(hit_lists, cap=max(cap_units - 100, 200))
-    log(f"deep: сущности={entities or '—'}, кандидатов={len(hits)}")
+    log(f"deep: сущности={entities or '—'}, перефраз={max(0, len(queries) - 1)}, кандидатов={len(hits)}")
     if not hits:
         return None  # нечего анализировать → откат на обычный путь
     if stopped():
