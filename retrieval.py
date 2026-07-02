@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import pickle
 import threading
 from pathlib import Path
 
@@ -88,8 +89,15 @@ class LocalFaissStore:
             if sig:
                 bm = BM25Index().fit([c.chunk_id for c in chunks], [c.text for c in chunks])
                 bm.save(self.bm25_cache_file, sig)
+                # Прогреть meta-кэш (pickle): холодный старт не парсит сотни тысяч
+                # JSON-строк заново. Собираем ровно те же dict-и, что даёт _read_meta().
+                self._write_meta_cache(sig, [
+                    {"chunk_id": c.chunk_id, "source_path": c.source_path,
+                     "text": c.text, "tokens": c.tokens, "metadata": c.metadata}
+                    for c in chunks
+                ])
         except Exception as exc:  # noqa: BLE001
-            logger.warning("bm25: прогрев кэша при сборке не удался — %s", exc)
+            logger.warning("bm25/meta: прогрев кэша при сборке не удался — %s", exc)
         return IndexStats(
             chunks_total=len(chunks),
             files_total=files_total,
@@ -169,8 +177,9 @@ class LocalFaissStore:
                 ids = [self._meta_id(i, m) for i, m in enumerate(all_meta)]
                 texts = [str(m.get("text") or "") for m in all_meta]
                 BM25Index().fit(ids, texts).save(self.bm25_cache_file, sig)
+                self._write_meta_cache(sig, all_meta)  # meta уже распарсена — переиспользуем
         except Exception as exc:  # noqa: BLE001
-            logger.warning("bm25: перегрев кэша при append не удался — %s", exc)
+            logger.warning("bm25/meta: перегрев кэша при append не удался — %s", exc)
         return IndexStats(
             chunks_total=chunks_total,
             files_total=files_total,
@@ -329,7 +338,7 @@ class LocalFaissStore:
 
             try:
                 index = faiss.read_index(str(self.index_file))
-                meta = self._read_meta()
+                meta = self._read_meta_cached(signature)  # pickle-кэш ускоряет холодный старт
             except OSError:
                 return None, [], None, ()  # каталог подменили/удалили после stat()
             dim = None
@@ -345,6 +354,43 @@ class LocalFaissStore:
             self._cached_sig = signature
             self._cached_dim = dim
         return index, meta, dim, signature
+
+    @property
+    def meta_cache_file(self) -> Path:
+        return self.index_dir / "meta_cache.pkl"
+
+    def _read_meta_cached(self, signature: tuple) -> list[dict]:
+        """Meta через pickle-кэш: парс 455k JSON-строк ~7с → загрузка pickle ~2-3с.
+        Валидируется сигнатурой корпуса; несовпадение/сбой → перечитать JSONL и
+        перезаписать кэш. Источник истины остаётся chunks_meta.jsonl."""
+        p = self.meta_cache_file
+        try:
+            with p.open("rb") as f:
+                payload = pickle.load(f)
+            if isinstance(payload, dict) and tuple(payload.get("sig") or ()) == tuple(signature):
+                meta = payload.get("meta")
+                if isinstance(meta, list):
+                    return meta
+        except FileNotFoundError:
+            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("meta cache %s не читается (%s) — перечитываю JSONL", p, exc)
+        meta = self._read_meta()
+        self._write_meta_cache(signature, meta)
+        return meta
+
+    def _write_meta_cache(self, signature: tuple, meta: list[dict]) -> None:
+        """Атомарно записать pickle-кэш meta (tmp+replace). Сбой не критичен —
+        кэш перестроится на первом запросе."""
+        p = self.meta_cache_file
+        try:
+            tmp = p.with_suffix(".tmp")
+            with tmp.open("wb") as f:
+                pickle.dump({"sig": tuple(signature), "meta": meta}, f,
+                            protocol=pickle.HIGHEST_PROTOCOL)
+            tmp.replace(p)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("meta cache: не удалось сохранить %s — %s", p, exc)
 
     def _read_meta(self) -> list[dict]:
         out: list[dict] = []

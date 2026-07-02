@@ -125,6 +125,56 @@ class TestHybridSearch(unittest.TestCase):
             self.assertIn("z0", ids)
             self.assertNotIn("c0", ids)
 
+    def test_meta_pickle_cache_written_and_reused(self) -> None:
+        # Холодный старт: первый запрос парсит JSONL и пишет meta_cache.pkl;
+        # свежий инстанс (пустой in-memory кэш) обязан поднять корпус из pickle.
+        from retrieval import LocalFaissStore
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td)
+            store = self._store(d)
+            store.hybrid_search("memory leak", [1.0, 0.0, 0.0, 0.0], top_k=3)
+            self.assertTrue(store.meta_cache_file.is_file())  # кэш записан
+
+            fresh = LocalFaissStore(index_dir=d)  # без прогретого in-memory кэша
+            hits = fresh.hybrid_search("CVE-2024-3094", [1.0, 0.0, 0.0, 0.0], top_k=3)
+            self.assertIn("c2", [h.chunk_id for h in hits])  # данные из pickle корректны
+
+    def test_meta_pickle_cache_ignored_on_stale_signature(self) -> None:
+        # Пересборка меняет сигнатуру → устаревший pickle игнорируется, JSONL
+        # перечитывается. Иначе получили бы старый корпус (боль «нет ответа»).
+        from retrieval import LocalFaissStore
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td)
+            store = self._store(d)
+            store.hybrid_search("memory leak", [1.0, 0.0, 0.0, 0.0], top_k=3)  # пишет pickle
+
+            LocalFaissStore(index_dir=d).build(
+                [DocumentChunk("z0", "z.txt", "completely different zebra content", 5, {})],
+                [[0.0, 0.0, 0.0, 1.0]], embedding_model="fake")
+
+            fresh = LocalFaissStore(index_dir=d)
+            hits = fresh.hybrid_search("zebra", [0.0, 0.0, 0.0, 1.0], top_k=3)
+            ids = [h.chunk_id for h in hits]
+            self.assertIn("z0", ids)
+            self.assertNotIn("c0", ids)  # старый корпус из stale pickle не всплыл
+
+    def test_meta_pickle_cache_corrupt_falls_back(self) -> None:
+        # Битый pickle не должен ронять запрос — молча перечитываем JSONL.
+        from retrieval import LocalFaissStore
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td)
+            store = self._store(d)
+            store.meta_cache_file.write_bytes(b"\x00 not a pickle \xff")
+
+            fresh = LocalFaissStore(index_dir=d)
+            hits = fresh.hybrid_search("CVE-2024-3094", [1.0, 0.0, 0.0, 0.0], top_k=3)
+            self.assertIn("c2", [h.chunk_id for h in hits])
+            # После фолбэка кэш перезаписан валидным содержимым.
+            import pickle
+            payload = pickle.loads(store.meta_cache_file.read_bytes())
+            self.assertIsInstance(payload, dict)
+            self.assertIn("meta", payload)
+
 
 if __name__ == "__main__":
     unittest.main()
