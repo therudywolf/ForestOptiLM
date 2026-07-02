@@ -43,6 +43,47 @@ class TestNomicPrefixes(unittest.TestCase):
         self.assertEqual(sent, ["search_document: привет"])
 
 
+class TestEmbedConcurrency(unittest.TestCase):
+    """Конвейерный embed_texts обязан сохранять порядок векторов = порядку текстов."""
+
+    def _client_with_echo(self) -> EmbeddingClient:
+        c = EmbeddingClient("http://h:1234", "k", "bge-m3")  # без префиксов
+        c._load_attempted = True
+
+        def fake_batch(batch: list[str]) -> list[list[float]]:
+            # вектор кодирует исходный текст: [номер] — порядок проверяем по нему
+            import time as _t, random as _r
+            _t.sleep(_r.random() * 0.01)  # перемешать завершение батчей
+            return [[float(t.split("#")[1])] for t in batch]
+
+        c._embed_batch = fake_batch  # type: ignore[method-assign]
+        return c
+
+    def test_order_preserved_under_concurrency(self) -> None:
+        c = self._client_with_echo()
+        texts = [f"txt#{i}" for i in range(101)]  # не кратно batch_size
+        vecs = c.embed_texts(texts, batch_size=7, concurrency=4)
+        self.assertEqual([v[0] for v in vecs], [float(i) for i in range(101)])
+
+    def test_progress_reaches_total(self) -> None:
+        c = self._client_with_echo()
+        seen: list[tuple[int, int]] = []
+        c.embed_texts([f"txt#{i}" for i in range(23)], batch_size=5, concurrency=3,
+                      on_batch=lambda d, t: seen.append((d, t)))
+        self.assertEqual(seen[-1], (23, 23))
+        self.assertEqual(len(seen), 5)  # по одному колбэку на батч
+
+    def test_serial_path_identical(self) -> None:
+        c = self._client_with_echo()
+        texts = [f"txt#{i}" for i in range(10)]
+        self.assertEqual(c.embed_texts(texts, batch_size=3, concurrency=1),
+                         c.embed_texts(texts, batch_size=3, concurrency=4))
+
+    def test_empty_input(self) -> None:
+        c = self._client_with_echo()
+        self.assertEqual(c.embed_texts([], batch_size=4, concurrency=3), [])
+
+
 class TestEmbeddingRetry(unittest.TestCase):
     @patch("embeddings.time.sleep", return_value=None)
     def test_retries_transient_500_then_succeeds(self, _sleep: MagicMock) -> None:

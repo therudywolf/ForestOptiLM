@@ -197,7 +197,7 @@ def build_index(
     # task="document" → nomic-префикс; эмбеддим БЕЗ служебных заголовков (они забивают
     # окно nomic), но в индексе/цитатах остаётся полный текст. Прогресс по батчам.
     _embed_texts = [strip_chunk_headers(c.text) or c.text for c in unique_chunks]
-    vectors = emb_client.embed_texts(_embed_texts, batch_size=16, task="document", on_batch=_embp)
+    vectors = emb_client.embed_texts(_embed_texts, batch_size=32, task="document", on_batch=_embp)
     store = LocalFaissStore(index_dir=index_dir)
     stats = store.build(unique_chunks, vectors, embedding_model=embedding_model,
                         chunk_size_tokens=chunk_size_tokens,
@@ -309,7 +309,7 @@ def add_to_index(
     if on_progress:
         on_progress(0, len(unique), "index_embed")
     _embed_texts = [strip_chunk_headers(c.text) or c.text for c in unique]
-    vectors = emb_client.embed_texts(_embed_texts, batch_size=16, task="document", on_batch=_embp)
+    vectors = emb_client.embed_texts(_embed_texts, batch_size=32, task="document", on_batch=_embp)
     logger.info("Incremental index add: new_files=%s new_chunks=%s", len(new_files), len(unique))
     stats = store.append(unique, vectors)
     _evict_store(index_dir)  # дозаписали индекс → выкинуть устаревший кэш-стор

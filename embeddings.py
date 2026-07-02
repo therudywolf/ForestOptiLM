@@ -144,11 +144,18 @@ class EmbeddingClient:
         batch_size: int = 32,
         task: str | None = None,
         on_batch: Callable[[int, int], None] | None = None,
+        concurrency: int = 3,
     ) -> list[list[float]]:
         """task='document' при индексации, 'query' при поиске — для nomic-префиксов.
 
         on_batch(done, total) — прогресс по обработанным текстам (эмбеддинг 200+
         чанков иначе читается как зависание).
+
+        ``concurrency`` — сколько батчей держать в полёте одновременно. Строго
+        последовательный клиент оставлял сервер простаивать на время HTTP-обмена;
+        конвейер из 2-4 запросов скрывает латентность (LM Studio при нехватке
+        параллелизма просто ставит запросы в очередь — хуже последовательного
+        не бывает). Порядок векторов на выходе совпадает с порядком texts.
         """
         try:  # пометить embedding-модель для выгрузки при закрытии (ленивый импорт)
             from processor import note_app_loaded_model
@@ -158,17 +165,50 @@ class EmbeddingClient:
             pass
         prefix = _task_prefix(self.model, task)
         total = len(texts)
-        vectors: list[list[float]] = []
+        batches: list[list[str]] = []
         for start in range(0, total, batch_size):
             batch = texts[start : start + batch_size]
             if prefix:
                 batch = [prefix + t for t in batch]
-            vectors.extend(self._embed_batch(batch))
-            if on_batch:
-                try:
-                    on_batch(min(start + batch_size, total), total)
-                except Exception:
-                    pass
+            batches.append(batch)
+        if not batches:
+            return []
+        # Загрузку модели инициируем один раз ДО конвейера, чтобы параллельные
+        # первые батчи не гонялись в _try_load_model.
+        self._try_load_model()
+        workers = max(1, min(int(concurrency or 1), len(batches)))
+        if workers == 1:
+            vectors: list[list[float]] = []
+            done = 0
+            for batch in batches:
+                vectors.extend(self._embed_batch(batch))
+                done += len(batch)
+                if on_batch:
+                    try:
+                        on_batch(done, total)
+                    except Exception:
+                        pass
+            return vectors
+        from concurrent.futures import ThreadPoolExecutor
+
+        results: list[list[list[float]] | None] = [None] * len(batches)
+        done_texts = 0
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            from concurrent.futures import as_completed
+
+            futs = {pool.submit(self._embed_batch, b): i for i, b in enumerate(batches)}
+            for fut in as_completed(futs):
+                i = futs[fut]
+                results[i] = fut.result()  # ошибка батча (после ретраев) валит всё — как раньше
+                done_texts += len(batches[i])
+                if on_batch:
+                    try:
+                        on_batch(done_texts, total)
+                    except Exception:
+                        pass
+        vectors = []
+        for r in results:
+            vectors.extend(r or [])
         return vectors
 
     def _embed_batch(self, texts: list[str]) -> list[list[float]]:
