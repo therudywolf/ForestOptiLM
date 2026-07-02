@@ -55,13 +55,28 @@ class ConnectionPreset:
 
 
 def presets_path() -> Path:
-    """`.local/connection_presets.json` рядом с приложением (как ui_runtime)."""
+    """`.local/connection_presets.json` в едином каталоге конфига рядом с exe
+    (не внутри `_internal`) — как lmstudio.json/ui_runtime.json."""
+    try:
+        from lmstudio_config import app_config_dir
+        return app_config_dir() / "connection_presets.json"
+    except Exception:
+        return Path(__file__).resolve().parent / PRESETS_FILE
+
+
+def _legacy_presets_path() -> Path:
+    """Старое расположение (относительно модуля → _internal/.local в exe)."""
     return Path(__file__).resolve().parent / PRESETS_FILE
 
 
 def load_presets(path: Path | None = None) -> list[ConnectionPreset]:
     """Прочитать пресеты. Битый/отсутствующий файл → пустой список (не падаем)."""
     p = path or presets_path()
+    # миграция: если в новом каталоге пусто, читаем из старого _internal/.local
+    if path is None and not p.is_file():
+        legacy = _legacy_presets_path()
+        if legacy.is_file() and legacy != p:
+            p = legacy
     try:
         raw = json.loads(p.read_text(encoding="utf-8"))
     except FileNotFoundError:

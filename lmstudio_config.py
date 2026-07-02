@@ -81,7 +81,24 @@ def _candidate_paths() -> list[Path]:
     return paths
 
 
+def app_config_dir() -> Path:
+    """Стабильный каталог конфига РЯДОМ с приложением: в упакованном exe — возле
+    бинарника (exe_dir/.local), не внутри read-only бандла `_internal`. Один
+    каталог для lmstudio.json / ui_runtime.json / connection_presets.json →
+    бэкап и восстановление тривиальны, конфиг не теряется при пересборке."""
+    if getattr(sys, "frozen", False):
+        base = Path(sys.executable).resolve().parent
+    else:
+        base = Path(__file__).resolve().parent
+    return base / ".local"
+
+
 def _runtime_ui_path() -> Path:
+    return app_config_dir() / "ui_runtime.json"
+
+
+def _legacy_runtime_ui_path() -> Path:
+    """Старое расположение (относительно модуля → _internal/.local в exe)."""
     return Path(__file__).resolve().parent / RUNTIME_UI_FILE
 
 
@@ -283,7 +300,12 @@ def load_ui_runtime_state() -> dict[str, object]:
     }
     path = _runtime_ui_path()
     if not path.is_file():
-        return defaults
+        # миграция: читаем из старого _internal/.local, если новый ещё не создан
+        legacy = _legacy_runtime_ui_path()
+        if legacy.is_file() and legacy != path:
+            path = legacy
+        else:
+            return defaults
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
