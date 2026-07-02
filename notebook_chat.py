@@ -341,6 +341,7 @@ async def answer_question(
     stop_flag: Callable[[], bool] | None = None,
     enhanced: bool = False,
     on_token: Callable[[str], None] | None = None,
+    deep_mode: str = "off",
 ) -> ChatResult:
     """Полный цикл: retrieval по блокноту → grounded-ответ с цитатами.
 
@@ -379,9 +380,28 @@ async def answer_question(
             _stopped,
         )
 
-    def _retrieve(q: str) -> list[Any]:
+    def _retrieve(q: str, k: int | None = None) -> list[Any]:
         return notebook.query(q, base_url=base_url, api_key=api_key,
-                              embedding_model=embedding_model, top_k=top_k)
+                              embedding_model=embedding_model, top_k=k or top_k)
+
+    # --- Глубокий анализ (map-reduce над всем следом сущности/темы) ----------
+    import deep_analysis as _da
+    want_deep = (deep_mode == "on") or (
+        deep_mode == "auto" and _da.is_analytical_question(question))
+    if want_deep:
+        try:
+            res = await _run_deep_analysis(
+                notebook, question, _llm=_llm, _retrieve=_retrieve,
+                stopped=_stopped, log=_log, cancelled=_cancelled_result,
+                chat_model=chat_model, on_token=on_token,
+                max_context_tokens=max_context_tokens, max_answer_tokens=max_answer_tokens,
+            )
+            if res is not None:
+                return res
+        except ChatCancelled:
+            return _cancelled_result([])
+        except Exception as exc:  # noqa: BLE001 — глубокий режим не должен рушить чат
+            _log(f"глубокий анализ недоступен, обычный режим: {exc}")
 
     if enhanced:
         # «Точный поиск» по мотивам qmd: query-expansion (выше recall) →
@@ -509,4 +529,142 @@ async def answer_question(
         contexts=[c.to_citation() for c in contexts],
         refused=is_refusal(answer),
         model=chat_model,
+    )
+
+
+async def _run_deep_analysis(
+    notebook: Any,
+    question: str,
+    *,
+    _llm: Callable[[list[dict[str, str]], int], Any],
+    _retrieve: Callable[..., list[Any]],
+    stopped: Callable[[], bool],
+    log: Callable[[str], None],
+    cancelled: Callable[[list[ContextItem]], ChatResult],
+    chat_model: str,
+    on_token: Callable[[str], None] | None,
+    max_context_tokens: int,
+    max_answer_tokens: int,
+    cap_units: int = 400,
+    max_batch_tokens: int = 3500,
+    max_batches: int = 24,
+) -> ChatResult | None:
+    """Оркестратор глубокого анализа: identify → gather(+соседи) → map → reduce.
+
+    Возвращает ChatResult, либо None — если для map-reduce не набралось материала
+    (тогда answer_question мягко откатывается на обычный путь)."""
+    import deep_analysis as _da
+    import retrieval_enhance as _re
+    from retrieval import LocalFaissStore
+
+    schema = str(getattr(notebook, "schema", "") or "")
+    if on_token:
+        try:
+            on_token("🔬 Глубокий анализ: собираю данные по всему корпусу…\n")
+        except Exception:
+            pass
+
+    # 1) Сущности/переформулировки из вопроса (один LLM-вызов).
+    entities: list[str] = []
+    queries = [question]
+    try:
+        raw = await _llm(_re.build_expansion_messages(question, schema=schema), 250)
+        entities = _re.parse_entities(raw)
+        queries = _re.parse_expansions(raw, question)
+    except ChatCancelled:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        log(f"deep: expansion пропущен: {exc}")
+
+    # 2) Широкий сбор: семантика по вопросу + лексика по каждой сущности.
+    hit_lists = [_retrieve(question, 150)]
+    for ent in entities[:4]:
+        hit_lists.append(_retrieve(ent, 250))
+    hits = _re.merge_hits(hit_lists, cap=max(cap_units - 100, 200))
+    log(f"deep: сущности={entities or '—'}, кандидатов={len(hits)}")
+    if not hits:
+        return None  # нечего анализировать → откат на обычный путь
+    if stopped():
+        raise ChatCancelled()
+
+    # 3) Добор соседей того же источника (диалоговый/документный контекст).
+    try:
+        _, meta, _, _ = LocalFaissStore(notebook.index_dir)._load_cached_index_meta()
+    except Exception:
+        meta = []
+    units = _da.expand_with_neighbors(hits, meta, radius=1, cap=cap_units)
+
+    # 4) Пачки под map (сквозная нумерация [n] для цитат).
+    try:
+        from parser import count_tokens
+    except Exception:  # pragma: no cover
+        count_tokens = None
+    batches = _da.batch_units(units, max_batch_tokens=max_batch_tokens, count_tokens=count_tokens)
+    truncated = 0
+    if len(batches) > max_batches:
+        truncated = len(batches) - max_batches
+        batches = batches[:max_batches]
+    log(f"deep: единиц={len(units)}, пачек={len(batches)}"
+        + (f" (+{truncated} пачек отсечено по лимиту)" if truncated else ""))
+
+    # 5) MAP: выжать сигналы из каждой пачки (последовательно — один инстанс LLM).
+    summaries: list[str] = []
+    numbered_all: dict[int, _da.Unit] = {}
+    for bi, batch in enumerate(batches, 1):
+        for n, u in batch:
+            numbered_all[n] = u
+        if stopped():
+            raise ChatCancelled()
+        try:
+            raw = await _llm(_da.build_map_messages(question, batch), 500)
+        except ChatCancelled:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log(f"deep: пачка {bi} пропущена: {exc}")
+            continue
+        s = _da.parse_map_result(raw)
+        if s:
+            summaries.append(s)
+        log(f"deep: map {bi}/{len(batches)} — {'✓' if s else '—'}")
+
+    if not summaries:
+        return None  # ничего релевантного не выжали → откат
+    if stopped():
+        raise ChatCancelled()
+
+    # 6) REDUCE: синтез цельного разбора.
+    log(f"deep: reduce из {len(summaries)} выжимок")
+    reduce_msgs = _da.build_reduce_messages(question, summaries, schema=schema)
+    try:
+        raw = await _llm(reduce_msgs, max_answer_tokens)
+    except ChatCancelled:
+        raise
+    answer = (raw or "").strip()
+    if not answer:
+        return None
+
+    # 7) Цитаты: [N] в ответе → единицы (для панели источников).
+    used_ctx: list[ContextItem] = []
+    seen: set[int] = set()
+    for m in _CITATION_RE.finditer(answer):
+        n = int(m.group(1))
+        if n in seen or n not in numbered_all:
+            continue
+        seen.add(n)
+        u = numbered_all[n]
+        used_ctx.append(ContextItem(
+            n=n, source_path=u.source_path, display=_display_for_hit(u),
+            text=u.text, chunk_id=u.chunk_id, score=u.score,
+        ))
+    note = ""
+    if truncated:
+        note = (f"\n\n_(разобрано {len(numbered_all)} единиц; часть корпуса за лимитом — "
+                f"уточните сущность/период для полного охвата)_")
+    return ChatResult(
+        answer=answer + note,
+        citations=[c.to_citation() for c in used_ctx],
+        contexts=[c.to_citation() for c in used_ctx],
+        refused=is_refusal(answer),
+        model=chat_model,
+        extra={"deep": True, "units": len(numbered_all), "batches": len(batches)},
     )
