@@ -161,7 +161,7 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
         self._bind_runtime_state_watchers()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(300, self._on_fetch_models)
-        self.after(600, self._maybe_first_run_wizard)
+        self.after(600, self._maybe_startup_connection_menu)
         # Открыть конкретную вкладку на старте (отладка/удобство): NOCTURNE_STARTUP_TAB=Блокноты
         _startup_tab = os.environ.get("NOCTURNE_STARTUP_TAB", "").strip()
         if _startup_tab:
@@ -193,6 +193,9 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
 
     def _build_sidebar(self, sb: ctk.CTkFrame) -> None:
         pad = {"padx": 14}
+        # Флаг показа стартового меню подключения (персистится в ui_runtime).
+        self._show_conn_startup_var = ctk.BooleanVar(
+            value=bool(self._runtime_state.get("show_connection_at_startup", True)))
 
         ctk.CTkLabel(sb, text="Nocturne Data Forge",
                      font=ctk.CTkFont(size=15, weight="bold")
@@ -239,6 +242,10 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
         ctk.CTkButton(sb, text="Скачать модель…", height=28,
                       fg_color="transparent", border_width=1,
                       command=self._on_download_model_dialog
+                      ).pack(fill="x", pady=(0, 3), **pad)
+        ctk.CTkButton(sb, text="⚙️  Подключение и пресеты", height=28,
+                      fg_color=_md3.PRIMARY_CONTAINER, hover_color=_md3.PRIMARY_CONTAINER_HOVER,
+                      command=self._show_connection_menu
                       ).pack(fill="x", pady=(0, 8), **pad)
 
         # LLM model
@@ -1162,6 +1169,7 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
             "model_context_cache": dict(self._model_ctx),
             "rag_index_dir": self._rag_index_dir_var.get().strip() or ".nocturne_index",
             "rag_top_k": rag_top_k,
+            "show_connection_at_startup": bool(self._show_conn_startup_var.get()),
         }
 
     def _apply_run_profile(self, name: str) -> None:
@@ -2372,23 +2380,135 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
             self._preflight_label.configure(text=text.replace(",", " "),
                                             text_color=_md3.ON_SURFACE_VARIANT)
 
-    def _maybe_first_run_wizard(self) -> None:
-        from first_run import is_first_run, mark_first_run_complete
+    def _maybe_startup_connection_menu(self) -> None:
+        """Стартовое меню подключения: на первом запуске всегда, далее — если
+        включён флаг «Показывать при запуске» (по умолчанию да)."""
+        first = False
+        try:
+            from first_run import is_first_run, mark_first_run_complete
+            first = is_first_run()
+            if first:
+                mark_first_run_complete({"base_url": self._url_var.get().strip()})
+        except Exception:
+            first = False
+        if first or bool(self._show_conn_startup_var.get()):
+            self._show_connection_menu(startup=True)
 
-        if not is_first_run():
+    # --- Пресеты подключения (сохранить/загрузить/удалить) ------------------ #
+    def _capture_connection_preset(self, name: str):
+        import user_presets as up
+        return up.ConnectionPreset(
+            name=name.strip(),
+            base_url=self._url_var.get().strip(),
+            api_key=self._api_key_var.get().strip(),
+            api_mode=self._api_mode_var.get().strip() or "native",
+            llm_model=self._model_var.get().strip(),
+            embedding_model=self._embedding_model_var.get().strip(),
+            vision_model=self._vision_model_var.get().strip(),
+        )
+
+    def _apply_connection_preset(self, pr) -> None:
+        if pr.base_url:
+            self._url_var.set(pr.base_url)
+        self._api_key_var.set(pr.api_key)
+        if pr.api_mode:
+            self._api_mode_var.set(pr.api_mode)
+        for var, val in ((self._model_var, pr.llm_model),
+                         (self._embedding_model_var, pr.embedding_model),
+                         (self._vision_model_var, pr.vision_model)):
+            if val:
+                var.set(val)
+
+    def _refresh_preset_menu(self) -> None:
+        import user_presets as up
+        names = [p.name for p in up.load_presets()] or ["(нет сохранённых)"]
+        try:
+            self._preset_menu.configure(values=names)
+            if self._preset_sel_var.get() not in names:
+                self._preset_sel_var.set(names[0])
+        except Exception:
+            pass
+
+    def _preset_load(self) -> None:
+        import user_presets as up
+        pr = up.get_preset(self._preset_sel_var.get())
+        if pr:
+            self._apply_connection_preset(pr)
+            self._set_status(f"Пресет загружен: {pr.name}")
+
+    def _preset_delete(self) -> None:
+        import user_presets as up
+        name = self._preset_sel_var.get().strip()
+        if name and not name.startswith("("):
+            up.delete_preset(name)
+            self._refresh_preset_menu()
+            self._set_status(f"Пресет удалён: {name}")
+
+    def _preset_save_dialog(self) -> None:
+        d = ctk.CTkInputDialog(text="Имя пресета:", title="Сохранить пресет подключения")
+        name = (d.get_input() or "").strip()
+        if not name:
             return
+        import user_presets as up
+        up.upsert_preset(self._capture_connection_preset(name))
+        self._refresh_preset_menu()
+        self._preset_sel_var.set(name)
+        self._set_status(f"Пресет сохранён: {name}")
+
+    def _show_connection_menu(self, startup: bool = False) -> None:
+        """Отдельное меню «нейронка + API» с пресетами (стартовое и по кнопке)."""
+        import user_presets as up
         dlg = ctk.CTkToplevel(self)
-        dlg.title("Первый запуск")
-        dlg.geometry("420x220")
-        ctk.CTkLabel(dlg, text="Настройте LM Studio", font=ctk.CTkFont(size=14, weight="bold")).pack(pady=12)
-        ctk.CTkLabel(dlg, text="Укажите URL и API key, затем нажмите «Обновить модели».").pack(pady=6)
+        dlg.title("Подключение и пресеты")
+        dlg.geometry("470x560")
+        dlg.transient(self)
+        try:  # поверх и с фокусом (иначе на Windows может уйти за окно)
+            dlg.lift(); dlg.focus_force()
+            dlg.attributes("-topmost", True)
+            dlg.after(400, lambda: dlg.winfo_exists() and dlg.attributes("-topmost", False))
+        except Exception:
+            pass
+        pad = {"padx": 16}
+        ctk.CTkLabel(dlg, text="Подключение к нейросети",
+                     font=ctk.CTkFont(size=16, weight="bold")).pack(anchor="w", pady=(14, 2), **pad)
+        ctk.CTkLabel(dlg, text="Сервер, ключ и модели. Сохраните набор как пресет и переключайтесь.",
+                     text_color=_md3.ON_SURFACE_VARIANT, font=ctk.CTkFont(size=11),
+                     wraplength=430, justify="left").pack(anchor="w", pady=(0, 10), **pad)
 
-        def done() -> None:
-            mark_first_run_complete({"base_url": self._url_var.get().strip()})
-            dlg.destroy()
-            self._on_fetch_models()
+        ctk.CTkLabel(dlg, text="Пресет").pack(anchor="w", **pad)
+        prow = ctk.CTkFrame(dlg, fg_color="transparent"); prow.pack(fill="x", **pad)
+        names = [p.name for p in up.load_presets()] or ["(нет сохранённых)"]
+        self._preset_sel_var = ctk.StringVar(value=names[0])
+        self._preset_menu = ctk.CTkOptionMenu(prow, variable=self._preset_sel_var, values=names, width=210)
+        self._preset_menu.pack(side="left")
+        ctk.CTkButton(prow, text="Загрузить", width=90, command=self._preset_load).pack(side="left", padx=6)
+        ctk.CTkButton(prow, text="🗑", width=36, fg_color="transparent", border_width=1,
+                      command=self._preset_delete).pack(side="left")
 
-        ctk.CTkButton(dlg, text="Понятно", command=done).pack(pady=12)
+        ctk.CTkLabel(dlg, text="Провайдер").pack(anchor="w", pady=(10, 0), **pad)
+        ctk.CTkOptionMenu(dlg, variable=self._provider_var, values=cp.preset_labels(),
+                          command=self._on_provider_change, width=250).pack(fill="x", **pad)
+        ctk.CTkLabel(dlg, text="API Base URL").pack(anchor="w", pady=(8, 0), **pad)
+        ctk.CTkEntry(dlg, textvariable=self._url_var).pack(fill="x", **pad)
+        ctk.CTkLabel(dlg, text="API Key (если требуется)").pack(anchor="w", pady=(6, 0), **pad)
+        ctk.CTkEntry(dlg, textvariable=self._api_key_var, show="*").pack(fill="x", **pad)
+        ctk.CTkLabel(dlg, text="Режим API").pack(anchor="w", pady=(6, 0), **pad)
+        ctk.CTkOptionMenu(dlg, variable=self._api_mode_var, values=["native", "openai"],
+                          width=250).pack(fill="x", **pad)
+        ctk.CTkButton(dlg, text="Обновить модели", command=self._on_fetch_models
+                      ).pack(fill="x", pady=(10, 4), **pad)
+        ctk.CTkLabel(dlg, text="Модели (LLM / embedding / vision) выбираются в панели слева.",
+                     text_color=_md3.ON_SURFACE_VARIANT, font=ctk.CTkFont(size=11),
+                     wraplength=430, justify="left").pack(anchor="w", **pad)
+        ctk.CTkButton(dlg, text="💾  Сохранить как пресет…", fg_color="transparent", border_width=1,
+                      command=self._preset_save_dialog).pack(fill="x", pady=(10, 4), **pad)
+
+        ctk.CTkCheckBox(dlg, text="Показывать это меню при запуске",
+                        variable=self._show_conn_startup_var,
+                        command=self._persist_runtime_state).pack(anchor="w", pady=(8, 4), **pad)
+        ctk.CTkButton(dlg, text="Продолжить  ▶", fg_color=_md3.PRIMARY_CONTAINER,
+                      hover_color=_md3.PRIMARY_CONTAINER_HOVER,
+                      command=dlg.destroy).pack(fill="x", pady=(6, 12), **pad)
 
     def _export_result(self, ext: str) -> None:
         if not self._last_result_text:
