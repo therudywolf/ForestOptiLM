@@ -113,6 +113,7 @@ class NotebookUIMixin:
         self._nb_chat_stop = threading.Event()  # кооперативная отмена запроса чата
         self._nb_precise_var = ctk.BooleanVar(value=False)  # «Точный поиск» (expansion+rerank)
         self._nb_deep_var = ctk.StringVar(value="Авто")     # «Глубокий анализ» (map-reduce)
+        self._nb_deep_depth_var = ctk.StringVar(value="Полно")  # глубина deep: Полно/Быстро
         self._nb_view = "archive"
         self._nb_relayout_after: str | None = None
         self._nb_search_var = ctk.StringVar(value="")
@@ -356,6 +357,9 @@ class NotebookUIMixin:
         # «Глубокий анализ»: map-reduce по всему следу сущности/темы для
         # агрегирующих вопросов (портрет/сводка/«как устроен»). Авто — включается
         # сам по формулировке вопроса; Вкл/Выкл — принудительно.
+        # Глубина deep: «Полно» (~11 мин, весь корпус) / «Быстро» (~4-5 мин).
+        ctk.CTkOptionMenu(bar, variable=self._nb_deep_depth_var, values=["Полно", "Быстро"],
+                          width=78, font=ctk.CTkFont(size=12)).pack(side="right", padx=(0, 6))
         ctk.CTkOptionMenu(bar, variable=self._nb_deep_var, values=["Авто", "Вкл", "Выкл"],
                           width=84, font=ctk.CTkFont(size=12)).pack(side="right", padx=(0, 6))
         ctk.CTkLabel(bar, text="🔬 Глубокий анализ", font=ctk.CTkFont(size=12)
@@ -725,6 +729,7 @@ class NotebookUIMixin:
         precise = bool(self._nb_precise_var.get())  # читаем Tk-var в главном потоке
         deep_mode = {"Авто": "auto", "Вкл": "on", "Выкл": "off"}.get(
             self._nb_deep_var.get(), "auto")
+        deep_depth = "fast" if self._nb_deep_depth_var.get() == "Быстро" else "full"
         self._nb_chat_stop.clear()  # новый запрос → сбрасываем флаг отмены
         self._nb_set_busy(True, cancellable=True)  # чат можно прервать «Стоп»
         self._nb_set_status("Ищу в источниках и формирую ответ…")
@@ -764,6 +769,7 @@ class NotebookUIMixin:
                         enhanced=precise,
                         on_token=on_token,
                         deep_mode=deep_mode,
+                        deep_depth=deep_depth,
                     )
                 )
             except Exception as exc:  # noqa: BLE001

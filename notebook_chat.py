@@ -345,6 +345,7 @@ async def answer_question(
     enhanced: bool = False,
     on_token: Callable[[str], None] | None = None,
     deep_mode: str = "off",
+    deep_depth: str = "full",
 ) -> ChatResult:
     """Полный цикл: retrieval по блокноту → grounded-ответ с цитатами.
 
@@ -392,12 +393,18 @@ async def answer_question(
     want_deep = (deep_mode == "on") or (
         deep_mode == "auto" and _da.is_analytical_question(question))
     if want_deep:
+        # Глубина: «полно» (400 юнитов, все пачки, ~11 мин) vs «быстро» (150
+        # юнитов, плотнее пачки → без иерархии, ~4-5 мин).
+        fast = (deep_depth == "fast")
         try:
             res = await _run_deep_analysis(
                 notebook, question, _llm=_llm, _retrieve=_retrieve,
                 stopped=_stopped, log=_log, cancelled=_cancelled_result,
                 chat_model=chat_model, on_token=on_token,
                 max_context_tokens=max_context_tokens, max_answer_tokens=max_answer_tokens,
+                cap_units=(150 if fast else 400),
+                max_batch_tokens=(8000 if fast else 6000),
+                depth_label=("быстрый" if fast else "полный"),
             )
             if res is not None:
                 return res
@@ -555,6 +562,7 @@ async def _run_deep_analysis(
     cap_units: int = 400,
     max_batch_tokens: int = 6000,
     max_batches: int = 60,
+    depth_label: str = "полный",
 ) -> ChatResult | None:
     """Оркестратор глубокого анализа: identify → gather(+соседи) → map → reduce.
 
@@ -567,8 +575,9 @@ async def _run_deep_analysis(
     schema = str(getattr(notebook, "schema", "") or "")
     if on_token:
         try:
-            on_token("🔬 Глубокий анализ (может занять пару минут): собираю данные "
-                     "по всему корпусу, анализирую по частям…\n")
+            est = "≈4-5 мин" if depth_label == "быстрый" else "≈10-12 мин"
+            on_token(f"🔬 Глубокий анализ ({depth_label}, {est}): собираю данные "
+                     f"по корпусу, анализирую по частям…\n")
         except Exception:
             pass
 

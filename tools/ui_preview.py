@@ -142,6 +142,8 @@ def screen_workspace(root):
     ctk.CTkLabel(bar, text="Чат по источникам", font=m.font("title"),
                  text_color=m.ON_SURFACE).pack(side="left")
     _chip(bar, "🎯 Точный поиск", on=True).pack(side="right", padx=(0, 8))
+    ctk.CTkOptionMenu(bar, values=["Полно", "Быстро"], width=78,
+                      font=m.font("small")).pack(side="right", padx=(0, 6))
     ctk.CTkOptionMenu(bar, values=["Авто", "Вкл", "Выкл"], width=84,
                       font=m.font("small")).pack(side="right", padx=(0, 6))
     ctk.CTkLabel(bar, text="🔬 Глубокий анализ", font=m.font("small"),
