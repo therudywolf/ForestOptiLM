@@ -52,10 +52,15 @@ def build_expansion_messages(
         )
     user = (
         f"Вопрос: {question.strip()}\n\n"
-        f"Верни РОВНО {n} альтернативные формулировки этого вопроса в виде "
-        f"JSON-массива строк, например [\"...\", \"...\"]. Только JSON, без пояснений. "
-        f"Если в вопросе есть имена систем/продуктов — используй в переформулировках "
-        f"их вероятные варианты написания (латиницей/кириллицей)."
+        f"Верни JSON-объект с двумя полями:\n"
+        f"1) \"queries\" — {n} альтернативные формулировки вопроса (синонимы, другой "
+        f"ракурс). Если есть имена систем/продуктов — с вариантами написания "
+        f"латиницей/кириллицей.\n"
+        f"2) \"entities\" — ключевые ИМЕНА СОБСТВЕННЫЕ из вопроса (люди, системы, "
+        f"продукты, проекты), по которым нужно найти все упоминания. Для человека — "
+        f"варианты (Имя Фамилия, только фамилия). Пусто, если сущностей нет.\n"
+        f"Пример: {{\"queries\": [\"...\", \"...\"], \"entities\": [\"Иван Петров\", \"Петров\"]}}\n"
+        f"Только JSON, без пояснений."
     )
     return [
         {"role": "system", "content": system},
@@ -77,18 +82,63 @@ def _extract_json_array(raw: str) -> list[Any]:
         return []
 
 
+def _extract_json_object(raw: str) -> dict[str, Any]:
+    """Достать первый JSON-объект из текста модели (терпимо к обёрткам/мусору)."""
+    if not raw:
+        return {}
+    m = re.search(r"\{.*\}", raw, re.DOTALL)
+    if not m:
+        return {}
+    try:
+        val = json.loads(m.group(0))
+        return val if isinstance(val, dict) else {}
+    except Exception:
+        return {}
+
+
 def parse_expansions(raw: str, question: str, n: int = 2) -> list[str]:
-    """Список запросов: [оригинал] + до n уникальных непустых перефразировок."""
+    """Список запросов: [оригинал] + до n уникальных непустых перефразировок.
+
+    Терпит оба формата ответа: новый объект {"queries": [...]} и старый —
+    голый JSON-массив строк (обратная совместимость)."""
     base = question.strip()
     out = [base]
     seen = {base.lower()}
-    for item in _extract_json_array(raw):
+    obj = _extract_json_object(raw)
+    items = obj.get("queries") if isinstance(obj.get("queries"), list) else None
+    if items is None:
+        items = _extract_json_array(raw)  # старый формат
+    for item in items:
         s = str(item).strip()
         if not s or s.lower() in seen:
             continue
         seen.add(s.lower())
         out.append(s)
         if len(out) >= n + 1:
+            break
+    return out
+
+
+def parse_entities(raw: str, max_entities: int = 4) -> list[str]:
+    """Ключевые сущности (имена людей/систем) из ответа расширения запроса.
+
+    По этим именам делается отдельный лексически-сильный retrieve: для вопросов
+    об одной сущности («какой человек X», «что по системе Y») семантика запроса
+    далека от реальных сообщений — а имя как отдельный запрос собирает их через
+    BM25. Терпит отсутствие поля/старый формат → пустой список."""
+    obj = _extract_json_object(raw)
+    ents = obj.get("entities")
+    if not isinstance(ents, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for e in ents:
+        s = str(e).strip()
+        if len(s) < 2 or s.lower() in seen:
+            continue
+        seen.add(s.lower())
+        out.append(s)
+        if len(out) >= max_entities:
             break
     return out
 

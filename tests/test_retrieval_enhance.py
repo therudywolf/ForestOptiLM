@@ -41,6 +41,37 @@ class TestExpansion(unittest.TestCase):
         self.assertEqual(msgs[0]["role"], "system")
         self.assertIn("вопрос?", msgs[1]["content"])
 
+    def test_parse_expansions_new_object_format(self) -> None:
+        raw = '{"queries": ["как связаться с Петровым", "стиль Петрова"], "entities": ["Иван Петров"]}'
+        out = re_enh.parse_expansions(raw, "как работать с Петровым")
+        self.assertEqual(out[0], "как работать с Петровым")
+        self.assertIn("стиль Петрова", out)
+
+    def test_parse_expansions_old_array_still_works(self) -> None:
+        # обратная совместимость: голый массив без обёртки-объекта
+        out = re_enh.parse_expansions('["a", "b"]', "q")
+        self.assertEqual(out, ["q", "a", "b"])
+
+
+class TestEntities(unittest.TestCase):
+    def test_parse_entities_from_object(self) -> None:
+        raw = '{"queries": ["..."], "entities": ["Иван Петров", "Петров", "СистемаX"]}'
+        self.assertEqual(re_enh.parse_entities(raw), ["Иван Петров", "Петров", "СистемаX"])
+
+    def test_parse_entities_dedups_and_caps(self) -> None:
+        raw = '{"entities": ["Aa", "aa", "Bb", "Cc", "Dd", "Ee"]}'
+        out = re_enh.parse_entities(raw, max_entities=3)
+        self.assertEqual(out, ["Aa", "Bb", "Cc"])  # "aa"==дубль "Aa", кап 3
+
+    def test_parse_entities_absent_or_old_format(self) -> None:
+        self.assertEqual(re_enh.parse_entities('["a","b"]'), [])   # старый формат — без сущностей
+        self.assertEqual(re_enh.parse_entities("мусор"), [])
+        self.assertEqual(re_enh.parse_entities('{"queries":["x"]}'), [])
+
+    def test_parse_entities_skips_too_short(self) -> None:
+        self.assertEqual(re_enh.parse_entities('{"entities": ["Я", "Ок", "Сидоров"]}'),
+                         ["Ок", "Сидоров"])
+
 
 class TestMergeHits(unittest.TestCase):
     def test_dedup_by_chunk_id_keeps_max_score(self) -> None:

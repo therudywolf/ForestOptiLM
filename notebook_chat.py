@@ -388,28 +388,39 @@ async def answer_question(
         # listwise LLM-реранк (выше precision). Любой сбой → мягкий фолбэк на базу.
         import retrieval_enhance as _re
         queries = [question]
+        entities: list[str] = []
         try:
             _schema = str(getattr(notebook, "schema", "") or "")
-            queries = _re.parse_expansions(
-                await _llm(_re.build_expansion_messages(question, schema=_schema), 200),
-                question)
+            _raw = await _llm(_re.build_expansion_messages(question, schema=_schema), 250)
+            queries = _re.parse_expansions(_raw, question)
+            entities = _re.parse_entities(_raw)
         except ChatCancelled:
             return _cancelled_result([])
         except Exception as exc:  # noqa: BLE001
             _log(f"expansion пропущен: {exc}")
-        _log(f"expansion: {len(queries)} запрос(ов)")
-        hits = _re.merge_hits([_retrieve(q) for q in queries], cap=30)
+        _log(f"expansion: {len(queries)} запрос(ов), сущностей: {len(entities)}")
+        # Агрегирующие вопросы («какой человек X», «что по теме Y»): семантика
+        # запроса далека от реальных сообщений сущности — добираем их отдельным
+        # лексическим поиском по имени (BM25 внутри hybrid_search вытащит их).
+        hit_lists = [_retrieve(q) for q in queries]
+        for ent in entities:
+            hit_lists.append(_retrieve(ent))
+        cap = 40 if entities else 30
+        hits = _re.merge_hits(hit_lists, cap=cap)
+        # Для агрегирующих вопросов держим шире окно после реранка — портрет/сводку
+        # не собрать из 16 фрагментов (нужны десятки сообщений сущности).
+        rerank_keep = max(top_k, 30) if entities else max(top_k, 16)
         if len(hits) > 1 and not _stopped():
             try:
                 order = _re.parse_rerank_order(
                     await _llm(_re.build_rerank_messages(question, hits), 300), len(hits))
-                hits = _re.apply_rerank(hits, order, top_k=max(top_k, 16))
+                hits = _re.apply_rerank(hits, order, top_k=rerank_keep)
                 _log(f"rerank: {len(hits)} фрагмент(ов)")
             except ChatCancelled:
                 return _cancelled_result([])
             except Exception as exc:  # noqa: BLE001
                 _log(f"rerank пропущен: {exc}")
-                hits = hits[:max(top_k, 16)]
+                hits = hits[:rerank_keep]
     else:
         hits = _retrieve(question)
     _log(f"retrieval: {len(hits)} фрагментов")
