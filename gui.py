@@ -556,7 +556,9 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
         self._notebooks_tab = self._tabs.add(TAB_NOTEBOOKS)
         self._result_tab = self._tabs.add(TAB_RESULT)
         self._logs_tab = self._tabs.add(TAB_LOGS)
-        self._rag_tab = self._tabs.add(TAB_RAG)
+        # «RAG»-вкладка убрана: её поиск по индексу дублировал чат блокнотов
+        # (там теперь Точный поиск + Глубокий анализ). Настройки индекса
+        # сохраняем как раньше — они используются пресетом «1M+».
         self._tabs.set(TAB_NOTEBOOKS)
         try:
             self._tabs._segmented_button.configure(
@@ -602,7 +604,11 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
         self._log_filter_combo.pack(side="right")
         self._log_text = ctk.CTkTextbox(self._logs_tab, wrap="word")
         self._log_text.pack(fill="both", expand=True)
-        self._build_rag_tab(self._rag_tab)
+        # RAG-вкладки больше нет, но её персистентные настройки нужны state/пресетам.
+        self._rag_index_dir_var = ctk.StringVar(
+            value=str(self._runtime_state.get("rag_index_dir", ".nocturne_index")))
+        self._rag_top_k_var = ctk.StringVar(
+            value=str(self._runtime_state.get("rag_top_k", 8)))
         self._build_notebooks_tab(self._notebooks_tab)
 
         # Save row (только для результата Map-Reduce — прячем на «Блокнотах»)
@@ -620,7 +626,7 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
     def _select_tab_by_hint(self, hint: str) -> None:
         """Выбрать вкладку по подстроке имени (имена содержат эмодзи)."""
         low = hint.lower()
-        for name in (TAB_NOTEBOOKS, TAB_RESULT, TAB_LOGS, TAB_RAG):
+        for name in (TAB_NOTEBOOKS, TAB_RESULT, TAB_LOGS):
             if low in name.lower():
                 try:
                     self._tabs.set(name)
