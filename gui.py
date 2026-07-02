@@ -197,7 +197,7 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
         ctk.CTkLabel(sb, text="Nocturne Data Forge",
                      font=ctk.CTkFont(size=15, weight="bold")
                      ).pack(anchor="w", pady=(14, 0), **pad)
-        ctk.CTkLabel(sb, text="Массовая обработка файлов через LLM",
+        ctk.CTkLabel(sb, text="Локальный анализ данных через LLM",
                      text_color=_md3.ON_SURFACE_VARIANT, font=ctk.CTkFont(size=11)
                      ).pack(anchor="w", pady=(0, 10), **pad)
 
@@ -282,26 +282,21 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
             justify="left",
         ).pack(anchor="w", pady=(0, 8), **pad)
 
-        # Workers
-        ctk.CTkLabel(sb, text="Параллельных воркеров (1–4)",
-                     font=ctk.CTkFont(size=12, weight="bold")
+        # ── Модели поиска (нужны и «Блокнотам», и Map-Reduce) ───────────
+        ctk.CTkLabel(sb, text="Embedding-модель (поиск/RAG)", font=ctk.CTkFont(size=12, weight="bold")
                      ).pack(anchor="w", pady=(8, 0), **pad)
-        ctk.CTkLabel(
-            sb, text="Сколько чанков обрабатывать одновременно.",
-            text_color=_md3.ON_SURFACE_VARIANT, font=ctk.CTkFont(size=11),
-            wraplength=250, justify="left",
-        ).pack(anchor="w", pady=(0, 2), **pad)
-        self._workers_var = ctk.StringVar(value="3")
-        self._workers_seg = ctk.CTkSegmentedButton(
+        self._embedding_model_var = ctk.StringVar(value="")
+        self._embedding_menu = ctk.CTkOptionMenu(
             sb,
-            values=["1", "2", "3", "4"],
-            variable=self._workers_var,
+            variable=self._embedding_model_var,
+            values=["(нажмите Обновить модели)"],
             dynamic_resizing=False,
+            width=250,
         )
-        self._workers_seg.pack(fill="x", pady=(0, 8), **pad)
+        self._embedding_menu.pack(fill="x", pady=(3, 8), **pad)
 
-        ctk.CTkLabel(sb, text="Vision-модель (изображения)", font=ctk.CTkFont(size=12, weight="bold")
-                     ).pack(anchor="w", pady=(10, 0), **pad)
+        ctk.CTkLabel(sb, text="Vision-модель (описание картинок)", font=ctk.CTkFont(size=12, weight="bold")
+                     ).pack(anchor="w", pady=(6, 0), **pad)
         self._vision_model_var = ctk.StringVar(value="")
         self._vision_menu = ctk.CTkOptionMenu(
             sb, variable=self._vision_model_var,
@@ -317,37 +312,7 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
             command=self._on_test_vision,
         ).pack(fill="x", pady=(0, 8), **pad)
 
-        self._composer_use_var = ctk.BooleanVar(value=False)
-        self._composer_check = ctk.CTkCheckBox(
-            sb,
-            text="Отдельная composer-модель (merge/reduce)",
-            variable=self._composer_use_var,
-            command=self._on_composer_toggle,
-        )
-        self._composer_check.pack(anchor="w", pady=(4, 2), **pad)
-        self._composer_model_var = ctk.StringVar(value="")
-        self._composer_menu = ctk.CTkOptionMenu(
-            sb, variable=self._composer_model_var,
-            values=["(нажмите Обновить модели)"],
-            dynamic_resizing=False, width=250,
-        )
-        self._composer_menu.pack(fill="x", pady=(0, 8), **pad)
-        self._composer_menu.configure(state="disabled")
-
-        ctk.CTkLabel(sb, text="Embedding-модель (RAG)", font=ctk.CTkFont(size=12, weight="bold")
-                     ).pack(anchor="w", pady=(8, 0), **pad)
-        self._embedding_model_var = ctk.StringVar(value="")
-        self._embedding_menu = ctk.CTkOptionMenu(
-            sb,
-            variable=self._embedding_model_var,
-            values=["(нажмите Обновить модели)"],
-            dynamic_resizing=False,
-            width=250,
-        )
-        self._embedding_menu.pack(fill="x", pady=(3, 8), **pad)
-
-        ctk.CTkLabel(sb, text="Режимы выполнения", font=ctk.CTkFont(size=12, weight="bold")
-                     ).pack(anchor="w", pady=(10, 0), **pad)
+        ctk.CTkLabel(sb, text="Режим API").pack(anchor="w", pady=(4, 0), **pad)
         self._api_mode_var = ctk.StringVar(value="native")
         self._api_mode_menu = ctk.CTkOptionMenu(
             sb, variable=self._api_mode_var,
@@ -355,10 +320,56 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
             dynamic_resizing=False, width=250,
             command=lambda _v: self._on_runtime_mode_changed(),
         )
-        self._api_mode_menu.pack(fill="x", pady=(3, 3), **pad)
+        self._api_mode_menu.pack(fill="x", pady=(3, 8), **pad)
+
+        # ── Массовая обработка файлов (скрывается в режиме «Блокноты») ───
+        # Все Map-Reduce-контролы (воркеры/composer/scout/лимиты/профили)
+        # собраны в один фрейм: в NotebookLM-режиме они не нужны и только шумят,
+        # поэтому _on_tab_changed прячет весь блок целиком.
+        self._sb_mapreduce = ctk.CTkFrame(sb, fg_color="transparent")
+        mr = self._sb_mapreduce
+        mr.pack(fill="x")
+        ctk.CTkLabel(mr, text="⚙️  Массовая обработка файлов",
+                     font=ctk.CTkFont(size=12, weight="bold"), text_color=_md3.PRIMARY,
+                     ).pack(anchor="w", pady=(8, 2), **pad)
+
+        ctk.CTkLabel(mr, text="Параллельных воркеров (1–4)",
+                     font=ctk.CTkFont(size=12, weight="bold")
+                     ).pack(anchor="w", pady=(6, 0), **pad)
+        ctk.CTkLabel(
+            mr, text="Сколько файлов/чанков обрабатывать одновременно.",
+            text_color=_md3.ON_SURFACE_VARIANT, font=ctk.CTkFont(size=11),
+            wraplength=250, justify="left",
+        ).pack(anchor="w", pady=(0, 2), **pad)
+        self._workers_var = ctk.StringVar(value="3")
+        self._workers_seg = ctk.CTkSegmentedButton(
+            mr,
+            values=["1", "2", "3", "4"],
+            variable=self._workers_var,
+            dynamic_resizing=False,
+        )
+        self._workers_seg.pack(fill="x", pady=(0, 8), **pad)
+
+        self._composer_use_var = ctk.BooleanVar(value=False)
+        self._composer_check = ctk.CTkCheckBox(
+            mr,
+            text="Отдельная модель для сборки итога (reduce)",
+            variable=self._composer_use_var,
+            command=self._on_composer_toggle,
+        )
+        self._composer_check.pack(anchor="w", pady=(4, 2), **pad)
+        self._composer_model_var = ctk.StringVar(value="")
+        self._composer_menu = ctk.CTkOptionMenu(
+            mr, variable=self._composer_model_var,
+            values=["(нажмите Обновить модели)"],
+            dynamic_resizing=False, width=250,
+        )
+        self._composer_menu.pack(fill="x", pady=(0, 8), **pad)
+        self._composer_menu.configure(state="disabled")
+
         self._low_vram_var = ctk.BooleanVar(value=True)
         self._low_vram_check = ctk.CTkCheckBox(
-            sb,
+            mr,
             text="Low VRAM Sequential",
             variable=self._low_vram_var,
             command=self._on_runtime_mode_changed,
@@ -366,12 +377,12 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
         self._low_vram_check.pack(anchor="w", pady=(2, 2), **pad)
         self._advanced_visible = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(
-            sb,
+            mr,
             text="Дополнительно (лимиты, scout-модель)",
             variable=self._advanced_visible,
             command=self._toggle_advanced_panel,
         ).pack(anchor="w", pady=(10, 2), **pad)
-        self._advanced_frame = ctk.CTkFrame(sb, fg_color="transparent")
+        self._advanced_frame = ctk.CTkFrame(mr, fg_color="transparent")
         self._max_reduce_tokens_var = ctk.StringVar(value=str(self._runtime_state.get("max_reduce_input_tokens", 24000)))
         self._max_chunk_tokens_var = ctk.StringVar(value=str(self._runtime_state.get("max_chunk_tokens", 6000)))
         ctk.CTkLabel(
@@ -386,11 +397,11 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
             fill="x", pady=(2, 4), **pad,
         )
 
-        ctk.CTkLabel(sb, text="Большой корпус", font=ctk.CTkFont(size=12, weight="bold")
+        ctk.CTkLabel(mr, text="Большой корпус", font=ctk.CTkFont(size=12, weight="bold")
                      ).pack(anchor="w", pady=(8, 0), **pad)
         self._scout_var = ctk.BooleanVar(value=bool(self._runtime_state.get("scout_mode", False)))
         self._scout_check = ctk.CTkCheckBox(
-            sb,
+            mr,
             text="Scout-pass (быстрая релевантность)",
             variable=self._scout_var,
             command=self._persist_runtime_state,
@@ -417,7 +428,7 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
             width=250,
         )
         self._scout_menu.pack(fill="x", pady=(2, 4), **pad)
-        mode_row = ctk.CTkFrame(sb, fg_color="transparent")
+        mode_row = ctk.CTkFrame(mr, fg_color="transparent")
         mode_row.pack(fill="x", pady=(2, 4), **pad)
         ctk.CTkButton(
             mode_row, text="Быстро", width=72, height=26,
@@ -433,7 +444,7 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
             command=lambda: self._apply_run_profile("large_corpus"),
         ).pack(side="left")
         ctk.CTkButton(
-            sb,
+            mr,
             text="Пресет: корпус 1M+",
             height=28,
             fg_color=_md3.PRIMARY_CONTAINER,
@@ -619,23 +630,32 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
                 return
 
     def _on_tab_changed(self, *_args: object) -> None:
-        """На вкладке «Блокноты» (NotebookLM) прячем Map-Reduce-контролы — чистый
-        вид как в NotebookLM; на остальных вкладках возвращаем их."""
+        """Контекстный UI: Map-Reduce-настройки (сайдбар) и панель запуска
+        показываем ТОЛЬКО в файловом режиме (Результат/Логи). В «Блокнотах» и
+        «RAG» их прячем — чистый вид, без нерелевантных воркеров/composer/scout."""
         try:
-            is_notebooks = self._tabs.get() == TAB_NOTEBOOKS
+            cur = self._tabs.get()
         except Exception:
             return
-        if is_notebooks:
-            self._analysis_panel.pack_forget()
-            self._save_row.pack_forget()
-        else:
+        file_mode = cur in (TAB_RESULT, TAB_LOGS)  # массовая обработка файлов
+        try:
+            if file_mode:
+                if not self._sb_mapreduce.winfo_ismapped():
+                    self._sb_mapreduce.pack(fill="x")
+            else:
+                self._sb_mapreduce.pack_forget()
+        except Exception:
+            pass
+        if file_mode:
             if not self._analysis_panel.winfo_ismapped():
                 self._analysis_panel.pack(fill="x", before=self._tabs)
             if not self._save_row.winfo_ismapped():
                 self._save_row.pack(anchor="w", fill="x")
-            # Вернулись на анализ-вкладку — возобновляем поллинг активной модели.
             if not self._model_poll_active and not self._closing:
                 self._poll_loaded_model()
+        else:
+            self._analysis_panel.pack_forget()
+            self._save_row.pack_forget()
 
     def _build_rag_tab(self, parent: ctk.CTkFrame) -> None:
         row1 = ctk.CTkFrame(parent, fg_color="transparent")
