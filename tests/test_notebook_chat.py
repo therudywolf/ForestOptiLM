@@ -56,6 +56,42 @@ class TestPureFunctions(unittest.TestCase):
         ctx = nc.select_contexts([_Hit("text", "C:/dumps/log.txt", title="Отчёт")], max_tokens=1000)
         self.assertIn("log.txt", ctx[0].display)
 
+    def test_display_includes_parent_dir_for_generic_names(self) -> None:
+        # Telegram-экспорт: messages5.html есть в каждом чате — без папки цитату
+        # не привязать к чату.
+        ctx = nc.select_contexts(
+            [_Hit("text", "C:/export/chats/chat_042/messages5.html")], max_tokens=1000)
+        self.assertIn("chat_042/messages5.html", ctx[0].display)
+
+    def test_select_contexts_dedups_near_identical_chunks(self) -> None:
+        same = "Плановое обслуживание кластера завершено, все сервисы доступны " * 6
+        hits = [
+            _Hit(same, "C:/x/a.txt"),
+            _Hit(same + " хвост чуть длиннее", "C:/x/b.txt"),  # тот же префикс
+            _Hit("совсем другой текст про расписание релизов", "C:/x/c.txt"),
+        ]
+        ctx = nc.select_contexts(hits, max_tokens=100000)
+        self.assertEqual(len(ctx), 2)
+        self.assertEqual(ctx[1].source_path, "C:/x/c.txt")
+
+    def test_select_contexts_source_diversity_with_backfill(self) -> None:
+        # 8 хитов из одного файла + 1 из другого при cap=2: другой файл должен
+        # попасть в выборку, затем backfill добирает отсечённые.
+        hits = [_Hit(f"уникальный текст номер {i} из файла a", "C:/x/a.txt")
+                for i in range(8)]
+        hits.append(_Hit("текст из файла b", "C:/x/b.txt"))
+        ctx = nc.select_contexts(hits, max_tokens=100000, max_items=5, max_per_source=2)
+        srcs = [c.source_path for c in ctx]
+        self.assertIn("C:/x/b.txt", srcs)          # диверсификация сработала
+        self.assertEqual(len(ctx), 5)               # backfill добрал до max_items
+        self.assertEqual(srcs.count("C:/x/a.txt"), 4)
+
+    def test_select_contexts_single_source_not_starved_by_cap(self) -> None:
+        # Однофайловый блокнот: cap не должен урезать выборку.
+        hits = [_Hit(f"фрагмент {i} " * 5, "C:/x/only.txt") for i in range(6)]
+        ctx = nc.select_contexts(hits, max_tokens=100000, max_items=6, max_per_source=2)
+        self.assertEqual(len(ctx), 6)
+
     def test_build_messages_has_sources_and_question(self) -> None:
         ctx = nc.select_contexts([_Hit("содержимое", "C:/x/a.txt")], max_tokens=1000)
         msgs = nc.build_chat_messages("мой вопрос", ctx, history=[{"role": "user", "content": "ранее"}])

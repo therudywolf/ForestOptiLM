@@ -137,7 +137,12 @@ def _display_for_hit(hit: Any) -> str:
     meta = getattr(hit, "metadata", None) or {}
     title = str(meta.get("title") or "").strip()
     src = str(getattr(hit, "source_path", "") or "")
-    base = src.replace("\\", "/").rsplit("/", 1)[-1] if src else "источник"
+    parts = [p for p in src.replace("\\", "/").split("/") if p]
+    base = parts[-1] if parts else "источник"
+    # Родительская папка в подписи: generic-имена (messages5.html, index.html)
+    # без неё неразличимы между источниками (напр. чаты Telegram-экспорта).
+    if len(parts) >= 2:
+        base = f"{parts[-2]}/{base}"
     if title and title.lower() not in base.lower():
         return f"{base} — {title}"[:80]
     return base[:80] or "источник"
@@ -149,39 +154,63 @@ def select_contexts(
     max_tokens: int = 8000,
     max_items: int = 12,
     per_item_char_cap: int = 6000,
+    max_per_source: int = 5,
 ) -> list[ContextItem]:
-    """Отобрать фрагменты под бюджет токенов, пронумеровать как [1..N]."""
+    """Отобрать фрагменты под бюджет токенов, пронумеровать как [1..N].
+
+    Полнота ответа, а не только релевантность:
+    - почти-одинаковые фрагменты (перекрывающиеся чанки, дубли пересылок)
+      схлопываются — бюджет не сгорает на повторах;
+    - не больше ``max_per_source`` фрагментов с одного файла, ЕСЛИ есть
+      кандидаты из других файлов (backfill: при недоборе отсечённые
+      возвращаются) — топ не монополизируется одним источником.
+    """
     try:
         from parser import count_tokens
     except Exception:  # pragma: no cover - parser всегда есть, но не падаем в тестах
         def count_tokens(t: str) -> int:  # type: ignore[misc]
             return max(1, len(t) // 4)
 
+    def _as_int(v: Any) -> int | None:
+        try:
+            return int(v) if v is not None else None
+        except Exception:
+            return None
+
     out: list[ContextItem] = []
     used = 0
-    for hit in hits:
+    seen_keys: set[str] = set()
+    per_source: dict[str, int] = {}
+
+    def _try_add(hit: Any, enforce_cap: bool) -> str:
+        """Вернуть 'added' | 'skip' | 'capped' | 'stop'."""
+        nonlocal used
         if len(out) >= max_items:
-            break
+            return "stop"
         text = str(getattr(hit, "text", "") or "")
         if not text.strip():
-            continue
+            return "skip"
         if len(text) > per_item_char_cap:
             text = text[:per_item_char_cap]
+        # Дедуп по нормализованному началу содержимого (без служебных заголовков):
+        # перекрывающиеся чанки и повторные пересылки дают одинаковый префикс.
+        norm = re.sub(r"\s+", " ", _strip_headers(text)).strip().lower()
+        if not norm:
+            return "skip"
+        key = norm[:240]
+        if key in seen_keys:
+            return "skip"
+        src = str(getattr(hit, "source_path", "") or "")
+        if enforce_cap and max_per_source and per_source.get(src, 0) >= max_per_source:
+            return "capped"
         tok = count_tokens(text)
         if out and used + tok > max_tokens:
-            break
+            return "stop"
         meta = getattr(hit, "metadata", None) or {}
-
-        def _as_int(v: Any) -> int | None:
-            try:
-                return int(v) if v is not None else None
-            except Exception:
-                return None
-
         out.append(
             ContextItem(
                 n=len(out) + 1,
-                source_path=str(getattr(hit, "source_path", "") or ""),
+                source_path=src,
                 display=_display_for_hit(hit),
                 text=text,
                 chunk_id=str(getattr(hit, "chunk_id", "") or ""),
@@ -190,7 +219,23 @@ def select_contexts(
                 line_start=_as_int(meta.get("line_start")),
             )
         )
+        seen_keys.add(key)
+        per_source[src] = per_source.get(src, 0) + 1
         used += tok
+        return "added"
+
+    capped: list[Any] = []
+    for hit in hits:
+        status = _try_add(hit, enforce_cap=True)
+        if status == "stop":
+            break
+        if status == "capped":
+            capped.append(hit)
+    # Backfill: если после диверсификации остался бюджет — вернуть лучшие из
+    # отсечённых по per-source cap (для однофайловых блокнотов это весь хвост).
+    for hit in capped:
+        if _try_add(hit, enforce_cap=False) == "stop":
+            break
     return out
 
 
@@ -243,8 +288,11 @@ def build_chat_messages(
     parts.append("[Источники]\n" + ctx_block)
     parts.append("[Вопрос]\n" + question.strip())
     parts.append(
-        "Ответь по источникам выше и ставь ссылки [N]. Если ответ есть лишь "
-        "частично — дай частичный ответ и отметь, чего не хватает. Напиши ровно "
+        "Ответь по источникам выше, ставя ссылку [N] к каждому факту. Сопоставляй "
+        "фрагменты между собой (даты, авторы, причины/следствия): если ответ "
+        "следует из их совокупности — сформулируй его как вывод со ссылками на "
+        "использованные фрагменты. Если ответ есть лишь частично — дай частичный "
+        "ответ и отметь, чего не хватает. Напиши ровно "
         f"\"{REFUSAL_TEXT}\" только если по теме во фрагментах нет ничего."
     )
     user = "\n\n".join(parts)
@@ -341,8 +389,10 @@ async def answer_question(
         import retrieval_enhance as _re
         queries = [question]
         try:
+            _schema = str(getattr(notebook, "schema", "") or "")
             queries = _re.parse_expansions(
-                await _llm(_re.build_expansion_messages(question), 200), question)
+                await _llm(_re.build_expansion_messages(question, schema=_schema), 200),
+                question)
         except ChatCancelled:
             return _cancelled_result([])
         except Exception as exc:  # noqa: BLE001
