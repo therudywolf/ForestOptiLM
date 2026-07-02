@@ -65,5 +65,23 @@ class TestDetect(unittest.TestCase):
         self.assertEqual(cp.detect_preset("http://10.0.0.5:9999", "native"), "custom")
 
 
+class TestVisionSwapWarning(unittest.TestCase):
+    def test_different_models_warns(self) -> None:
+        self.assertIsNotNone(cp.vision_swap_warning("gemma-12b", "gemma-27b"))
+
+    def test_same_model_no_warn(self) -> None:
+        self.assertIsNone(cp.vision_swap_warning("gemma-12b", "gemma-12b"))
+        self.assertIsNone(cp.vision_swap_warning("Gemma-12B", "gemma-12b"))  # регистр
+
+    def test_empty_or_placeholder_vision_no_warn(self) -> None:
+        self.assertIsNone(cp.vision_swap_warning("gemma-12b", ""))
+        self.assertIsNone(cp.vision_swap_warning("gemma-12b", "   "))
+        self.assertIsNone(cp.vision_swap_warning("gemma", "(нажмите Обновить модели)"))
+
+    def test_workers_hint_mentions_tradeoff(self) -> None:
+        self.assertIn("2×", cp.WORKERS_HINT)
+        self.assertIn("vision", cp.WORKERS_HINT.lower())
+
+
 if __name__ == "__main__":
     unittest.main()

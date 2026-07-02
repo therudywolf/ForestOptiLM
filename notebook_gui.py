@@ -653,7 +653,15 @@ class NotebookUIMixin:
             if vm and not vm.startswith("("):
                 vision_model = vm
         self._nb_set_busy(True)
-        self._nb_set_status("Строю индекс…" + (" (с описанием картинок)" if vision_model else ""))
+        status = "Строю индекс…" + (" (с описанием картинок)" if vision_model else "")
+        # Свопинг моделей: отдельная vision-модель на LM Studio = грузить/выгружать
+        # её на каждый файл. Предупреждаем сразу.
+        if vision_model:
+            import connection_presets as _cp
+            swap = _cp.vision_swap_warning(self._model_var.get(), vision_model)
+            if swap:
+                status += "  " + swap
+        self._nb_set_status(status)
         self._nb_index_progress.set(0)
 
         def on_progress(cur: int, total: int, phase: str) -> None:

@@ -337,7 +337,7 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
                      font=ctk.CTkFont(size=12, weight="bold")
                      ).pack(anchor="w", pady=(6, 0), **pad)
         ctk.CTkLabel(
-            mr, text="Сколько файлов/чанков обрабатывать одновременно.",
+            mr, text=cp.WORKERS_HINT,
             text_color=_md3.ON_SURFACE_VARIANT, font=ctk.CTkFont(size=11),
             wraplength=250, justify="left",
         ).pack(anchor="w", pady=(0, 2), **pad)
@@ -2362,7 +2362,15 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
             f"Preflight: ctx={ctx} chunk≈{chunk} scout={scout} workers={self._workers_var.get()} | {path_s}"
         )
         text = f"{base} || {plan_line}" if plan_line else base
-        self._preflight_label.configure(text=text.replace(",", " "), text_color=_md3.ON_SURFACE_VARIANT)
+        # Предупреждение о свопе моделей: отдельная vision-модель на LM Studio
+        # заставляет грузить/выгружать модель на каждый файл → медленно.
+        swap = cp.vision_swap_warning(self._model_var.get(), self._vision_model_var.get())
+        if swap:
+            self._preflight_label.configure(text=text.replace(",", " ") + "\n" + swap,
+                                            text_color=_md3.ON_SURFACE_VARIANT)
+        else:
+            self._preflight_label.configure(text=text.replace(",", " "),
+                                            text_color=_md3.ON_SURFACE_VARIANT)
 
     def _maybe_first_run_wizard(self) -> None:
         from first_run import is_first_run, mark_first_run_complete

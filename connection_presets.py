@@ -154,3 +154,30 @@ def detect_preset(base_url: str, api_mode: str) -> str:
     if mode == "openai":
         return "openai_compatible"
     return "custom"
+
+
+def _norm_model(m: str) -> str:
+    return (m or "").strip().lower()
+
+
+def vision_swap_warning(llm_model: str, vision_model: str) -> str | None:
+    """Предупреждение о «свопе моделей» на одном инстансе LM Studio.
+
+    Если для описания картинок выбрана ОТДЕЛЬНАЯ vision-модель (не пустая и не
+    равная основной), LM Studio будет грузить/выгружать модель на каждый файл
+    (JIT), что резко замедляет обработку. Совет — одна мультимодальная модель.
+    Возвращает текст предупреждения или None, если риска нет."""
+    lm, vm = _norm_model(llm_model), _norm_model(vision_model)
+    if not vm or vm.startswith("("):
+        return None  # vision-модель не задана → используется основная, свопа нет
+    if vm == lm:
+        return None  # одна и та же модель
+    return ("⚠ Vision-модель отличается от основной — LM Studio будет переключать "
+            "модели на каждый файл (медленно). Совет: одна мультимодальная модель.")
+
+
+# Ориентир по воркерам на ОДНОМ инстансе LM Studio (замер 2026-07): 4 воркера
+# дают ~2× throughput (не 4×) и удваивают латентность каждого запроса.
+WORKERS_HINT = ("Сколько файлов/чанков обрабатывать одновременно. На одном "
+                       "инстансе LM Studio 3–4 воркера ≈ 2× быстрее (не 4×) и вдвое "
+                       "выше латентность; для vision лучше 1.")
