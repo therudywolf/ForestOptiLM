@@ -388,6 +388,16 @@ async def answer_question(
             _stopped,
         )
 
+    async def _llm_stream(msgs: list[dict[str, str]], max_tokens: int) -> str:
+        # Стриминговый вызов для финального reduce — токены летят в пузырь.
+        from processor import call_llm_stream
+        return await _await_with_stop(
+            call_llm_stream(msgs, chat_model, base_url, api_key,
+                            max_tokens=max_tokens, api_mode=api_mode,
+                            on_token=on_token, stop_flag=_stopped),
+            _stopped,
+        )
+
     def _retrieve(q: str, k: int | None = None) -> list[Any]:
         return notebook.query(q, base_url=base_url, api_key=api_key,
                               embedding_model=embedding_model, top_k=k or top_k)
@@ -403,6 +413,7 @@ async def answer_question(
         try:
             res = await _run_deep_analysis(
                 notebook, question, _llm=_llm, _retrieve=_retrieve,
+                _llm_stream=(_llm_stream if on_token else None),
                 stopped=_stopped, log=_log, cancelled=_cancelled_result,
                 chat_model=chat_model, on_token=on_token,
                 max_context_tokens=max_context_tokens, max_answer_tokens=max_answer_tokens,
@@ -556,6 +567,7 @@ async def _run_deep_analysis(
     *,
     _llm: Callable[[list[dict[str, str]], int], Any],
     _retrieve: Callable[..., list[Any]],
+    _llm_stream: Callable[[list[dict[str, str]], int], Any] | None = None,
     stopped: Callable[[], bool],
     log: Callable[[str], None],
     cancelled: Callable[[list[ContextItem]], ChatResult],
@@ -685,7 +697,16 @@ async def _run_deep_analysis(
     log(f"deep: финальный reduce из {len(summaries)} выжимок")
     reduce_msgs = _da.build_reduce_messages(question, summaries, schema=schema)
     try:
-        raw = await _llm(reduce_msgs, max_answer_tokens)
+        # Финал стримим в пузырь (если есть on_token-канал); сбой стрима → обычный.
+        if _llm_stream is not None:
+            try:
+                raw = await _llm_stream(reduce_msgs, max_answer_tokens)
+            except ChatCancelled:
+                raise
+            except Exception:  # noqa: BLE001
+                raw = await _llm(reduce_msgs, max_answer_tokens)
+        else:
+            raw = await _llm(reduce_msgs, max_answer_tokens)
     except ChatCancelled:
         raise
     answer = (raw or "").strip()
