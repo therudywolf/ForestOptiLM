@@ -1463,6 +1463,17 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
         self._embedding_menu.configure(values=embed_vals if embed_vals else vals)
         scout_vals = ["(как MAP-модель)"] + (models if models else [])
         self._scout_menu.configure(values=scout_vals)
+        # Если открыто меню «Подключение» — обновить и его выпадашки моделей.
+        for menu, valset in (
+            (getattr(self, "_dlg_model_menu", None), chat_vals if chat_vals else vals),
+            (getattr(self, "_dlg_embed_menu", None), embed_vals if embed_vals else vals),
+            (getattr(self, "_dlg_vision_menu", None), vision_vals if vision_vals else vals),
+        ):
+            try:
+                if menu is not None and menu.winfo_exists():
+                    menu.configure(values=valset)
+            except Exception:
+                pass
         if models:
             persisted_main = str(self._runtime_state.get("selected_model") or "").strip()
             persisted_vision = str(self._runtime_state.get("selected_vision_model") or "").strip()
@@ -1487,6 +1498,13 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
             self._composer_model_var.set(composer_sel)
             self._embedding_model_var.set(embedding_sel)
             self._update_ctx_label(chat)
+            # синхронизировать поле контекста в меню «Подключение», если открыто
+            try:
+                if hasattr(self, "_ctx_override_var"):
+                    self._ctx_override_var.set(str(self._model_ctx.get(chat, 0) or 0))
+                self._refresh_dlg_ctx_hint()
+            except Exception:
+                pass
         n_reason = len(self._models_by_kind.get("reasoning") or [])
         status = f"Загружено моделей: {len(models)}"
         if n_reason:
@@ -2455,12 +2473,31 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
         self._preset_sel_var.set(name)
         self._set_status(f"Пресет сохранён: {name}")
 
+    def _apply_ctx_override(self) -> None:
+        """Явно задать контекст выбранной LLM (0 = авто из сервера)."""
+        try:
+            v = int((self._ctx_override_var.get() or "0").strip())
+        except ValueError:
+            self._set_status("Контекст: введите число", _STATUS_WARN)
+            return
+        m = self._model_var.get().strip()
+        if v > 0 and m:
+            self._model_ctx[m] = v
+            try:
+                self._update_ctx_label(m)
+            except Exception:
+                pass
+            self._persist_runtime_state()
+            self._set_status(f"Контекст {m}: {v} токенов")
+        else:
+            self._set_status("Контекст: авто из сервера")
+
     def _show_connection_menu(self, startup: bool = False) -> None:
-        """Отдельное меню «нейронка + API» с пресетами (стартовое и по кнопке)."""
+        """Отдельное меню «нейронка + API» с пресетами и моделями (стартовое/по кнопке)."""
         import user_presets as up
         dlg = ctk.CTkToplevel(self)
         dlg.title("Подключение и пресеты")
-        dlg.geometry("470x560")
+        dlg.geometry("480x600")
         dlg.transient(self)
         try:  # поверх и с фокусом (иначе на Windows может уйти за окно)
             dlg.lift(); dlg.focus_force()
@@ -2469,14 +2506,28 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
         except Exception:
             pass
         pad = {"padx": 16}
-        ctk.CTkLabel(dlg, text="Подключение к нейросети",
-                     font=ctk.CTkFont(size=16, weight="bold")).pack(anchor="w", pady=(14, 2), **pad)
-        ctk.CTkLabel(dlg, text="Сервер, ключ и модели. Сохраните набор как пресет и переключайтесь.",
+        # Низ фиксирован (галочка + Продолжить), тело — прокручиваемое: ничего не
+        # обрежется, сколько бы полей ни было.
+        bottom = ctk.CTkFrame(dlg, fg_color="transparent")
+        bottom.pack(side="bottom", fill="x")
+        ctk.CTkCheckBox(bottom, text="Показывать это меню при запуске",
+                        variable=self._show_conn_startup_var,
+                        command=self._persist_runtime_state).pack(anchor="w", pady=(6, 4), **pad)
+        ctk.CTkButton(bottom, text="Продолжить  ▶", fg_color=_md3.PRIMARY_CONTAINER,
+                      hover_color=_md3.PRIMARY_CONTAINER_HOVER,
+                      command=dlg.destroy).pack(fill="x", pady=(0, 12), **pad)
+
+        body = ctk.CTkScrollableFrame(dlg, fg_color="transparent")
+        body.pack(side="top", fill="both", expand=True)
+
+        ctk.CTkLabel(body, text="Подключение к нейросети",
+                     font=ctk.CTkFont(size=16, weight="bold")).pack(anchor="w", pady=(6, 2), **pad)
+        ctk.CTkLabel(body, text="Сервер, ключ и модели. Сохраните набор как пресет и переключайтесь.",
                      text_color=_md3.ON_SURFACE_VARIANT, font=ctk.CTkFont(size=11),
                      wraplength=430, justify="left").pack(anchor="w", pady=(0, 10), **pad)
 
-        ctk.CTkLabel(dlg, text="Пресет").pack(anchor="w", **pad)
-        prow = ctk.CTkFrame(dlg, fg_color="transparent"); prow.pack(fill="x", **pad)
+        ctk.CTkLabel(body, text="Пресет").pack(anchor="w", **pad)
+        prow = ctk.CTkFrame(body, fg_color="transparent"); prow.pack(fill="x", **pad)
         names = [p.name for p in up.load_presets()] or ["(нет сохранённых)"]
         self._preset_sel_var = ctk.StringVar(value=names[0])
         self._preset_menu = ctk.CTkOptionMenu(prow, variable=self._preset_sel_var, values=names, width=210)
@@ -2485,30 +2536,84 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
         ctk.CTkButton(prow, text="🗑", width=36, fg_color="transparent", border_width=1,
                       command=self._preset_delete).pack(side="left")
 
-        ctk.CTkLabel(dlg, text="Провайдер").pack(anchor="w", pady=(10, 0), **pad)
-        ctk.CTkOptionMenu(dlg, variable=self._provider_var, values=cp.preset_labels(),
+        ctk.CTkLabel(body, text="Провайдер").pack(anchor="w", pady=(10, 0), **pad)
+        ctk.CTkOptionMenu(body, variable=self._provider_var, values=cp.preset_labels(),
                           command=self._on_provider_change, width=250).pack(fill="x", **pad)
-        ctk.CTkLabel(dlg, text="API Base URL").pack(anchor="w", pady=(8, 0), **pad)
-        ctk.CTkEntry(dlg, textvariable=self._url_var).pack(fill="x", **pad)
-        ctk.CTkLabel(dlg, text="API Key (если требуется)").pack(anchor="w", pady=(6, 0), **pad)
-        ctk.CTkEntry(dlg, textvariable=self._api_key_var, show="*").pack(fill="x", **pad)
-        ctk.CTkLabel(dlg, text="Режим API").pack(anchor="w", pady=(6, 0), **pad)
-        ctk.CTkOptionMenu(dlg, variable=self._api_mode_var, values=["native", "openai"],
+        ctk.CTkLabel(body, text="API Base URL").pack(anchor="w", pady=(8, 0), **pad)
+        ctk.CTkEntry(body, textvariable=self._url_var).pack(fill="x", **pad)
+        ctk.CTkLabel(body, text="API Key (если требуется)").pack(anchor="w", pady=(6, 0), **pad)
+        ctk.CTkEntry(body, textvariable=self._api_key_var, show="*").pack(fill="x", **pad)
+        ctk.CTkLabel(body, text="Режим API").pack(anchor="w", pady=(6, 0), **pad)
+        ctk.CTkOptionMenu(body, variable=self._api_mode_var, values=["native", "openai"],
                           width=250).pack(fill="x", **pad)
-        ctk.CTkButton(dlg, text="Обновить модели", command=self._on_fetch_models
-                      ).pack(fill="x", pady=(10, 4), **pad)
-        ctk.CTkLabel(dlg, text="Модели (LLM / embedding / vision) выбираются в панели слева.",
-                     text_color=_md3.ON_SURFACE_VARIANT, font=ctk.CTkFont(size=11),
-                     wraplength=430, justify="left").pack(anchor="w", **pad)
-        ctk.CTkButton(dlg, text="💾  Сохранить как пресет…", fg_color="transparent", border_width=1,
-                      command=self._preset_save_dialog).pack(fill="x", pady=(10, 4), **pad)
+        ctk.CTkButton(body, text="🔄  Обновить модели", command=self._on_fetch_models
+                      ).pack(fill="x", pady=(10, 6), **pad)
 
-        ctk.CTkCheckBox(dlg, text="Показывать это меню при запуске",
-                        variable=self._show_conn_startup_var,
-                        command=self._persist_runtime_state).pack(anchor="w", pady=(8, 4), **pad)
-        ctk.CTkButton(dlg, text="Продолжить  ▶", fg_color=_md3.PRIMARY_CONTAINER,
-                      hover_color=_md3.PRIMARY_CONTAINER_HOVER,
-                      command=dlg.destroy).pack(fill="x", pady=(6, 12), **pad)
+        # Модели — ПРЯМО в меню. CTkComboBox редактируем: можно выбрать из списка
+        # (после «Обновить модели») ИЛИ вписать имя модели вручную.
+        mbk = getattr(self, "_models_by_kind", {}) or {}
+        ph = ["(нажмите «Обновить модели» или впишите вручную)"]
+        chat_vals = list(mbk.get("chat") or []) or ph
+        embed_vals = list(mbk.get("embedding") or []) or ph
+        vis_vals = list(mbk.get("vision") or mbk.get("chat") or []) or ph
+        ctk.CTkLabel(body, text="LLM модель (ответы)").pack(anchor="w", pady=(6, 0), **pad)
+        self._dlg_model_menu = ctk.CTkComboBox(
+            body, variable=self._model_var, values=chat_vals, width=250,
+            command=lambda *_: self._on_dlg_model_pick())
+        self._dlg_model_menu.pack(fill="x", **pad)
+        ctk.CTkLabel(body, text="Embedding-модель (поиск/RAG)").pack(anchor="w", pady=(6, 0), **pad)
+        self._dlg_embed_menu = ctk.CTkComboBox(body, variable=self._embedding_model_var,
+                                               values=embed_vals, width=250)
+        self._dlg_embed_menu.pack(fill="x", **pad)
+        ctk.CTkLabel(body, text="Vision-модель (картинки)").pack(anchor="w", pady=(6, 0), **pad)
+        self._dlg_vision_menu = ctk.CTkComboBox(body, variable=self._vision_model_var,
+                                                values=vis_vals, width=250)
+        self._dlg_vision_menu.pack(fill="x", **pad)
+
+        # Явные параметры: контекст модели (0 = авто из сервера).
+        crow = ctk.CTkFrame(body, fg_color="transparent"); crow.pack(fill="x", pady=(8, 0), **pad)
+        ctk.CTkLabel(crow, text="Контекст, токенов (0 = авто)").pack(side="left")
+        cur_ctx = int((getattr(self, "_model_ctx", {}) or {}).get(self._model_var.get().strip(), 0) or 0)
+        self._ctx_override_var = ctk.StringVar(value=str(cur_ctx))
+        ctk.CTkEntry(crow, textvariable=self._ctx_override_var, width=90).pack(side="right")
+        ctk.CTkButton(body, text="Применить контекст", height=26, fg_color="transparent",
+                      border_width=1, command=self._apply_ctx_override).pack(fill="x", pady=(4, 2), **pad)
+        self._dlg_ctx_hint = ctk.CTkLabel(
+            body, text="", text_color=_md3.ON_SURFACE_VARIANT, font=ctk.CTkFont(size=11),
+            wraplength=430, justify="left")
+        self._dlg_ctx_hint.pack(anchor="w", **pad)
+        self._refresh_dlg_ctx_hint()
+
+        ctk.CTkButton(body, text="💾  Сохранить как пресет…", fg_color="transparent", border_width=1,
+                      command=self._preset_save_dialog).pack(fill="x", pady=(10, 8), **pad)
+
+    def _on_dlg_model_pick(self) -> None:
+        """Выбрали LLM в меню → подтянуть её контекст в поле и обновить подсказку."""
+        m = self._model_var.get().strip()
+        ctx = int((getattr(self, "_model_ctx", {}) or {}).get(m, 0) or 0)
+        try:
+            self._ctx_override_var.set(str(ctx))
+        except Exception:
+            pass
+        self._refresh_dlg_ctx_hint()
+        try:
+            self._update_ctx_label(m)
+        except Exception:
+            pass
+
+    def _refresh_dlg_ctx_hint(self) -> None:
+        try:
+            m = self._model_var.get().strip()
+            ctx = (getattr(self, "_model_ctx", {}) or {}).get(m)
+            src = (getattr(self, "_model_ctx_source", {}) or {}).get(m, "")
+            if ctx:
+                self._dlg_ctx_hint.configure(
+                    text=f"Обнаружено: {ctx} токенов" + (f" ({src})" if src else ""))
+            else:
+                self._dlg_ctx_hint.configure(
+                    text="Контекст берётся автоматически после «Обновить модели».")
+        except Exception:
+            pass
 
     def _export_result(self, ext: str) -> None:
         if not self._last_result_text:
