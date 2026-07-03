@@ -19,17 +19,31 @@ and gitignored; this report is deliberately data-agnostic (no entities, no text)
   scoring every variant on completeness / correctness / grounding (1–5) + a
   hallucination flag, grounded against a reference context.
 
-## ⚠️ Methodology caveat (read before the numbers)
+## Two passes: biased → fair (read this before the numbers)
 
-The judge grounded each answer against the **baseline's own** BM25 reference. The
-baseline was written *from* that reference, so it scores near-perfect by
-construction, while `deep` mode draws from a **much wider** gather — its
-real-but-outside-the-reference facts get flagged as "unsupported / hallucinated."
-So the head-to-head is **biased toward the baseline**, and deep-mode scores are
-**under-measured**. The fix is already applied to the harness (`generate()` now
-saves each answer's own retrieved contexts) so the next iteration judges grounding
-fairly. Treat the raw "project loses 19/20" as an upper bound on the gap, not the
-truth.
+**Pass 1 (biased):** the judge grounded each answer against the *baseline's own*
+narrow BM25 reference → baseline scores near-perfect by construction; `deep` mode's
+wider-gather facts get flagged as "hallucinated." Result: project loses 19/20,
+deep-fast hallucinates 16/16. **This is an artifact — do not trust it.**
+
+**Pass 2 (fair, authoritative):** re-ran 12b in each question's best mode with its
+**own** retrieved contexts saved, and re-judged grounding against those (deep-mode
+facts consistent with the domain + own contexts are NOT counted as fabrication).
+
+**Fair project-vs-me: 6 wins / 13 losses / 1 tie.** Mean 3.38 (project) vs 4.80
+(baseline). Hallucinations 3/20 (all portrait) — down from the biased 16/16.
+
+| task type | project wins | project mean | baseline mean | pattern |
+|---|---|---|---|---|
+| causal | 2 / 5 | **3.80** | 4.87 | strongest — deep reasoning competitive |
+| portrait | 2 (+1 tie) | 3.22 | 4.83 | wins incl. the historically-failing case; 3/6 fabricate traits |
+| enumeration | 1 / 5 | 3.40 | 4.93 | deep **drifts** — misreads terms, answers an adjacent question |
+| factoid | 1 / 4 | 3.08 | 4.50 | **over-refusal** is the biggest loss driver |
+
+The project genuinely **wins 6** — including a factoid where deep retrieval found a
+threshold-breach fact the manual grep missed, and the portrait case that used to
+fail. It **loses 13** on three precise, real weaknesses (below). Careful manual
+analysis still edges it overall (~1.4 pts, not the ~2.3 the biased pass implied).
 
 ## Offline retrieval ablation (entity questions, no server)
 
@@ -45,58 +59,62 @@ truth.
   IDF — which `deep`/`enhanced` already do (entity extraction → terse retrieval).
 - `candidate_k` floor 50→**200**: ~+0.016 nDCG@10 at negligible cost. **Applied.**
 
-## E2E findings
+## E2E findings (from the fair pass)
 
-Raw judge aggregates (reference-biased — see caveat):
+Three real, precisely-characterized weaknesses drive the 13 losses:
 
-| variant | mean(compl/corr/grnd) | hallucination |
-|---|---|---|
-| baseline (me) | 4.92 | 0/20 |
-| 12b / simple | 2.58 | 9/20 |
-| 12b / enhanced | 2.48 | 14/20 |
-| 12b / deep-fast | 2.04 | 16/16 |
-| e2b / * | ~1.8 | high |
+1. **Factoid over-refusal** (biggest loss driver; project 3.08 vs 4.50). On
+   f1/f3/f4 the model returns a bare "нет ответа" even though its *own* contexts
+   held directly relevant facts (multi-account spray, ЕСИА/urent traffic, WAF spam
+   rules). The baseline "won" by being *helpful* — reconstructing the related facts
+   and honestly noting the exact label doesn't exist. One refusal (f2-adjacent, a
+   term genuinely absent) is legitimate — not all refusals are bugs. Note: f2
+   itself the project **won**, finding a threshold-breach fact the grep missed.
+2. **Deep-mode topic drift on enumeration** (project 3.40 vs 4.93). Deep gathers
+   widely but sometimes answers an *adjacent* question: misread "домены" as subject
+   areas instead of DNS/FQDNs (e3), substituted «голосование»→«согласование» (e5),
+   misattributed chat @handles as compromised accounts (e2). Coverage is broad but
+   off-target — a precision/grounding problem, not lack of recall.
+3. **Portrait fabrication** (3/6 portraits flagged: p1/p2/p4). Deep portraits
+   invent traits/attributions beyond the contexts. Yet it also **wins** portraits
+   (p3 — the historically-failing portrait case — and p5; p6 tie), so deep portraits
+   are high-variance: excellent or fabricating.
 
-**Eyeball-verified, real (not artifact):**
-1. **`e2b` leaks chain-of-thought into the answer** ("Пользователь просит… Я должен
-   проанализировать… Просмотрю источники: [1]…") *and* fabricates source
-   descriptions. e2b is unusable for this pipeline as-is — recommend 12b/26b.
-2. **Over-refusal compounded by weak retrieval.** On refused factoids, hybrid
-   top-16 surfaced only 1–4 relevant contexts (baseline's BM25-30 + terse entity
-   queries found more), and the model then refused even with 3–4 relevant. One
-   refusal (a term genuinely absent) was **correct** — so not all refusals are bugs.
-3. **`enhanced` occasionally adds unsupported claims** with a fabricated citation.
-   `enhanced` did not beat `simple` on the refused factoids and scored slightly
-   lower with more hallucination.
+**Strength:** `causal` is the project's best type (3.80, 2 wins) — deep multi-hop
+reasoning is genuinely competitive with careful manual analysis. And `deep` mode
+**never refuses** (0/16 vs ~20% for simple/enhanced).
 
-**Under-measured but good (artifact of the biased judge):**
-4. **`deep` mode never refuses** (0 across all deep configs vs ~20% for
-   simple/enhanced) and produces coherent, structured portraits/aggregations —
-   including the specific portrait case that historically failed. Its low judge
-   scores are largely the reference bias.
-
-**Cross-model:** honesty/quality ranks `26b > 12b > e2b` (bigger = less
-hallucination, more willing to refuse cleanly); e2b is the clear outlier (CoT leak).
+**`e2b` is unusable** (separate from the above): it leaks chain-of-thought into the
+answer ("Пользователь просит… Я должен… Просмотрю источники: [1]…") and fabricates
+source descriptions. Cross-model honesty ranks `26b > 12b > e2b`.
 
 **Latency ladder (12b):** simple ~14s · enhanced ~25s · deep-fast ~177s ·
 deep-full ~463s. deep-full's extra ~5 min over deep-fast did not clearly win.
 
 ## Applied this pass
 
-- `retrieval.py`: `candidate_k` floor 50→200 (offline-proven).
+- `retrieval.py`: `candidate_k` floor 50→200 (offline-proven, +0.016 nDCG@10).
 - `tools/eval/runner.py`: `generate()` saves each answer's retrieved contexts →
-  fair grounding for the next iteration.
+  enabled the fair pass; keep for all future eval.
 
-## Validated next targets (each needs a fair-eval A/B before shipping)
+## Next targets, ranked by fair-pass impact (each needs an A/B before shipping)
 
-1. **Entity-aware BM25 arm** — detect `@handle` / quoted / CVE-like tokens and give
-   BM25 a terse entity query (keeps exact-match power, stops verbose dilution).
-   Must not regress factoid/exact.
-2. **Wider / better grounding context** for the simple path (top_k, dedup) so fewer
-   spurious refusals when relevant chunks exist.
-3. **Refusal-guard tuning** — extract partial/related facts instead of a bare "нет
-   ответа" when some relevant contexts are present, *without* increasing
-   hallucination. Risky → A/B first.
-4. **e2b handling** — strip leaked reasoning or de-recommend e2b.
-5. **Fair-eval v2** — re-judge grounding against each answer's own saved contexts
-   (harness now supports this) to remove the reference bias and re-measure deep mode.
+The harness now makes each of these a ~30-min measure-change-remeasure loop.
+
+1. **Refusal-guard tuning (biggest win).** When the exact thing isn't in sources but
+   *related* facts are, present them + note the gap instead of a bare "нет ответа".
+   This alone would flip several factoid losses. Risk: hallucination ↑ — A/B first.
+2. **Deep-mode question fidelity.** Deep drifts to adjacent topics on enumeration
+   (misreads domain terms, substitutes concepts). Tighten the map/reduce prompt to
+   re-anchor on the literal question; consider a "does this answer the asked
+   question?" check in reduce.
+3. **Portrait anti-fabrication.** Deep portraits are high-variance (3/6 fabricate).
+   Strengthen the reduce guard: only assert traits with ≥N supporting fragments;
+   attribute by identifier, not invented ФИО (the existing anti-conflation rule
+   needs teeth).
+4. **Entity-aware BM25 arm** — detect `@handle`/quoted/CVE tokens → terse BM25 query
+   (keeps exact-match power, stops verbose dilution). Must not regress factoid/exact.
+5. **De-recommend / fix `e2b`** — it leaks reasoning into the answer; recommend
+   12b/26b, or strip leaked CoT.
+
+Done this run: candidate_k tuning, fair-eval methodology (bias found + corrected).
