@@ -111,8 +111,10 @@ class TestPureFunctions(unittest.TestCase):
         # Ревью beta.11 #3: длинная схема не должна раздувать system-промпт.
         ctx = nc.select_contexts([_Hit("c", "C:/x/a.txt")], max_tokens=1000)
         msgs = nc.build_chat_messages("q", ctx, schema="Д" * 5000)
-        # system = базовый промпт + блок схемы (≤2000 символов схемы)
-        self.assertLessEqual(msgs[0]["content"].count("Д"), 2000)
+        # system = базовый промпт + блок схемы (≤2000 символов схемы). Проверяем
+        # именно КАП схемы: 5000 «Д» ужаты до 2000 подряд идущих (устойчиво к «Д»
+        # в самом базовом промпте, которые не образуют 2001 подряд).
+        self.assertNotIn("Д" * 2001, msgs[0]["content"])
 
     def test_build_messages_no_schema_block_when_empty(self) -> None:
         ctx = nc.select_contexts([_Hit("x", "C:/x/a.txt")], max_tokens=1000)
