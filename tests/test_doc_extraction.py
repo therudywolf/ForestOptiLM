@@ -226,5 +226,19 @@ class TestXlsxAllSheets(unittest.TestCase):
             self.assertNotIn("nan", csv.lower())  # пропуски пустые, не NaN
 
 
+class TestDocExtraction(unittest.TestCase):
+    def test_doc_registered_as_text(self) -> None:
+        # .doc теперь маршрутизируется в текстовый экстрактор (был hard-reject).
+        self.assertIn(".doc", fe.TEXT_EXTRACTORS)
+
+    def test_doc_graceful_without_antiword(self) -> None:
+        # Без antiword — понятный ParseError, а НЕ краш: толерантная индексация
+        # пропустит файл и продолжит прогон, а не потеряет весь батч.
+        from unittest import mock
+        with mock.patch("shutil.which", return_value=None):
+            with self.assertRaises(fe.ParseError):
+                fe._read_doc(Path("whatever.doc"))
+
+
 if __name__ == "__main__":
     unittest.main()

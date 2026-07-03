@@ -303,6 +303,28 @@ def _read_html_text(path: Path) -> str:
     return re.sub(r"<[^>]+>", " ", text)
 
 
+def _read_doc(path: Path) -> str:
+    """Старый бинарный .doc (Word 97-2003) через antiword. Python не читает .doc
+    нативно; antiword — классический экстрактор. `-m UTF-8.txt` обязателен для
+    кириллицы (без него cp1251 превращается в «?????»). Если antiword не
+    установлен — понятный ParseError: индексатор пропустит файл, не падая
+    (толерантная индексация), а не потеряет весь прогон."""
+    import shutil
+    import subprocess
+    exe = shutil.which("antiword")
+    if not exe:
+        raise ParseError(".doc: нужен antiword (или конвертируйте в .docx)")
+    try:
+        r = subprocess.run([exe, "-m", "UTF-8.txt", str(path)],
+                           capture_output=True, timeout=120)
+    except Exception as exc:  # noqa: BLE001
+        raise ParseError(f".doc: antiword не отработал — {exc}")
+    text = (r.stdout or b"").decode("utf-8", "replace").strip()
+    if not text:
+        raise ParseError(".doc: antiword вернул пусто (повреждён/зашифрован/пустой)")
+    return text
+
+
 # ------------------------------------------------------------------ #
 #  Table extractors
 # ------------------------------------------------------------------ #
@@ -426,6 +448,7 @@ TEXT_EXTRACTORS: dict[str, Callable[[Path], str]] = {
     # Rich documents
     ".rtf":  _read_rtf,
     ".pdf":  _read_pdf,
+    ".doc":  _read_doc,   # старый бинарный Word через antiword (best-effort)
     ".docx": _read_docx,
     ".odt":  _read_odt,
     ".epub": _read_epub,
@@ -532,9 +555,6 @@ def _extract_single_file(path: Path) -> tuple[ContentKind, str | pd.DataFrame]:
     if suffix in _SKIP_EXTENSIONS:
         logger.debug("Skip by extension: %s", path)
         raise ParseError(f"Extension {suffix} skipped by design")
-
-    if suffix == ".doc":
-        raise ParseError(".doc not supported; convert to .docx")
 
     if suffix in IMAGE_EXTENSIONS:
         return ("vision", str(path.resolve()))
