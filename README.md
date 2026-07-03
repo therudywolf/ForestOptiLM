@@ -48,6 +48,13 @@ Licensed under **AGPL-3.0-or-later** — see [LICENSE](LICENSE), [NOTICE](NOTICE
   instead of being re-derived on every question. Optional **🎯 Точный поиск**
   (query-expansion + LLM re-ranking) sharpens recall and precision. See
   [Notebooks](#notebooks).
+- **🌐 Web research (keyless, no API keys)** — a chat mode that answers from the
+  *internet* instead of the notebook index: keyless search (DuckDuckGo HTML),
+  browser-imitation fetch + main-text extraction, and **grounded synthesis with
+  `[N]`→URL citations** across many sources (deep map-reduce). Plus one-click
+  **Wikipedia** and public **GitLab** repo importers straight into a notebook.
+  Fetched pages are treated as untrusted (prompt-injection fencing) and blocked
+  from internal/loopback addresses (SSRF guard).
 - **Smart import** — recognized chat exports are normalized to clean,
   LLM-friendly `[date] sender: text` blocks *before* indexing instead of being
   dumped as raw markup. Shipped importers: **Telegram Desktop HTML**
