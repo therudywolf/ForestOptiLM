@@ -141,6 +141,22 @@ class TestPureFunctions(unittest.TestCase):
         self.assertTrue(nc.is_refusal(nc.REFUSAL_TEXT))
         self.assertFalse(nc.is_refusal("Это полноценный ответ [1] с цитатой."))
 
+    def test_looks_like_leaked_reasoning(self) -> None:
+        # Реальные протёкшие CoT e2b (по eval): начинаются с мета-рассуждения.
+        self.assertTrue(nc.looks_like_leaked_reasoning(
+            "Пользователь просит найти информацию. Я должен проанализировать источники."))
+        self.assertTrue(nc.looks_like_leaked_reasoning(
+            "Я должен искать информацию в предоставленных источниках [1] по [14]."))
+        self.assertTrue(nc.looks_like_leaked_reasoning(
+            "The user asks about X. Let me analyze the sources."))
+        # Нормальные grounded-ответы и отказ — НЕ ложные срабатывания.
+        self.assertFalse(nc.looks_like_leaked_reasoning(
+            "В уведомлениях фиксируются множественные события [1][2]."))
+        self.assertFalse(nc.looks_like_leaked_reasoning(nc.REFUSAL_TEXT))
+        self.assertFalse(nc.looks_like_leaked_reasoning(""))
+        self.assertFalse(nc.looks_like_leaked_reasoning(
+            "Александр — ключевой эксперт по ИБ [5]."))
+
 
 class TestAnswerQuestion(unittest.TestCase):
     def test_refuses_when_no_contexts(self) -> None:

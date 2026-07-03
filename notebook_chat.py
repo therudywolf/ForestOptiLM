@@ -342,6 +342,34 @@ def is_refusal(answer: str) -> bool:
     return REFUSAL_TEXT.lower() in norm and len(norm) < len(REFUSAL_TEXT) + 40
 
 
+LEAKED_REASONING_TEXT = (
+    "Похоже, выбранная модель вернула размышления вместо готового ответа "
+    "(так делают маленькие/reasoning-модели, напр. gemma-4-e2b). Переключитесь "
+    "на более крупную модель (12b/26b) в меню подключения к нейросети."
+)
+
+# Маркеры «мыслей вслух»: маленькие модели иногда пишут мета-рассуждение о задаче
+# прямо в контент (без тегов <think>, которые срезает processor). Grounded-ответ
+# так НИКОГДА не начинается — на eval это 0 ложных срабатываний на 74 ответах
+# 12b/26b и ловит протёкший CoT e2b (7/12).
+_LEAKED_REASONING_MARKERS = (
+    "пользователь просит", "пользователь спрашивает", "пользователь хочет",
+    "я должен", "мне нужно проанализировать", "проанализирую источник",
+    "просмотрю источник", "рассмотрю источник", "давайте проанализируем",
+    "the user asks", "the user wants", "the user is asking",
+    "let me analyze", "i need to analyze", "i should analyze", "i will analyze",
+)
+
+
+def looks_like_leaked_reasoning(answer: str) -> bool:
+    """True, если ответ НАЧИНАЕТСЯ с мета-рассуждения о задаче (протёкший CoT),
+    а не с самого ответа. Консервативно: только по началу строки."""
+    if not answer:
+        return False
+    head = answer.strip().lower()
+    return any(head.startswith(m) for m in _LEAKED_REASONING_MARKERS)
+
+
 async def answer_question(
     notebook: Any,
     question: str,
@@ -563,6 +591,15 @@ async def answer_question(
                 )
             raise
     answer = (raw or "").strip()
+    if looks_like_leaked_reasoning(answer):
+        return ChatResult(
+            answer=LEAKED_REASONING_TEXT,
+            citations=[],
+            contexts=[c.to_citation() for c in contexts],
+            refused=False,
+            model=chat_model,
+            extra={"leaked_reasoning": True, "raw_answer": answer[:2000]},
+        )
     used = parse_used_citations(answer, contexts)
     return ChatResult(
         answer=answer,
@@ -724,6 +761,12 @@ async def _run_deep_analysis(
     answer = (raw or "").strip()
     if not answer:
         return None
+    if looks_like_leaked_reasoning(answer):
+        return ChatResult(
+            answer=LEAKED_REASONING_TEXT, citations=[], contexts=[],
+            refused=False, model=chat_model,
+            extra={"deep": True, "leaked_reasoning": True, "raw_answer": answer[:2000]},
+        )
 
     # 7) Цитаты: [N] в ответе → единицы (для панели источников).
     used_ctx: list[ContextItem] = []
