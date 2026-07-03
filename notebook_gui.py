@@ -46,7 +46,9 @@ from typing import Any
 import customtkinter as ctk
 from tkinter import messagebox
 
+import deep_research
 import notebook_store as nbs
+import web_import
 from lmstudio_config import sanitize_for_log
 from notebook_chat import ChatResult, answer_question
 from notebook_studio import MATERIAL_ORDER, MATERIALS, generate_material
@@ -112,6 +114,7 @@ class NotebookUIMixin:
         self._nb_busy = False
         self._nb_chat_stop = threading.Event()  # кооперативная отмена запроса чата
         self._nb_precise_var = ctk.BooleanVar(value=False)  # «Точный поиск» (expansion+rerank)
+        self._nb_web_var = ctk.BooleanVar(value=False)      # «Веб-поиск» (дипресёрч в интернете)
         self._nb_deep_var = ctk.StringVar(value="Авто")     # «Глубокий анализ» (map-reduce)
         self._nb_deep_depth_var = ctk.StringVar(value="Полно")  # глубина deep: Полно/Быстро
         self._nb_view = "archive"
@@ -324,6 +327,11 @@ class NotebookUIMixin:
         ctk.CTkButton(add, text="＋ Файл", width=84, command=self._nb_add_files).pack(side="left", padx=(0, 4))
         ctk.CTkButton(add, text="＋ Папка", width=84, command=self._nb_add_folder).pack(side="left", padx=(0, 4))
         ctk.CTkButton(add, text="＋ URL", width=70, command=self._nb_add_url).pack(side="left")
+        # W3: импорт внешних источников (Wikipedia-статья, публичный GitLab-репо).
+        add2 = ctk.CTkFrame(left, fg_color="transparent")
+        add2.pack(fill="x", padx=12, pady=(4, 0))
+        ctk.CTkButton(add2, text="＋ Wiki", width=84, command=self._nb_add_wikipedia).pack(side="left", padx=(0, 4))
+        ctk.CTkButton(add2, text="＋ GitLab", width=94, command=self._nb_add_gitlab).pack(side="left")
 
         self._nb_sources_frame = ctk.CTkScrollableFrame(left, fg_color="transparent", label_text="")
         self._nb_sources_frame.pack(fill="both", expand=True, padx=8, pady=(8, 4))
@@ -353,6 +361,10 @@ class NotebookUIMixin:
         # «Точный поиск»: query-expansion + LLM-реранк (точнее, но на пару запросов
         # к модели дольше) — по мотивам qmd/LLM-Wiki. По умолчанию выкл.
         ctk.CTkCheckBox(bar, text="🎯 Точный поиск", variable=self._nb_precise_var,
+                        font=ctk.CTkFont(size=12)).pack(side="right", padx=(0, 10))
+        # «Веб-поиск»: ответ не по источникам блокнота, а дипресёрчем в интернете
+        # (keyless-поиск → чтение top-N → grounded-синтез с [N]→URL). Индекс не нужен.
+        ctk.CTkCheckBox(bar, text="🌐 Веб-поиск", variable=self._nb_web_var,
                         font=ctk.CTkFont(size=12)).pack(side="right", padx=(0, 10))
         # «Глубокий анализ»: map-reduce по всему следу сущности/темы для
         # агрегирующих вопросов (портрет/сводка/«как устроен»). Авто — включается
@@ -591,6 +603,72 @@ class NotebookUIMixin:
 
         threading.Thread(target=work, daemon=True).start()
 
+    def _nb_add_wikipedia(self) -> None:
+        """W3: импорт статьи Wikipedia (заголовок или ссылка) как источник."""
+        if not self._nb_require_notebook() or not self._nb_check_idle():
+            return
+        dlg = ctk.CTkInputDialog(text="Заголовок статьи или ссылка Wikipedia:",
+                                 title="Импорт из Wikipedia")
+        q = (dlg.get_input() or "").strip()
+        if not q:
+            return
+        nb = self._nb_current
+        self._nb_set_busy(True)
+        self._nb_set_status(f"Wikipedia: {q}…")
+
+        def work() -> None:
+            try:
+                doc = web_import.import_wikipedia(q)
+                nb.add_url_source(doc.origin, doc.text, doc.name)  # type: ignore[union-attr]
+                self._nb_after(self._nb_render_sources)
+                self._nb_after(self._nb_render_workspace_header)
+                self._nb_after(lambda: self._nb_set_status(
+                    f"Добавлено: {doc.name} ({len(doc.text)} симв.)", _md3.SUCCESS))
+                self._nb_after(lambda: self._append_log_line(
+                    f"[NB] wiki: {doc.origin} ({len(doc.text)} симв.)", "general"))
+            except Exception as exc:  # noqa: BLE001
+                safe = sanitize_for_log(str(exc))
+                self._nb_after(lambda: self._nb_set_status(f"Wikipedia: {safe}", _md3.ERROR))
+            finally:
+                self._nb_after(lambda: self._nb_set_busy(False))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _nb_add_gitlab(self) -> None:
+        """W3: импорт текстовых/кодовых файлов публичного GitLab-репо как источник.
+        Файлы склеиваются в один источник с заголовками-разделителями (провенанс
+        каждого файла сохраняется в тексте; сайдбар остаётся чистым)."""
+        if not self._nb_require_notebook() or not self._nb_check_idle():
+            return
+        dlg = ctk.CTkInputDialog(text="URL публичного GitLab-репозитория:",
+                                 title="Импорт из GitLab")
+        repo = (dlg.get_input() or "").strip()
+        if not repo:
+            return
+        nb = self._nb_current
+        self._nb_set_busy(True)
+        self._nb_set_status(f"GitLab: читаю {repo}…")
+
+        def work() -> None:
+            try:
+                docs = web_import.import_gitlab_repo(repo)
+                combined = "\n\n".join(f"===== {d.name} =====\n{d.text}" for d in docs)
+                name = f"GitLab: {repo.rstrip('/').rsplit('/', 1)[-1]}"
+                nb.add_url_source(repo, combined, name)  # type: ignore[union-attr]
+                self._nb_after(self._nb_render_sources)
+                self._nb_after(self._nb_render_workspace_header)
+                self._nb_after(lambda: self._nb_set_status(
+                    f"Импортировано файлов: {len(docs)}", _md3.SUCCESS))
+                self._nb_after(lambda: self._append_log_line(
+                    f"[NB] gitlab: {repo} — {len(docs)} файлов, {len(combined)} симв.", "general"))
+            except Exception as exc:  # noqa: BLE001
+                safe = sanitize_for_log(str(exc))
+                self._nb_after(lambda: self._nb_set_status(f"GitLab: {safe}", _md3.ERROR))
+            finally:
+                self._nb_after(lambda: self._nb_set_busy(False))
+
+        threading.Thread(target=work, daemon=True).start()
+
     def _nb_render_sources(self) -> None:
         for w in self._nb_sources_frame.winfo_children():
             w.destroy()
@@ -710,7 +788,8 @@ class NotebookUIMixin:
         if not question:
             self._nb_set_status("Введите вопрос", _md3.WARNING)
             return
-        if not nb.has_index:
+        web = bool(self._nb_web_var.get())  # веб-режим не требует индекса блокнота
+        if not web and not nb.has_index:
             self._nb_set_status("Сначала постройте индекс блокнота", _md3.WARNING)
             return
         model = self._model_var.get().strip()
@@ -732,8 +811,9 @@ class NotebookUIMixin:
         deep_depth = "fast" if self._nb_deep_depth_var.get() == "Быстро" else "full"
         self._nb_chat_stop.clear()  # новый запрос → сбрасываем флаг отмены
         self._nb_set_busy(True, cancellable=True)  # чат можно прервать «Стоп»
-        self._nb_set_status("Ищу в источниках и формирую ответ…")
-        thinking = self._nb_add_message_row("assistant", "…думаю…", [], placeholder=True)
+        self._nb_set_status("🌐 Ищу в интернете…" if web else "Ищу в источниках и формирую ответ…")
+        thinking = self._nb_add_message_row(
+            "assistant", "🌐 …ищу в интернете…" if web else "…думаю…", [], placeholder=True)
 
         # C4: потоковый вывод — обновляем пузырь-плейсхолдер по мере прихода токенов.
         # Тротлинг: пока обновление запланировано, новые токены просто копятся.
@@ -755,23 +835,35 @@ class NotebookUIMixin:
                     pass
             self._nb_after(upd)
 
+        def web_progress(msg: str) -> None:
+            # Прогресс дипресёрча (нашёл N ссылок / прочитал N страниц) → в пузырь.
+            self._append_log_line(f"[NB web] {msg}", "general")
+            stream_state["text"] = msg
+            self._nb_after(lambda: (thinking.winfo_exists()
+                                    and thinking._nb_label.configure(text=msg)) or None)
+
         def work() -> None:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
-                result: ChatResult = loop.run_until_complete(
-                    answer_question(
-                        nb, question, base_url=base_url, api_key=api_key,
-                        chat_model=model, embedding_model=emb, api_mode=api_mode,
-                        history=history,
-                        on_log=lambda m: self._append_log_line(f"[NB chat] {m}", "general"),
-                        stop_flag=self._nb_chat_stop.is_set,
-                        enhanced=precise,
-                        on_token=on_token,
-                        deep_mode=deep_mode,
-                        deep_depth=deep_depth,
+                if web:
+                    result = self._nb_web_research(
+                        loop, question, model=model, base_url=base_url,
+                        api_key=api_key, api_mode=api_mode, on_log=web_progress)
+                else:
+                    result = loop.run_until_complete(
+                        answer_question(
+                            nb, question, base_url=base_url, api_key=api_key,
+                            chat_model=model, embedding_model=emb, api_mode=api_mode,
+                            history=history,
+                            on_log=lambda m: self._append_log_line(f"[NB chat] {m}", "general"),
+                            stop_flag=self._nb_chat_stop.is_set,
+                            enhanced=precise,
+                            on_token=on_token,
+                            deep_mode=deep_mode,
+                            deep_depth=deep_depth,
+                        )
                     )
-                )
             except Exception as exc:  # noqa: BLE001
                 msg = _nb_friendly_error(exc)
                 self._nb_after(lambda: self._nb_finish_answer(
@@ -783,6 +875,20 @@ class NotebookUIMixin:
             self._nb_after(lambda: self._nb_finish_answer(thinking, result, nb, question))
 
         threading.Thread(target=work, daemon=True).start()
+
+    def _nb_web_research(self, loop: Any, question: str, *, model: str, base_url: str,
+                         api_key: str, api_mode: str, on_log: Any) -> ChatResult:
+        """Веб-режим: дипресёрч в интернете → ChatResult с веб-цитатами [N]→URL.
+        Источники рендерятся теми же чипами, что и цитаты по блокноту; клик
+        открывает URL в браузере (`_nb_open_path` понимает http)."""
+        res = loop.run_until_complete(
+            deep_research.research(
+                question, base_url=base_url, api_key=api_key, chat_model=model,
+                api_mode=api_mode, on_log=on_log))
+        answer = res.get("answer", "")
+        cits = deep_research.sources_to_citations(res.get("sources", []))
+        return ChatResult(answer=answer, citations=cits, contexts=[],
+                          refused=not answer or res.get("n_pages", 0) == 0)
 
     def _nb_finish_answer(self, placeholder: ctk.CTkFrame, result: ChatResult, nb: Any,
                           question: str = "") -> None:
@@ -1132,6 +1238,11 @@ class NotebookUIMixin:
         return True
 
     def _nb_open_path(self, path: str) -> None:
+        # Веб-цитаты дипресёрча хранят URL в source_path — открываем в браузере.
+        if str(path).startswith(("http://", "https://")):
+            import webbrowser
+            webbrowser.open(path)
+            return
         p = Path(path)
         if not p.exists():
             self._nb_set_status(f"Файл недоступен: {p.name}", _md3.WARNING)

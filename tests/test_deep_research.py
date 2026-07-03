@@ -44,5 +44,25 @@ class TestBuildResearchMessages(unittest.TestCase):
         self.assertLess(user.count("x"), 200)                    # текст усечён
 
 
+class TestSourcesToCitations(unittest.TestCase):
+    """W5-адаптер: source-дикты дипресёрча → чиповые цитаты чата блокнота."""
+
+    def test_maps_fields(self) -> None:
+        cits = dr.sources_to_citations([
+            {"n": 1, "url": "https://owasp.org/Top10/", "title": "OWASP Top 10"},
+            {"n": 2, "url": "https://habr.com/ru/articles/1/", "title": ""},
+        ])
+        self.assertEqual(len(cits), 2)
+        self.assertEqual(cits[0]["n"], 1)
+        self.assertEqual(cits[0]["display"], "OWASP Top 10")
+        self.assertEqual(cits[0]["source_path"], "https://owasp.org/Top10/")  # клик → браузер
+        self.assertEqual(cits[0]["locator"], "🌐 веб")
+        # без title показываем хост, а не пустую строку
+        self.assertEqual(cits[1]["display"], "habr.com")
+
+    def test_empty(self) -> None:
+        self.assertEqual(dr.sources_to_citations([]), [])
+
+
 if __name__ == "__main__":
     unittest.main()

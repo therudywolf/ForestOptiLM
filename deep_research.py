@@ -55,6 +55,25 @@ def build_research_messages(question: str, pages: list[Any], per_source_chars: i
             {"role": "user", "content": user}]
 
 
+def sources_to_citations(sources: list[dict]) -> list[dict]:
+    """Источники research() → цитаты в форме, которую рисует чат блокнота
+    (n/display/source_path/quote/locator). URL в source_path → клик открывает
+    в браузере. Чистая функция (тестируется без GUI/сети)."""
+    from urllib.parse import urlparse
+    cits = []
+    for s in sources:
+        url = s.get("url", "") or ""
+        host = urlparse(url).netloc or url
+        cits.append({
+            "n": s.get("n"),
+            "display": (s.get("title") or "").strip() or host,
+            "source_path": url,
+            "quote": url,
+            "locator": "🌐 веб",
+        })
+    return cits
+
+
 async def research(
     question: str,
     *,
