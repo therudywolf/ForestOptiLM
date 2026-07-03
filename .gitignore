@@ -55,6 +55,12 @@ last_job.json
 report.md
 NocturneData/
 
+# Eval: question sets / gold labels / run outputs contain real corpus content
+# (names, handles, paths) — NEVER commit. The harness code (tools/eval/) IS
+# committed; only the private DATA under these dirs is ignored.
+eval_data/
+eval_runs/
+
 # Test / coverage
 .coverage
 htmlcov/
