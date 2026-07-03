@@ -23,7 +23,7 @@ VSVersionInfo(
           StringStruct('LegalCopyright', 'Copyright (C) 2025 therudywolf — AGPL-3.0-or-later'),
           StringStruct('OriginalFilename', 'NocturneDataForge.exe'),
           StringStruct('ProductName', 'Nocturne Data Forge'),
-          StringStruct('ProductVersion', '0.7.0-beta.25'),
+          StringStruct('ProductVersion', '0.7.0-beta.26'),
         ])
     ]),
     VarFileInfo([VarStruct('Translation', [1033, 1200])])
