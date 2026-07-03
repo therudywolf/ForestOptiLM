@@ -22,6 +22,11 @@ _spa = importlib.util.spec_from_file_location("eval_aggregate_judges", _pa)
 aj = importlib.util.module_from_spec(_spa)
 _spa.loader.exec_module(aj)
 
+_pb = Path(__file__).resolve().parent.parent / "tools" / "eval" / "build_cards.py"
+_spb = importlib.util.spec_from_file_location("eval_build_cards", _pb)
+bc = importlib.util.module_from_spec(_spb)
+_spb.loader.exec_module(bc)
+
 
 class TestIRMetrics(unittest.TestCase):
     def test_recall_at_k(self) -> None:
@@ -109,6 +114,29 @@ class TestMultiJudgeAggregate(unittest.TestCase):
         self.assertEqual(t["wins"], 1)
         self.assertEqual(t["losses"], 2)   # q3 majority no (tie-break by most_common order)
         self.assertEqual(t["split_verdicts"], 1)  # q3 judges disagreed
+
+
+class TestBuildCards(unittest.TestCase):
+    def test_assembles_card_with_own_contexts(self) -> None:
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            gen = root / "gen"; base = root / "base"; ctx = root / "ctx"; out = root / "cards"
+            for d in (gen, base, ctx):
+                d.mkdir()
+            (gen / "q1.json").write_text(json.dumps({
+                "qid": "q1", "task_type": "factoid", "answer": "проектный ответ [1]",
+                "refused": False, "contexts": [{"source": "s.html", "text": "факт"}]}), encoding="utf-8")
+            (base / "q1.json").write_text(json.dumps({"answer": "мой ответ"}), encoding="utf-8")
+            (ctx / "q1.txt").write_text("# Q[q1/factoid]: сам вопрос?\n[s.html] факт", encoding="utf-8")
+            n = bc.build_cards(gen, base, ctx, out)
+            self.assertEqual(n, 1)
+            card = json.loads((out / "q1.json").read_text(encoding="utf-8"))
+            self.assertEqual(card["baseline_answer"], "мой ответ")
+            self.assertEqual(card["project_answer"], "проектный ответ [1]")
+            self.assertIn("сам вопрос", card["question"])
+            self.assertEqual(card["project_own_contexts"][0]["source"], "s.html")
 
 
 if __name__ == "__main__":

@@ -13,6 +13,10 @@ in gitignored `eval_data/` and `eval_runs/`.
 - `schema.py` — `Question` (JSONL): `id`, `task_type` (enumeration | causal |
   portrait | factoid), `question`, `gold_chunk_ids`, `gold_sources`,
   `gold_answer_points`, `notes`.
+- `build_cards.py` — assemble judge cards (baseline answer + project answer + the
+  project's **own** retrieved contexts + question) for the multi-judge gate.
+- `aggregate_judges.py` — fold K independent judge verdicts per question into a
+  stable result (majority verdict + mean + `agree` split-flag). Unit-tested.
 - `runner.py` — runs the **real** pipeline over a question set:
   - `dual_rankings(store, q, qvec, cand)` → the two ranked lists (vector, BM25)
     **before** fusion. Compute once; then sweep fusion params in memory.
