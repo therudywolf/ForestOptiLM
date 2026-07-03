@@ -4,6 +4,29 @@ First full pass of the measurement loop against a large real-world corpus
 (~455k chunks, mixed chat + notification data). All corpus content stays local
 and gitignored; this report is deliberately data-agnostic (no entities, no text).
 
+## ⭐ Sprint result (authoritative — K=3 multi-judge, apples-to-apples)
+
+The fix sprint (T1 over-refusal, T3 portrait attribution, T4 leaked-CoT detect,
+T5/B1 entity-aware BM25) measured before/after with the **same** K=3 multi-judge:
+
+| metric | before (pre-sprint) | after (shipped) |
+|---|---|---|
+| project **wins** vs manual-grep | 4 | **8** (doubled) |
+| losses / ties | 15 / 1 | 12 / 0 |
+| project mean | 3.35 | **3.75** (+0.40) |
+| hallucinations (majority) | 4/20 | **3/20** |
+
+Reliability: generation is **deterministic** (4 runs of a question → byte-identical),
+so the only eval noise is the judge; the baseline (identical answers both runs)
+wobbled just 0.16 = the judge-noise floor, so the project's +0.40 is real. 17/20
+verdicts unanimous across 3 judges. New wins came from T1+B1 (f1 found the literal
+label the grep missed) and T3 (the historically-failing portrait case now wins).
+
+**Still-real losses** (unanimous): enum term-drift (e3 «домены», e4), causal
+completeness (c1/c3/c4), and 2 genuine fabrications (e2, p2). **B2** (deep enum
+anti-drift prompt) was tried and **reverted** — with deterministic generation its
+effect is measurable and 4 judges confirmed it didn't fix the drift.
+
 ## Setup
 
 - **20 questions**, 5 per task type: `factoid`, `enumeration`, `causal`, `portrait`.
