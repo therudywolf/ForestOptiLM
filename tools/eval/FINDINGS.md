@@ -27,6 +27,26 @@ completeness (c1/c3/c4), and 2 genuine fabrications (e2, p2). **B2** (deep enum
 anti-drift prompt) was tried and **reverted** — with deterministic generation its
 effect is measurable and 4 judges confirmed it didn't fix the drift.
 
+## ⭐ Generalization check (2nd corpus — not overfit)
+
+Re-ran the whole loop on a **different, unrelated corpus** (~41k chunks of
+technical books — a domain the fixes were never tuned on) with the same K=3
+multi-judge and a fair manual-grep baseline:
+
+| metric | corpus A (chat/notifications) | corpus B (technical books) |
+|---|---|---|
+| project wins vs manual-grep | 8/20 (40%) | **5/8 (62%)** |
+| project mean | 3.75 | 4.53 |
+| hallucinations | 3/20 | **0/8** |
+| refusals | 0 | 0 |
+
+The shipped fixes (T1/T3/T4/T5) **hold up on a corpus they never saw** — zero
+over-refusal, zero fabrication, and the project actually wins *more* here (deep
+aggregation shines on technical prose; losses are factoids where the baseline
+had the exact passage — same pattern as corpus A). Format robustness (D1): added
+legacy `.doc` support (antiword, Cyrillic-safe); a 47GB mixed-format archive
+indexed tolerantly (media/binaries skipped, no crash).
+
 ## Setup
 
 - **20 questions**, 5 per task type: `factoid`, `enumeration`, `causal`, `portrait`.
