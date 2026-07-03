@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import pickle
+import re
 import threading
 import uuid
 from pathlib import Path
@@ -31,6 +32,25 @@ from bm25 import BM25Index, fuse_rankings
 from models import DocumentChunk, RetrievalHit, IndexStats
 
 logger = logging.getLogger("nocturne")
+
+# Точные сущности в запросе: @ник, CVE, кавычки, хост/версия/путь/ID (с . _ - / @).
+_ENTITY_RE = re.compile(
+    r'@[A-Za-z0-9_]{3,}'
+    r'|CVE-\d{4}-\d+'
+    r'|"[^"]{2,}"|«[^»]{2,}»'
+    r'|\b[A-Za-z0-9]+(?:[._\-/@][A-Za-z0-9]+)+\b'
+)
+
+
+def _bm25_query(query_text: str) -> str:
+    """Терсовый запрос для BM25-плеча. BM25 силён на ТОЧНЫХ токенах (@ник, CVE,
+    хост, версия), но многословный вопрос топит их общими словами в сумме скора
+    (verbose «составь портрет @X…» → P@10 0.28 против terse «@X» → 1.0). Если в
+    запросе есть точные сущности — ищем BM25 по НИМ; иначе — по полному запросу
+    (для обычных вопросов поведение не меняется). Вектор всегда берёт полный вопрос."""
+    ents = [e.strip('"«»') for e in _ENTITY_RE.findall(query_text or "")]
+    terse = " ".join(e for e in ents if e)
+    return terse or query_text
 
 
 class LocalFaissStore:
@@ -290,7 +310,7 @@ class LocalFaissStore:
             ]
 
         bm = self._ensure_bm25(meta, signature)
-        bm_ranked = [(cid, float(s)) for cid, s in bm.search(query_text, top_k=cand)]
+        bm_ranked = [(cid, float(s)) for cid, s in bm.search(_bm25_query(query_text), top_k=cand)]
 
         rankings = [r for r in (vec_ranked, bm_ranked) if r]
         if not rankings:

@@ -228,6 +228,31 @@ class TestHybridSearch(unittest.TestCase):
             self.assertFalse(needs_write2)             # попадание → писать нечего
             self.assertEqual(len(meta2), 3)
 
+    def test_verbose_exact_query_still_finds_bm25_hit(self) -> None:
+        # B1: точный токен (CVE) в МНОГОСЛОВНОМ запросе не должен теряться —
+        # entity-aware BM25 ищет по терсовой сущности, а не по всему вопросу.
+        with tempfile.TemporaryDirectory() as td:
+            store = self._store(Path(td))
+            hits = store.hybrid_search(
+                query_text="расскажи подробно что это за уязвимость CVE-2024-3094 и опасна ли она",
+                query_vector=[1.0, 0.0, 0.0, 0.0],  # вектор целит в c0, не в c2
+                top_k=3,
+            )
+            self.assertIn("c2", [h.chunk_id for h in hits])  # точный CVE поднят BM25-плечом
+
+
+class TestBm25Query(unittest.TestCase):
+    def test_entity_extraction_and_fallback(self) -> None:
+        from retrieval import _bm25_query
+        self.assertEqual(_bm25_query("составь портрет @johndoe по его сообщениям"), "@johndoe")
+        self.assertEqual(_bm25_query("что это за CVE-2024-3094 backdoor"), "CVE-2024-3094")
+        self.assertEqual(_bm25_query("проверь хост srv-db-01 срочно"), "srv-db-01")
+        self.assertIn("точную фразу", _bm25_query('найди "точную фразу" в логах'))
+        # нет сущностей → полный запрос без изменений (обычные факт-вопросы)
+        q = "какие пороговые значения указаны в уведомлениях"
+        self.assertEqual(_bm25_query(q), q)
+        self.assertEqual(_bm25_query(""), "")
+
 
 if __name__ == "__main__":
     unittest.main()
