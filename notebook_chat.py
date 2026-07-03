@@ -370,6 +370,90 @@ def looks_like_leaked_reasoning(answer: str) -> bool:
     return any(head.startswith(m) for m in _LEAKED_REASONING_MARKERS)
 
 
+# --------------------------------------------------------------------------- #
+#  B1: архитектурный анти-выдумки — grounding-verify (детерминированный).
+#
+#  Промпт уже просит «не придумывай цифры/параметры». Этот слой ПРОВЕРЯЕТ, что
+#  модель не проигнорировала инструкцию: находит в ответе высокоспецифичные
+#  «дословно-копируемые» токены (CVE, @handle, дата, составной идентификатор —
+#  хост/путь/версия-с-буквой), которых НЕТ ни в одном извлечённом фрагменте, и
+#  помечает их для пользователя. НИКОГДА не переписывает ответ и не добавляет
+#  фактов — только добавляет предупреждение (прошлые попытки B2/S3.1 роняли гейт
+#  именно тем, что ПЕРЕПИСЫВАЛИ и плодили новую выдумку). Голые числа/проценты
+#  СОЗНАТЕЛЬНО исключены: агрегаты-подсчёты (deep «разобрано 28 единиц») — это
+#  легитимный вывод модели, не выдумка → нулевой FP на них.
+# --------------------------------------------------------------------------- #
+_GROUND_CVE = re.compile(r"CVE-\d{4}-\d+", re.I)
+_GROUND_HANDLE = re.compile(r"@[A-Za-z0-9_]{3,}")
+_GROUND_DATE = re.compile(r"\b\d{1,2}[.\-/]\d{1,2}[.\-/]\d{2,4}\b|\b\d{4}-\d{2}-\d{2}\b")
+# составной идентификатор: hostname/path/dotted-file/version — токены, склеенные
+# из ≥2 частей через .-_/@ (db-node-07, meta_cache.pkl, gemma-4-12b).
+_GROUND_IDENT = re.compile(r"\b[A-Za-z0-9]+(?:[._\-/@][A-Za-z0-9]+)+\b")
+
+
+def _ground_norm(s: str) -> str:
+    # слэши унифицируем (путь из ответа `a/b` vs Windows-путь источника `a\b`)
+    return re.sub(r"\s+", " ", (s or "").replace("\\", "/")).lower()
+
+
+def extract_verifiable_tokens(answer: str) -> list[str]:
+    """Высокоспецифичные токены ответа, которые почти всегда КОПИРУЮТСЯ из
+    источника, а не сочиняются: CVE / @handle / полная дата / составной
+    идентификатор (обязательно с буквой → числовые диапазоны и годы-2021
+    исключаются). Чистая функция. [N]-маркеры цитат срезаются, чтобы не ловить
+    номер источника как «токен»."""
+    a = re.sub(r"\[\d+\]", " ", answer or "")
+    toks: list[str] = []
+    toks += _GROUND_CVE.findall(a)
+    toks += _GROUND_HANDLE.findall(a)
+    toks += _GROUND_DATE.findall(a)
+    for m in _GROUND_IDENT.findall(a):
+        if any(ch.isalpha() for ch in m):  # только идентификаторы с буквой
+            toks.append(m)
+    seen: set[str] = set()
+    out: list[str] = []
+    for t in toks:
+        k = t.lower()
+        if k in seen or len(t) < 4:
+            continue
+        seen.add(k)
+        out.append(t)
+    return out
+
+
+def verify_grounding(answer: str, contexts: list[ContextItem]) -> list[str]:
+    """Токены ответа (extract_verifiable_tokens), которых НЕТ дословно ни в одном
+    фрагменте → кандидаты на выдумку. Пусто, если всё заземлено. Хэйстек — сырой
+    текст фрагментов (с заголовками [FILE_PATH]/[SOURCE_URL]): хост/путь, названный
+    в ответе из заголовка источника, честно считается заземлённым."""
+    toks = extract_verifiable_tokens(answer)
+    if not toks:
+        return []
+    haystack = _ground_norm(" ".join(
+        (getattr(c, "text", "") or "") for c in contexts))
+    return [t for t in toks if _ground_norm(t) not in haystack]
+
+
+_GROUNDING_CAVEAT_MAX = 6
+
+
+def append_grounding_caveat(
+    answer: str, contexts: list[ContextItem]
+) -> tuple[str, list[str]]:
+    """Если в ответе есть незаземлённые специфичные токены — дописать компактное
+    нейтральное предупреждение и вернуть (answer_с_пометкой, список_токенов).
+    Ничего не удаляет из ответа. Возвращает исходный ответ, если всё чисто."""
+    ungrounded = verify_grounding(answer, contexts)
+    if not ungrounded:
+        return answer, []
+    shown = ungrounded[:_GROUNDING_CAVEAT_MAX]
+    tail = " …" if len(ungrounded) > len(shown) else ""
+    note = ("\n\n_⚠ Не найдено дословно в источниках: "
+            + ", ".join(f"«{t}»" for t in shown) + tail
+            + " — проверьте эти детали._")
+    return answer + note, ungrounded
+
+
 async def answer_question(
     notebook: Any,
     question: str,
@@ -600,13 +684,19 @@ async def answer_question(
             model=chat_model,
             extra={"leaked_reasoning": True, "raw_answer": answer[:2000]},
         )
+    refused = is_refusal(answer)
+    ungrounded: list[str] = []
+    if not refused:  # B1: пометить незаземлённые специфичные токены (не переписывая)
+        answer, ungrounded = append_grounding_caveat(answer, contexts)
     used = parse_used_citations(answer, contexts)
+    extra = {"ungrounded": ungrounded} if ungrounded else {}
     return ChatResult(
         answer=answer,
         citations=used,
         contexts=[c.to_citation() for c in contexts],
-        refused=is_refusal(answer),
+        refused=refused,
         model=chat_model,
+        extra=extra,
     )
 
 
@@ -781,15 +871,22 @@ async def _run_deep_analysis(
             n=n, source_path=u.source_path, display=_display_for_hit(u),
             text=u.text, chunk_id=u.chunk_id, score=u.score,
         ))
-    note = ""
+    refused = is_refusal(answer)
+    ungrounded: list[str] = []
+    final = answer
+    if not refused:  # B1: заземление против всех разобранных единиц (не только цитат)
+        final, ungrounded = append_grounding_caveat(answer, list(numbered_all.values()))
     if truncated:
-        note = (f"\n\n_(разобрано {len(numbered_all)} единиц; часть корпуса за лимитом — "
-                f"уточните сущность/период для полного охвата)_")
+        final += (f"\n\n_(разобрано {len(numbered_all)} единиц; часть корпуса за лимитом — "
+                  f"уточните сущность/период для полного охвата)_")
+    extra = {"deep": True, "units": len(numbered_all), "batches": len(batches)}
+    if ungrounded:
+        extra["ungrounded"] = ungrounded
     return ChatResult(
-        answer=answer + note,
+        answer=final,
         citations=[c.to_citation() for c in used_ctx],
         contexts=[c.to_citation() for c in used_ctx],
-        refused=is_refusal(answer),
+        refused=refused,
         model=chat_model,
-        extra={"deep": True, "units": len(numbered_all), "batches": len(batches)},
+        extra=extra,
     )

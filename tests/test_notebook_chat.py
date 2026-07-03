@@ -158,6 +158,71 @@ class TestPureFunctions(unittest.TestCase):
             "Александр — ключевой эксперт по ИБ [5]."))
 
 
+class TestGroundingVerify(unittest.TestCase):
+    """B1: детерминированный анти-выдумки. Ключевое требование — НУЛЕВОЙ FP на
+    легитимных ответах (агрегаты-подсчёты, заземлённые идентификаторы)."""
+
+    def _ctx(self, *texts):
+        return [nc.ContextItem(n=i, source_path="", display="d", text=t)
+                for i, t in enumerate(texts, 1)]
+
+    # --- extract_verifiable_tokens ---
+    def test_extract_picks_specific_tokens(self) -> None:
+        toks = nc.extract_verifiable_tokens(
+            "Уязвимость CVE-2021-44228 у @dev_handle на db-node-07, файл meta_cache.pkl.")
+        low = [t.lower() for t in toks]
+        self.assertIn("cve-2021-44228", low)
+        self.assertIn("@dev_handle", low)
+        self.assertIn("db-node-07", low)
+        self.assertIn("meta_cache.pkl", low)
+
+    def test_extract_excludes_bare_numbers_and_citation_markers(self) -> None:
+        # голые числа/проценты/номера-цитат [N] — НЕ токены (иначе FP на подсчётах)
+        toks = nc.extract_verifiable_tokens(
+            "Разобрано 28 единиц, 5 инцидентов, рост 40% за 2021 год [1][2][14].")
+        self.assertEqual(toks, [])
+
+    def test_extract_excludes_numeric_ranges(self) -> None:
+        # диапазон/дата-из-цифр без буквы (2021-2025) — не идентификатор
+        toks = nc.extract_verifiable_tokens("Период 2021-2025 годов.")
+        self.assertEqual(toks, [])
+
+    # --- verify_grounding ---
+    def test_grounded_identifier_not_flagged(self) -> None:
+        ctx = self._ctx("Сервер db-node-07 обновлён; правился meta_cache.pkl.")
+        self.assertEqual(
+            nc.verify_grounding("Правки в meta_cache.pkl на db-node-07 [1].", ctx), [])
+
+    def test_ungrounded_token_flagged(self) -> None:
+        ctx = self._ctx("Обсуждали инцидент на сервере без деталей версии.")
+        out = nc.verify_grounding("Затронут CVE-2021-44228 на host-db-99 [1].", ctx)
+        self.assertIn("CVE-2021-44228", out)
+        self.assertIn("host-db-99", out)
+
+    def test_token_in_source_header_is_grounded(self) -> None:
+        # хост из служебного заголовка источника — считается заземлённым
+        ctx = self._ctx("[FILE_PATH: /srv/db-node-07/log.txt]\nЗапись без хоста в теле.")
+        self.assertEqual(nc.verify_grounding("Лог с db-node-07 [1].", ctx), [])
+
+    # --- append_grounding_caveat ---
+    def test_caveat_appended_only_when_ungrounded(self) -> None:
+        ctx = self._ctx("Только общий текст без специфики.")
+        clean, ung = nc.append_grounding_caveat("Ответ без токенов [1].", ctx)
+        self.assertEqual(clean, "Ответ без токенов [1].")
+        self.assertEqual(ung, [])
+        marked, ung2 = nc.append_grounding_caveat("Версия gemma-99-x на no-such-host-77 [1].", ctx)
+        self.assertIn("Не найдено дословно", marked)
+        self.assertTrue(marked.startswith("Версия gemma-99-x"))  # исходный ответ не тронут
+        self.assertIn("no-such-host-77", ung2)
+
+    def test_caveat_caps_token_list(self) -> None:
+        ctx = self._ctx("nothing relevant")
+        ans = " ".join(f"host-{i}.example" for i in range(20))
+        marked, ung = nc.append_grounding_caveat(ans, ctx)
+        self.assertGreater(len(ung), nc._GROUNDING_CAVEAT_MAX)
+        self.assertIn("…", marked)  # список усечён с многоточием
+
+
 class TestAnswerQuestion(unittest.TestCase):
     def test_refuses_when_no_contexts(self) -> None:
         nb = _FakeNotebook([])
