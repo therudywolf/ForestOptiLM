@@ -884,7 +884,7 @@ class NotebookUIMixin:
         res = loop.run_until_complete(
             deep_research.research(
                 question, base_url=base_url, api_key=api_key, chat_model=model,
-                api_mode=api_mode, on_log=on_log))
+                api_mode=api_mode, deep=True, max_sources=8, on_log=on_log))
         answer = res.get("answer", "")
         cits = deep_research.sources_to_citations(res.get("sources", []))
         return ChatResult(answer=answer, citations=cits, contexts=[],

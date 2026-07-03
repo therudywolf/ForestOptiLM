@@ -36,6 +36,59 @@ _RESEARCH_SYSTEM = (
 )
 
 
+# --- map-reduce (для широкого охвата: много источников без переполнения окна) ---
+_MAP_SYSTEM = (
+    "Ты извлекаешь из ОДНОЙ веб-страницы только то, что относится к вопросу. "
+    "Правила:\n"
+    "1. Выпиши факты из страницы, относящиеся к вопросу, кратко и по делу.\n"
+    "2. Ничего не добавляй от себя — только то, что есть в тексте страницы.\n"
+    "3. Если на странице нет ничего по вопросу — ответь ровно: НЕТ.\n"
+    "4. Не пиши вступлений и выводов — только выжимку фактов."
+)
+
+_REDUCE_SYSTEM = (
+    "Ты — веб-исследователь. Тебе дали выжимки фактов из нескольких веб-страниц "
+    "(каждая помечена [N]). Синтезируй единый ответ на вопрос. Правила:\n"
+    "1. Только факты из выжимок; не добавляй внешних знаний и не домысливай.\n"
+    "2. После каждого утверждения ставь ссылку [N] на источник(и): [1][3].\n"
+    "3. Источники противоречат — отметь это. Ответа в выжимках нет — скажи честно.\n"
+    "4. Отвечай на языке вопроса, структурно, по делу."
+)
+
+
+def build_map_messages(question: str, page: Any, idx: int, per_source_chars: int = 6000) -> list[dict[str, str]]:
+    """MAP: выжать из ОДНОЙ страницы факты, относящиеся к вопросу. Чистая функция."""
+    title = getattr(page, "title", "") or ""
+    url = getattr(page, "final_url", "") or getattr(page, "url", "")
+    text = (getattr(page, "text", "") or "")[:per_source_chars]
+    user = (f"[Вопрос]\n{question.strip()}\n\n"
+            f"[Источник {idx}] {title} ({url})\n{text}\n\n"
+            "Выпиши факты из этого источника, относящиеся к вопросу (или НЕТ).")
+    return [{"role": "system", "content": _MAP_SYSTEM},
+            {"role": "user", "content": user}]
+
+
+def build_reduce_messages(question: str, notes: list[dict]) -> list[dict[str, str]]:
+    """REDUCE: собрать финальный ответ из per-page выжимок с цитатами. Чистая
+    функция. notes: [{n, title, url, text}] — только непустые (не «НЕТ»)."""
+    blocks = [f"[{n['n']}] {n.get('title', '')} ({n.get('url', '')})\n{n.get('text', '')}"
+              for n in notes]
+    user = (
+        "[Выжимки источников]\n" + "\n\n".join(blocks) + "\n\n"
+        f"[Вопрос]\n{question.strip()}\n\n"
+        "Собери ответ по выжимкам выше, ставя [N] к каждому факту. Сопоставляй "
+        "источники; вывод из их совокупности формулируй со ссылками. Не выдумывай."
+    )
+    return [{"role": "system", "content": _REDUCE_SYSTEM},
+            {"role": "user", "content": user}]
+
+
+def _looks_empty_note(text: str) -> bool:
+    """MAP-ответ «нет релевантного» (НЕТ / пусто) — исключаем из reduce."""
+    t = (text or "").strip().lower().rstrip(".!")
+    return not t or t in {"нет", "no", "none", "n/a", "-"}
+
+
 def build_research_messages(question: str, pages: list[Any], per_source_chars: int = 4000) -> list[dict[str, str]]:
     """system + grounded-user-промпт из прочитанных страниц. Чистая функция."""
     blocks = []
@@ -84,10 +137,16 @@ async def research(
     max_hits: int = 10,
     api_mode: str = "native",
     max_answer_tokens: int = 1500,
+    deep: bool = False,
+    map_concurrency: int = 4,
     on_log: Callable[[str], None] | None = None,
 ) -> dict:
     """Провести веб-исследование: найти → прочитать top-N → синтезировать ответ
-    с цитатами. Возвращает {answer, sources:[{n,url,title}], n_pages}."""
+    с цитатами. Возвращает {answer, sources:[{n,url,title}], n_pages}.
+
+    deep=True: map-reduce — сначала из каждой страницы выжимаются относящиеся к
+    вопросу факты (параллельно), затем reduce синтезирует ответ из выжимок. Это
+    даёт широкий охват многих источников без переполнения окна модели."""
     log = on_log or (lambda _m: None)
     q = (question or "").strip()
     if not q:
@@ -107,13 +166,35 @@ async def research(
             break
     if not pages:
         return {"answer": "Не удалось прочитать ни один источник.", "sources": [], "n_pages": 0}
-    log(f"📄 прочитано {len(pages)} страниц — синтезирую ответ…")
 
     from processor import call_llm
-    messages = build_research_messages(q, pages)
-    sem = asyncio.Semaphore(1)
-    answer = await call_llm(messages, chat_model, base_url, api_key, sem,
-                            max_tokens=max_answer_tokens, api_mode=api_mode)
     sources = [{"n": i, "url": getattr(p, "final_url", "") or getattr(p, "url", ""),
                 "title": getattr(p, "title", "")} for i, p in enumerate(pages, 1)]
+
+    if deep and len(pages) > 1:
+        log(f"📄 прочитано {len(pages)} страниц — выжимаю релевантное (map)…")
+        sem = asyncio.Semaphore(max(1, map_concurrency))
+
+        async def _map(i: int, page: Any) -> dict | None:
+            note = await call_llm(build_map_messages(q, page, i), chat_model, base_url,
+                                  api_key, sem, max_tokens=700, api_mode=api_mode)
+            if _looks_empty_note(note):
+                return None
+            src = sources[i - 1]
+            return {"n": i, "title": src["title"], "url": src["url"], "text": (note or "").strip()}
+
+        notes = [n for n in await asyncio.gather(*(_map(i, p) for i, p in enumerate(pages, 1))) if n]
+        if not notes:
+            return {"answer": "В прочитанных источниках нет ответа на вопрос.",
+                    "sources": sources, "n_pages": len(pages)}
+        log(f"🧮 релевантных источников: {len(notes)} — синтезирую ответ (reduce)…")
+        answer = await call_llm(build_reduce_messages(q, notes), chat_model, base_url,
+                                api_key, asyncio.Semaphore(1),
+                                max_tokens=max_answer_tokens, api_mode=api_mode)
+        return {"answer": (answer or "").strip(), "sources": sources, "n_pages": len(pages)}
+
+    log(f"📄 прочитано {len(pages)} страниц — синтезирую ответ…")
+    answer = await call_llm(build_research_messages(q, pages), chat_model, base_url,
+                            api_key, asyncio.Semaphore(1),
+                            max_tokens=max_answer_tokens, api_mode=api_mode)
     return {"answer": (answer or "").strip(), "sources": sources, "n_pages": len(pages)}

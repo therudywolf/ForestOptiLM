@@ -44,6 +44,44 @@ class TestBuildResearchMessages(unittest.TestCase):
         self.assertLess(user.count("x"), 200)                    # текст усечён
 
 
+class TestMapReduceBuilders(unittest.TestCase):
+    """W4-улучшение: map-reduce по многим источникам. Чистые билдеры."""
+
+    def _page(self):
+        return _Page("OWASP", "https://owasp.org/x", "Инъекции — критичный риск.")
+
+    def test_map_message_has_question_and_one_source(self) -> None:
+        msgs = dr.build_map_messages("Что критично?", self._page(), 3)
+        self.assertEqual(msgs[0]["role"], "system")
+        self.assertIn("одной", msgs[0]["content"].lower())          # про одну страницу
+        u = msgs[1]["content"]
+        self.assertIn("[Источник 3]", u)                            # номер источника сохранён
+        self.assertIn("Что критично?", u)
+        self.assertIn("Инъекции — критичный риск", u)
+
+    def test_map_char_cap(self) -> None:
+        big = _Page("T", "https://u", "z" * 20000)
+        u = dr.build_map_messages("q", big, 1, per_source_chars=100)[1]["content"]
+        self.assertLess(u.count("z"), 200)
+
+    def test_reduce_message_numbers_notes_and_asks_citations(self) -> None:
+        notes = [{"n": 1, "title": "A", "url": "https://a", "text": "факт-1"},
+                 {"n": 5, "title": "B", "url": "https://b", "text": "факт-2"}]
+        msgs = dr.build_reduce_messages("Вопрос?", notes)
+        u = msgs[1]["content"]
+        self.assertIn("[1] A (https://a)", u)
+        self.assertIn("[5] B (https://b)", u)                       # оригинальные номера
+        self.assertIn("факт-1", u)
+        self.assertIn("[N]", u)                                      # инструкция цитировать
+        self.assertIn("[N]", msgs[0]["content"])
+
+    def test_looks_empty_note(self) -> None:
+        for empty in ("", "  ", "НЕТ", "нет.", "No", "n/a", "-"):
+            self.assertTrue(dr._looks_empty_note(empty), empty)
+        for real in ("Инъекции критичны", "нет единого мнения, но..."):
+            self.assertFalse(dr._looks_empty_note(real), real)
+
+
 class TestSourcesToCitations(unittest.TestCase):
     """W5-адаптер: source-дикты дипресёрча → чиповые цитаты чата блокнота."""
 
