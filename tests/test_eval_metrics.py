@@ -79,7 +79,8 @@ class TestIRMetrics(unittest.TestCase):
 
 class TestMultiJudgeAggregate(unittest.TestCase):
     def _rec(self, qid, beats, p, b, hall=False):
-        trip = lambda x: {"completeness": x, "correctness": x, "grounding": x}
+        def trip(x):
+            return {"completeness": x, "correctness": x, "grounding": x}
         return {"qid": qid, "project_beats_baseline": beats,
                 "project": trip(p), "baseline": trip(b), "project_hallucination": hall}
 
@@ -122,7 +123,7 @@ class TestBuildCards(unittest.TestCase):
         import tempfile
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            gen = root / "gen"; base = root / "base"; ctx = root / "ctx"; out = root / "cards"
+            gen, base, ctx, out = (root / "gen", root / "base", root / "ctx", root / "cards")
             for d in (gen, base, ctx):
                 d.mkdir()
             (gen / "q1.json").write_text(json.dumps({

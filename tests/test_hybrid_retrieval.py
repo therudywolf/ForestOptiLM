@@ -181,7 +181,6 @@ class TestHybridSearch(unittest.TestCase):
         # валидный финальный pickle и НЕ оставляют *.tmp в каталоге индекса.
         import pickle
         import threading
-        from retrieval import LocalFaissStore
         with tempfile.TemporaryDirectory() as td:
             d = Path(td)
             store = self._store(d)
@@ -211,7 +210,6 @@ class TestHybridSearch(unittest.TestCase):
     def test_read_meta_cached_returns_needs_write_flag(self) -> None:
         # Фикс #2: dump вынесен из-под лока. _read_meta_cached сигналит
         # (meta, needs_write): miss → True (писать надо), hit → False.
-        from retrieval import LocalFaissStore
         with tempfile.TemporaryDirectory() as td:
             d = Path(td)
             store = self._store(d)

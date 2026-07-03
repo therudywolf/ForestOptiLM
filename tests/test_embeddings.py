@@ -52,7 +52,8 @@ class TestEmbedConcurrency(unittest.TestCase):
 
         def fake_batch(batch: list[str]) -> list[list[float]]:
             # вектор кодирует исходный текст: [номер] — порядок проверяем по нему
-            import time as _t, random as _r
+            import time as _t
+            import random as _r
             _t.sleep(_r.random() * 0.01)  # перемешать завершение батчей
             return [[float(t.split("#")[1])] for t in batch]
 

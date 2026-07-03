@@ -33,7 +33,9 @@ for pkg in (
     "ebooklib",        # EPUB
     "striprtf",        # RTF
     "openpyxl",        # XLSX
-    "bs4",             # HTML
+    "bs4",             # HTML (веб-fetch/импорт)
+    "certifi",         # CA-бандл для HTTPS (веб-стек — первый TLS-потребитель)
+    "httpx",           # HTTP-клиент (LLM + веб-поиск/fetch/дипресёрч)
     "yaml",            # run profiles fallback parser
 ):
     try:
@@ -51,6 +53,8 @@ hiddenimports += ["retrieval_enhance"]  # лениво импортится в n
 hiddenimports += ["notebook_wiki"]      # лениво импортится в notebook_gui (компиляция вики)
 hiddenimports += ["md3"]                # MD3-тема, импортится в gui.py/notebook_gui.py
 hiddenimports += ["app_version"]        # версия для сайдбара (ленивый импорт в gui.py)
+# веб-стек (W1–W5): импортится в notebook_gui; перечисляем явно на всякий случай
+hiddenimports += ["web_search", "web_fetch", "web_import", "deep_research"]
 try:
     datas += copy_metadata("tiktoken")
 except Exception:

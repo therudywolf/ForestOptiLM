@@ -2397,7 +2397,8 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
         dlg.geometry("480x600")
         dlg.transient(self)
         try:  # поверх и с фокусом (иначе на Windows может уйти за окно)
-            dlg.lift(); dlg.focus_force()
+            dlg.lift()
+            dlg.focus_force()
             dlg.attributes("-topmost", True)
             dlg.after(400, lambda: dlg.winfo_exists() and dlg.attributes("-topmost", False))
         except Exception:
@@ -2423,7 +2424,8 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
                      wraplength=430, justify="left").pack(anchor="w", pady=(0, 10), **pad)
 
         ctk.CTkLabel(body, text="Пресет").pack(anchor="w", **pad)
-        prow = ctk.CTkFrame(body, fg_color="transparent"); prow.pack(fill="x", **pad)
+        prow = ctk.CTkFrame(body, fg_color="transparent")
+        prow.pack(fill="x", **pad)
         names = [p.name for p in up.load_presets()] or ["(нет сохранённых)"]
         self._preset_sel_var = ctk.StringVar(value=names[0])
         self._preset_menu = ctk.CTkOptionMenu(prow, variable=self._preset_sel_var, values=names, width=200)
@@ -2468,7 +2470,8 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
         self._dlg_vision_menu.pack(fill="x", **pad)
 
         # Явные параметры: контекст модели (0 = авто из сервера).
-        crow = ctk.CTkFrame(body, fg_color="transparent"); crow.pack(fill="x", pady=(8, 0), **pad)
+        crow = ctk.CTkFrame(body, fg_color="transparent")
+        crow.pack(fill="x", pady=(8, 0), **pad)
         ctk.CTkLabel(crow, text="Контекст, токенов (0 = авто)").pack(side="left")
         cur_ctx = int((getattr(self, "_model_ctx", {}) or {}).get(self._model_var.get().strip(), 0) or 0)
         self._ctx_override_var = ctk.StringVar(value=str(cur_ctx))
@@ -2482,7 +2485,8 @@ class NocturneApp(NotebookUIMixin, ctk.CTk):
         self._refresh_dlg_ctx_hint()
 
         # Явные кнопки сохранения: обновить выбранный пресет ИЛИ создать новый.
-        srow = ctk.CTkFrame(body, fg_color="transparent"); srow.pack(fill="x", pady=(12, 8), **pad)
+        srow = ctk.CTkFrame(body, fg_color="transparent")
+        srow.pack(fill="x", pady=(12, 8), **pad)
         ctk.CTkButton(srow, text="💾  Сохранить изменения", height=34,
                       command=self._preset_save_changes, **_md3.button_tonal()
                       ).pack(side="left", expand=True, fill="x", padx=(0, 6))

@@ -116,7 +116,8 @@ def import_gitlab_repo(repo_url: str, ref: str = "", *, max_files: int = 100,
     hdr = {"User-Agent": _API_UA}
     with httpx.Client(timeout=timeout, headers=hdr, follow_redirects=True) as c:
         if not ref:
-            info = c.get(api); info.raise_for_status()
+            info = c.get(api)
+            info.raise_for_status()
             ref = info.json().get("default_branch") or "main"
         tree, page = [], 1
         while len(tree) < 2000:

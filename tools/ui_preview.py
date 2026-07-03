@@ -212,7 +212,8 @@ def screen_connection(root):
                  wraplength=430, justify="left").pack(anchor="w", pady=(0, 10), **pad)
 
     ctk.CTkLabel(dlg, text="Пресет", font=m.font("label"), text_color=m.ON_SURFACE).pack(anchor="w", **pad)
-    prow = ctk.CTkFrame(dlg, fg_color="transparent"); prow.pack(fill="x", **pad)
+    prow = ctk.CTkFrame(dlg, fg_color="transparent")
+    prow.pack(fill="x", **pad)
     ctk.CTkOptionMenu(prow, values=["Мой LM Studio"], width=200).pack(side="left")
     ctk.CTkButton(prow, text="Загрузить", width=96, height=32, font=m.font("label"),
                   **m.button_tonal()).pack(side="left", padx=6)
@@ -221,7 +222,9 @@ def screen_connection(root):
     for lbl, val, show in [("API Base URL", "http://localhost:1234/v1", None),
                            ("API Key (если требуется)", "••••••••••••••••", "*")]:
         ctk.CTkLabel(dlg, text=lbl, font=m.font("label"), text_color=m.ON_SURFACE).pack(anchor="w", pady=(8, 0), **pad)
-        e = ctk.CTkEntry(dlg, width=250); e.insert(0, val); e.pack(fill="x", **pad)
+        e = ctk.CTkEntry(dlg, width=250)
+        e.insert(0, val)
+        e.pack(fill="x", **pad)
     ctk.CTkButton(dlg, text="🔄  Обновить модели", height=36, **m.button_filled()).pack(fill="x", pady=(10, 6), **pad)
     for lbl, val in [("LLM модель (ответы)", "google/gemma-4-26b-a4b-qat"),
                      ("Embedding-модель (поиск/RAG)", "text-embedding-nomic-embed-text-v1.5"),
@@ -230,7 +233,8 @@ def screen_connection(root):
         ctk.CTkComboBox(dlg, values=[val], width=250).pack(fill="x", **pad)
     ctk.CTkButton(dlg, text="Применить контекст", height=30, **m.button_outlined()).pack(fill="x", pady=(8, 2), **pad)
 
-    srow = ctk.CTkFrame(dlg, fg_color="transparent"); srow.pack(fill="x", pady=(12, 8), **pad)
+    srow = ctk.CTkFrame(dlg, fg_color="transparent")
+    srow.pack(fill="x", pady=(12, 8), **pad)
     ctk.CTkButton(srow, text="💾  Сохранить изменения", height=34, **m.button_tonal()
                   ).pack(side="left", expand=True, fill="x", padx=(0, 6))
     ctk.CTkButton(srow, text="➕  Как новый…", width=128, height=34, **m.button_outlined()).pack(side="left")
