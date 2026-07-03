@@ -272,8 +272,10 @@ class LocalFaissStore:
         if not meta:
             return []
         # Глубокий пул кандидатов: на большом корпусе пересечения списков (главный
-        # сигнал слияния) при мелком пуле практически не случаются.
-        cand = candidate_k or max(top_k * 5, 50)
+        # сигнал слияния) при мелком пуле практически не случаются. Флор поднят
+        # 50→200 по офлайн-аблации на реальном 455k-корпусе (eval-харнес): cand=250
+        # даёт ~+0.016 nDCG@10 над cand=100 при копеечной стоимости faiss/BM25.
+        cand = candidate_k or max(top_k * 5, 200)
         cand = min(cand, len(meta))
 
         vec_ranked: list[tuple[str, float]] = []

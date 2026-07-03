@@ -111,10 +111,23 @@ async def generate(nb, question: str, *, base_url: str, api_key: str, chat_model
         max_answer_tokens=max_answer_tokens, enhanced=enhanced,
         deep_mode=deep_mode, deep_depth=deep_depth,
     )
+    # Сохраняем и САМИ извлечённые контексты: чтобы судья оценивал grounding по
+    # ТОМУ, что видел ответ (а не по чужой референс-выжимке) — иначе широкий gather
+    # deep-режима штрафуется как «выдумки». Компактно: источник + срез текста.
+    ctx = []
+    for c in (res.contexts or []):
+        if isinstance(c, dict):
+            src = c.get("source_path") or c.get("display") or c.get("source") or ""
+            txt = c.get("text") or c.get("quote") or ""
+        else:
+            src = getattr(c, "source_path", "") or getattr(c, "display", "")
+            txt = getattr(c, "text", "") or getattr(c, "quote", "")
+        ctx.append({"source": str(src), "text": str(txt)[:500]})
     return {
         "answer": res.answer,
         "refused": bool(res.refused),
         "model": res.model,
         "n_citations": len(res.citations),
         "n_contexts": len(res.contexts),
+        "contexts": ctx,
     }
