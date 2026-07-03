@@ -421,17 +421,42 @@ def extract_verifiable_tokens(answer: str) -> list[str]:
     return out
 
 
+def _date_triple(tok: str) -> tuple[int, int, int] | None:
+    """Дату привести к (год, месяц, день) для формат-независимого сравнения:
+    `2024-03-15`, `15.03.2024`, `5.3.2024` → одинаковый кортеж. Не-дата → None.
+    RU-локаль: точечный/слэш-формат считаем day-first."""
+    m = re.fullmatch(r"(\d{4})-(\d{1,2})-(\d{1,2})", tok)
+    if m:
+        return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    m = re.fullmatch(r"(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{2,4})", tok)
+    if m:
+        d, mo, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        return (y + 2000 if y < 100 else y, mo, d)
+    return None
+
+
 def verify_grounding(answer: str, contexts: list[ContextItem]) -> list[str]:
     """Токены ответа (extract_verifiable_tokens), которых НЕТ дословно ни в одном
     фрагменте → кандидаты на выдумку. Пусто, если всё заземлено. Хэйстек — сырой
     текст фрагментов (с заголовками [FILE_PATH]/[SOURCE_URL]): хост/путь, названный
-    в ответе из заголовка источника, честно считается заземлённым."""
+    в ответе из заголовка источника, честно считается заземлённым. Даты сверяются
+    по (год,месяц,день), а не дословно — переформатирование (ISO↔DD.MM.YYYY,
+    ведущие нули) НЕ считается выдумкой (иначе ложные срабатывания)."""
     toks = extract_verifiable_tokens(answer)
     if not toks:
         return []
-    haystack = _ground_norm(" ".join(
-        (getattr(c, "text", "") or "") for c in contexts))
-    return [t for t in toks if _ground_norm(t) not in haystack]
+    raw = " ".join((getattr(c, "text", "") or "") for c in contexts)
+    haystack = _ground_norm(raw)
+    ctx_dates = {tr for m in _GROUND_DATE.findall(raw) if (tr := _date_triple(m))}
+    out: list[str] = []
+    for t in toks:
+        tri = _date_triple(t)
+        if tri is not None:
+            if tri not in ctx_dates and _ground_norm(t) not in haystack:
+                out.append(t)
+        elif _ground_norm(t) not in haystack:
+            out.append(t)
+    return out
 
 
 _GROUNDING_CAVEAT_MAX = 6

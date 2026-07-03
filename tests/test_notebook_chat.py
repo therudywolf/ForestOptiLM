@@ -199,6 +199,16 @@ class TestGroundingVerify(unittest.TestCase):
         self.assertIn("CVE-2021-44228", out)
         self.assertIn("host-db-99", out)
 
+    def test_date_reformatting_not_flagged(self) -> None:
+        # модель переформатирует дату (ISO -> DD.MM.YYYY, ведущие нули) — это НЕ выдумка
+        ctx = self._ctx("Инцидент зафиксирован 2024-03-15 в системе логирования.")
+        self.assertEqual(nc.verify_grounding("Событие произошло 15.03.2024 [1].", ctx), [])
+        ctx2 = self._ctx("Дата: 5.3.2024, подтверждено.")
+        self.assertEqual(nc.verify_grounding("Зафиксировано 05.03.2024 [1].", ctx2), [])
+        # но реально отсутствующая дата — флагается
+        self.assertIn("09.09.2099",
+                      nc.verify_grounding("Дедлайн 09.09.2099 [1].", ctx))
+
     def test_token_in_source_header_is_grounded(self) -> None:
         # хост из служебного заголовка источника — считается заземлённым
         ctx = self._ctx("[FILE_PATH: /srv/db-node-07/log.txt]\nЗапись без хоста в теле.")

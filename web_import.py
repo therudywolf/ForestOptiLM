@@ -54,7 +54,11 @@ def _wiki_title_from_url(s: str) -> tuple[str, str]:
     s = (s or "").strip()
     if s.startswith("http"):
         u = urlparse(s)
-        lang = (u.netloc.split(".")[0] or "en") if "wikipedia.org" in u.netloc else "en"
+        first = u.netloc.split(".")[0] if u.netloc else ""
+        # язык — только если это реальный языковой поддомен (ru./en./de.…), а не
+        # www/m/канонический wikipedia.org; иначе "" → caller подставит дефолт
+        # (иначе `https://wikipedia.org/wiki/Foo` дал бы host wikipedia.wikipedia.org).
+        lang = first if ("wikipedia.org" in u.netloc and first not in ("wikipedia", "www", "m", "")) else ""
         path = u.path
         title = unquote(path.split("/wiki/", 1)[1]) if "/wiki/" in path else unquote(path.strip("/"))
         return title.replace("_", " "), lang

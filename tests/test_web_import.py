@@ -29,6 +29,17 @@ class TestWikiTitleFromUrl(unittest.TestCase):
             "https://ru.wikipedia.org/wiki/%D0%9E%D0%A1")
         self.assertEqual(title, "ОС")
 
+    def test_canonical_host_no_bogus_lang(self) -> None:
+        # https://wikipedia.org/... не должен давать lang="wikipedia" (→ битый хост)
+        for url in ("https://wikipedia.org/wiki/Foo",
+                    "https://www.wikipedia.org/wiki/Foo",
+                    "https://m.wikipedia.org/wiki/Foo"):
+            title, lang = wi._wiki_title_from_url(url)
+            self.assertEqual(lang, "", url)      # → caller подставит дефолт
+            self.assertEqual(title, "Foo")
+        # реальный языковой поддомен сохраняется
+        self.assertEqual(wi._wiki_title_from_url("https://ru.m.wikipedia.org/wiki/Foo")[1], "ru")
+
 
 class TestGitlabProjectId(unittest.TestCase):
     def test_full_url_nested_group(self) -> None:

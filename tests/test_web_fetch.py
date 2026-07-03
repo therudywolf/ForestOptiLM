@@ -60,5 +60,36 @@ class TestFetchGuards(unittest.TestCase):
         self.assertIsNone(wf.fetch_safe("not a url"))
 
 
+class TestSSRFGuard(unittest.TestCase):
+    """_assert_public_url блокирует внутренние адреса (SSRF) — до соединения."""
+
+    def test_rejects_loopback_and_metadata_and_private(self) -> None:
+        for bad in ("http://127.0.0.1/", "http://127.0.0.1:11434/v1/models",
+                    "http://169.254.169.254/latest/meta-data/",
+                    "http://localhost:8080/admin", "http://10.0.0.5/",
+                    "http://192.168.1.1/", "http://[::1]/"):
+            with self.assertRaises(wf.FetchError, msg=bad):
+                wf._assert_public_url(bad)
+
+    def test_rejects_non_http_scheme(self) -> None:
+        with self.assertRaises(wf.FetchError):
+            wf._assert_public_url("file:///etc/passwd")
+        with self.assertRaises(wf.FetchError):
+            wf._assert_public_url("gopher://x/")
+
+    def test_fetch_and_fetch_safe_block_internal(self) -> None:
+        # полный путь: fetch бросает FetchError, fetch_safe → None (тихо пропускает)
+        with self.assertRaises(wf.FetchError):
+            wf.fetch("http://127.0.0.1:11434/")
+        self.assertIsNone(wf.fetch_safe("http://169.254.169.254/latest/meta-data/"))
+
+    def test_allows_public_host_shape(self) -> None:
+        # публичный хост проходит SSRF-проверку (сети тут нет — только резолв+IP-класс)
+        try:
+            wf._assert_public_url("https://example.com/")
+        except wf.FetchError as exc:  # DNS может отсутствовать в оффлайн-CI — это ок
+            self.assertIn("разрешить", str(exc))
+
+
 if __name__ == "__main__":
     unittest.main()

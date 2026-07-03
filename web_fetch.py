@@ -18,13 +18,18 @@ Chrome для обхода бот-детекта — задел). Извлече
 """
 from __future__ import annotations
 
+import ipaddress
 import logging
 import re
+import socket
 from dataclasses import dataclass
+from urllib.parse import urljoin, urlparse
 
 from web_search import _UA
 
 logger = logging.getLogger("nocturne")
+
+_MAX_REDIRECTS = 5
 
 _NOISE_TAGS = ("script", "style", "noscript", "nav", "header", "footer", "aside",
                "form", "iframe", "svg", "button", "template")
@@ -65,42 +70,91 @@ def extract_main_text(html: str) -> tuple[str, str]:
 
 
 def _pdf_bytes_to_text(data: bytes) -> str:
-    """Веб-PDF: сохранить во временный файл и переиспользовать штатный _read_pdf."""
+    """Веб-PDF: сохранить во временный файл и переиспользовать штатный _read_pdf.
+    tmp биндится СРАЗУ после создания, чтобы сбой записи не оставил осиротевший
+    файл (delete=False)."""
     import tempfile
     from pathlib import Path
     from file_extractors import _read_pdf
-    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
-        f.write(data)
-        tmp = Path(f.name)
+    f = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+    tmp = Path(f.name)
     try:
+        f.write(data)
+        f.close()
         return _read_pdf(tmp)
     finally:
+        f.close()
         try:
             tmp.unlink()
         except OSError:
             pass
 
 
-def fetch(url: str, *, timeout: float = 20.0, max_bytes: int = 5_000_000) -> FetchedPage:
-    """Скачать URL и извлечь основной текст. Бросает FetchError при сбое."""
-    import httpx
+def _assert_public_url(url: str) -> None:
+    """SSRF-защита: пропускать только http(s) на ПУБЛИЧНО-маршрутизируемый адрес.
+    Резолвим хост и отбрасываем loopback/private/link-local/reserved (в т.ч.
+    облачные метаданные 169.254.169.254 и локальные LLM-порты). Проверяется на
+    КАЖДОМ хопе редиректа отдельно. Бросает FetchError, если адрес непубличный."""
     if not (url or "").startswith(("http://", "https://")):
         raise FetchError(f"неподдерживаемый URL: {url!r}")
+    host = urlparse(url).hostname
+    if not host:
+        raise FetchError(f"нет хоста в URL: {url!r}")
     try:
-        with httpx.Client(follow_redirects=True, timeout=timeout,
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror as exc:
+        raise FetchError(f"не удалось разрешить {host}: {exc}") from exc
+    for info in infos:
+        ip = info[4][0]
+        try:
+            addr = ipaddress.ip_address(ip.split("%")[0])  # срезаем zone-id IPv6
+        except ValueError:
+            raise FetchError(f"нераспознанный адрес {ip} для {host}")
+        if not addr.is_global or addr.is_reserved or addr.is_multicast:
+            raise FetchError(f"доступ к непубличному адресу запрещён: {host} ({ip})")
+
+
+def fetch(url: str, *, timeout: float = 20.0, max_bytes: int = 5_000_000) -> FetchedPage:
+    """Скачать URL и извлечь основной текст. Бросает FetchError при сбое.
+
+    Гигиена: (1) SSRF-проверка хоста на каждом хопе (редиректы follow-им ВРУЧНУЮ,
+    чтобы 30x не увёл на внутренний адрес); (2) тело читается ПОТОКОМ с обрывом по
+    max_bytes — гигантский/бесконечный ответ не буферизуется в RAM целиком."""
+    import httpx
+    current = url
+    try:
+        with httpx.Client(follow_redirects=False, timeout=timeout,
                           headers={"User-Agent": _UA}) as client:
-            r = client.get(url)
-            r.raise_for_status()
+            for _hop in range(_MAX_REDIRECTS + 1):
+                _assert_public_url(current)  # проверка ПЕРЕД каждым соединением
+                with client.stream("GET", current) as r:
+                    if r.is_redirect:
+                        loc = r.headers.get("location")
+                        if not loc:
+                            raise FetchError(f"редирект без Location: {current}")
+                        current = urljoin(str(r.url), loc)
+                        continue
+                    r.raise_for_status()
+                    ct = (r.headers.get("content-type") or "").lower()
+                    final = str(r.url)
+                    buf = bytearray()
+                    for chunk in r.iter_bytes():
+                        buf += chunk
+                        if len(buf) >= max_bytes:
+                            break
+                    data = bytes(buf[:max_bytes])
+                    enc = r.encoding or "utf-8"
+                    break
+            else:
+                raise FetchError(f"слишком много редиректов: {url}")
+    except FetchError:
+        raise
     except Exception as exc:  # noqa: BLE001
         raise FetchError(f"не удалось скачать {url}: {exc}") from exc
-    ct = (r.headers.get("content-type") or "").lower()
-    final = str(r.url)
-    data = r.content[:max_bytes]
-    if "application/pdf" in ct or url.lower().split("?")[0].endswith(".pdf"):
+    if "application/pdf" in ct or current.lower().split("?")[0].endswith(".pdf"):
         text = _pdf_bytes_to_text(data)
         title = final.rstrip("/").rsplit("/", 1)[-1]
     elif "html" in ct or "xml" in ct or not ct:
-        enc = r.encoding or "utf-8"
         title, text = extract_main_text(data.decode(enc, "replace"))
     else:
         raise FetchError(f"неподдерживаемый content-type: {ct or '?'}")
