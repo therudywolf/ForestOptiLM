@@ -809,6 +809,12 @@ class NotebookUIMixin:
         deep_mode = {"Авто": "auto", "Вкл": "on", "Выкл": "off"}.get(
             self._nb_deep_var.get(), "auto")
         deep_depth = "fast" if self._nb_deep_depth_var.get() == "Быстро" else "full"
+        # Композер: если включён — финальный синтез ответа идёт на композер-модели
+        # (крупнее → богаче/вовлечённее ответ); аукс-вызовы остаются на chat-модели.
+        composer = (self._composer_model_var.get().strip()
+                    if bool(self._composer_use_var.get()) else "")
+        if composer.startswith("("):  # плейсхолдер «(нет моделей)» — не модель
+            composer = ""
         self._nb_chat_stop.clear()  # новый запрос → сбрасываем флаг отмены
         self._nb_set_busy(True, cancellable=True)  # чат можно прервать «Стоп»
         self._nb_set_status("🌐 Ищу в интернете…" if web else "Ищу в источниках и формирую ответ…")
@@ -854,7 +860,8 @@ class NotebookUIMixin:
                     result = loop.run_until_complete(
                         answer_question(
                             nb, question, base_url=base_url, api_key=api_key,
-                            chat_model=model, embedding_model=emb, api_mode=api_mode,
+                            chat_model=model, composer_model=composer,
+                            embedding_model=emb, api_mode=api_mode,
                             history=history,
                             on_log=lambda m: self._append_log_line(f"[NB chat] {m}", "general"),
                             stop_flag=self._nb_chat_stop.is_set,

@@ -272,6 +272,7 @@ def build_chat_messages(
     history_turns: int = 4,
     history_chars: int = 600,
     schema: str = "",
+    rich: bool = False,
 ) -> list[dict[str, str]]:
     """Собрать messages для call_llm: system + единый grounded user-промпт.
 
@@ -314,6 +315,15 @@ def build_chat_messages(
         "Напиши ровно "
         f"\"{REFUSAL_TEXT}\" только если фрагменты про совершенно другую тему."
     )
+    if rich:
+        # Композер-режим: просим развёрнутый, вовлечённый ответ (крупная модель
+        # это тянет). НЕ ослабляет заземление — только глубину раскрытия.
+        parts.append(
+            "Дай РАЗВЁРНУТЫЙ и связный ответ: раскрой ВСЕ относящиеся к вопросу "
+            "детали из фрагментов (не только верхнюю выжимку), сгруппируй по "
+            "смысловым блокам с подзаголовками, сопоставь фрагменты и сделай выводы "
+            "— но строго по источникам, без воды и без выдумок."
+        )
     user = "\n\n".join(parts)
     return [
         {"role": "system", "content": system},
@@ -486,6 +496,7 @@ async def answer_question(
     base_url: str,
     api_key: str,
     chat_model: str,
+    composer_model: str = "",
     embedding_model: str = "",
     api_mode: str = "native",
     top_k: int = 16,
@@ -547,6 +558,36 @@ async def answer_question(
             _stopped,
         )
 
+    # Композер: для ФИНАЛЬНОГО синтеза (простой ответ + deep-reduce) используем
+    # более крупную композер-модель, если она задана — богаче/вовлечённее ответ;
+    # дешёвые вспом-вызовы (expansion/rerank/deep-map) остаются на быстрой chat_model.
+    synth_model = (composer_model or "").strip() or chat_model
+
+    async def _synth(msgs: list[dict[str, str]], max_tokens: int) -> str:
+        return await _await_with_stop(
+            call_llm(msgs, synth_model, base_url, api_key, semaphore,
+                     max_tokens=max_tokens, api_mode=api_mode, prefer_reasoning_off=True),
+            _stopped,
+        )
+
+    async def _synth_stream(msgs: list[dict[str, str]], max_tokens: int) -> str:
+        from processor import call_llm_stream
+        return await _await_with_stop(
+            call_llm_stream(msgs, synth_model, base_url, api_key,
+                            max_tokens=max_tokens, api_mode=api_mode,
+                            on_token=on_token, stop_flag=_stopped),
+            _stopped,
+        )
+
+    # Композер активен → РАСШИРЯЕМ контекст и вовлечённость ответа: больше
+    # извлечённых фрагментов в синтез + больше места под развёрнутый ответ
+    # (крупная модель это тянет; на быстрой chat-модели значения не трогаем).
+    using_composer = synth_model != chat_model
+    if using_composer:
+        top_k = max(top_k, 24)
+        max_context_tokens = max(max_context_tokens, 16000)
+        max_answer_tokens = max(max_answer_tokens, 3000)
+
     def _retrieve(q: str, k: int | None = None) -> list[Any]:
         return notebook.query(q, base_url=base_url, api_key=api_key,
                               embedding_model=embedding_model, top_k=k or top_k)
@@ -563,6 +604,8 @@ async def answer_question(
             res = await _run_deep_analysis(
                 notebook, question, _llm=_llm, _retrieve=_retrieve,
                 _llm_stream=(_llm_stream if on_token else None),
+                _reduce_llm=_synth,  # финальный reduce — на композер-модели
+                _reduce_llm_stream=(_synth_stream if on_token else None),
                 stopped=_stopped, log=_log, cancelled=_cancelled_result,
                 chat_model=chat_model, on_token=on_token,
                 max_context_tokens=max_context_tokens, max_answer_tokens=max_answer_tokens,
@@ -637,7 +680,8 @@ async def answer_question(
         return _cancelled_result(contexts)
 
     schema = str(getattr(notebook, "schema", "") or "")
-    messages = build_chat_messages(question, contexts, history, schema=schema)
+    messages = build_chat_messages(question, contexts, history, schema=schema,
+                                   rich=using_composer)
 
     raw: str | None = None
     # C4: потоковый вывод. Стрим идёт по openai-совместимому пути (LM Studio его
@@ -651,7 +695,7 @@ async def answer_question(
             # ждал бы read-timeout). stop_flag внутри тоже проверяется по-строчно.
             raw = await _await_with_stop(
                 call_llm_stream(
-                    messages, chat_model, base_url, api_key,
+                    messages, synth_model, base_url, api_key,
                     max_tokens=max_answer_tokens, api_mode=api_mode,
                     on_token=on_token, stop_flag=_stopped,
                 ),
@@ -672,7 +716,7 @@ async def answer_question(
             raw = await _await_with_stop(
                 call_llm(
                     messages,
-                    chat_model,
+                    synth_model,
                     base_url,
                     api_key,
                     semaphore,
@@ -732,6 +776,8 @@ async def _run_deep_analysis(
     _llm: Callable[[list[dict[str, str]], int], Any],
     _retrieve: Callable[..., list[Any]],
     _llm_stream: Callable[[list[dict[str, str]], int], Any] | None = None,
+    _reduce_llm: Callable[[list[dict[str, str]], int], Any] | None = None,
+    _reduce_llm_stream: Callable[[list[dict[str, str]], int], Any] | None = None,
     stopped: Callable[[], bool],
     log: Callable[[str], None],
     cancelled: Callable[[list[ContextItem]], ChatResult],
@@ -860,17 +906,21 @@ async def _run_deep_analysis(
 
     log(f"deep: финальный reduce из {len(summaries)} выжимок")
     reduce_msgs = _da.build_reduce_messages(question, summaries, schema=schema)
+    # Финальный синтез — на композер-модели (богаче), если она передана; map/merge
+    # выше остаются на быстрой chat_model. Фолбэк на обычный _llm при отсутствии.
+    reduce_llm = _reduce_llm or _llm
+    reduce_llm_stream = _reduce_llm_stream or _llm_stream
     try:
         # Финал стримим в пузырь (если есть on_token-канал); сбой стрима → обычный.
-        if _llm_stream is not None:
+        if reduce_llm_stream is not None:
             try:
-                raw = await _llm_stream(reduce_msgs, max_answer_tokens)
+                raw = await reduce_llm_stream(reduce_msgs, max_answer_tokens)
             except ChatCancelled:
                 raise
             except Exception:  # noqa: BLE001
-                raw = await _llm(reduce_msgs, max_answer_tokens)
+                raw = await reduce_llm(reduce_msgs, max_answer_tokens)
         else:
-            raw = await _llm(reduce_msgs, max_answer_tokens)
+            raw = await reduce_llm(reduce_msgs, max_answer_tokens)
     except ChatCancelled:
         raise
     answer = (raw or "").strip()

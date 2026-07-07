@@ -141,6 +141,15 @@ class TestPureFunctions(unittest.TestCase):
         self.assertTrue(nc.is_refusal(nc.REFUSAL_TEXT))
         self.assertFalse(nc.is_refusal("Это полноценный ответ [1] с цитатой."))
 
+    def test_build_chat_messages_rich_adds_thoroughness(self) -> None:
+        from notebook_chat import ContextItem
+        ctx = [ContextItem(n=1, source_path="a.txt", display="a", text="факт")]
+        plain = nc.build_chat_messages("q", ctx)[1]["content"]
+        rich = nc.build_chat_messages("q", ctx, rich=True)[1]["content"]
+        self.assertNotIn("РАЗВЁРНУТЫЙ", plain)          # обычный режим — без наддува
+        self.assertIn("РАЗВЁРНУТЫЙ", rich)              # композер-режим — просим глубже
+        self.assertIn("без выдумок", rich)             # заземление не ослаблено
+
     def test_looks_like_leaked_reasoning(self) -> None:
         # Реальные протёкшие CoT e2b (по eval): начинаются с мета-рассуждения.
         self.assertTrue(nc.looks_like_leaked_reasoning(
@@ -474,6 +483,22 @@ class TestStreamingChat(unittest.TestCase):
                 on_token=tokens.append))
         self.assertEqual("".join(tokens), "Это ответ [1].")
         self.assertEqual([c["n"] for c in res.citations], [1])
+
+    def test_composer_model_used_for_final_synthesis(self) -> None:
+        # При заданном composer_model финальный синтез идёт на нём, а не на chat.
+        nb = _FakeNotebook([_Hit("grounding", "C:/x/a.txt")])
+        used: dict[str, str] = {}
+
+        async def fake_stream(messages, model, base_url, api_key, *, on_token, **kw):
+            used["model"] = model
+            on_token("ответ [1].")
+            return "ответ [1]."
+
+        with mock.patch("processor.call_llm_stream", new=fake_stream):
+            asyncio.run(nc.answer_question(
+                nb, "q", base_url="u", api_key="", chat_model="chat-12b",
+                composer_model="composer-26b", api_mode="openai", on_token=lambda _t: None))
+        self.assertEqual(used["model"], "composer-26b")
 
     def test_falls_back_to_call_llm_when_stream_errors(self) -> None:
         nb = _FakeNotebook([_Hit("grounding", "C:/x/a.txt")])
