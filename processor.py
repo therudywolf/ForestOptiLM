@@ -1240,27 +1240,40 @@ def _strip_think_blocks(text: str) -> str:
 _THINK_BLOCK_RE = re.compile(r"(?is)<(think|thinking)>.*?</\1>")
 
 
-def parse_sse_delta(line: str) -> str | None:
-    """Достать кусок текста из одной SSE-строки OpenAI-стрима (``data: {...}``).
+def _parse_sse_obj(line: str) -> tuple[str | None, str | None] | None:
+    """Разобрать одну SSE-строку OpenAI-стрима → ``(content, finish_reason)``.
 
-    Возвращает delta-content (может быть пустой строкой), ``None`` если строка не
-    несёт контента (пустая, не data:, [DONE], битый JSON, нет delta)."""
+    ``None`` если строка не несёт данных (пустая, не ``data:``, битый JSON).
+    ``[DONE]`` возвращает ``(None, "[DONE]")`` — сигнал штатного завершения.
+    ``finish_reason`` (``stop``/``length``/…) означает, что модель ЗАКОНЧИЛА
+    ответ (а не сервер оборвал соединение посреди генерации)."""
     if not line:
         return None
     line = line.strip()
     if not line.startswith("data:"):
         return None
     data = line[len("data:"):].strip()
-    if not data or data == "[DONE]":
+    if not data:
         return None
+    if data == "[DONE]":
+        return (None, "[DONE]")
     try:
         obj = json.loads(data)
         choice = (obj.get("choices") or [{}])[0]
         delta = choice.get("delta") or {}
         content = delta.get("content")
-        return content if isinstance(content, str) else None
+        content = content if isinstance(content, str) else None
+        finish = choice.get("finish_reason")
+        finish = finish if isinstance(finish, str) else None
+        return (content, finish)
     except Exception:
         return None
+
+
+def parse_sse_delta(line: str) -> str | None:
+    """Достать кусок текста из одной SSE-строки (обёртка над ``_parse_sse_obj``)."""
+    parsed = _parse_sse_obj(line)
+    return parsed[0] if parsed else None
 
 
 async def call_llm_stream(
@@ -1295,23 +1308,36 @@ async def call_llm_stream(
     # (а не висит до 600с) → стрим упадёт и вызывающий откатится на call_llm.
     timeout_cfg = httpx.Timeout(connect=15.0, read=120.0, write=30.0, pool=15.0)
     parts: list[str] = []
+    finished = False  # видели ли штатное завершение (finish_reason / [DONE])
+    stopped = False   # пользователь нажал «Стоп»
     async with httpx.AsyncClient(timeout=timeout_cfg) as client:
         async with client.stream("POST", endpoint, json=payload, headers=headers) as r:
             r.raise_for_status()
             async for line in r.aiter_lines():
                 if stop_flag and stop_flag():
+                    stopped = True
                     break
-                delta = parse_sse_delta(line)
-                if not delta:
+                parsed = _parse_sse_obj(line)
+                if parsed is None:
                     continue
-                parts.append(delta)
-                try:
-                    on_token(delta)
-                except Exception:
-                    pass
+                content, finish = parsed
+                if content:
+                    parts.append(content)
+                    try:
+                        on_token(content)
+                    except Exception:
+                        pass
+                if finish:  # "stop"/"length"/"[DONE]" — модель закончила сама
+                    finished = True
     full = _strip_think_blocks("".join(parts))
     if not full.strip():
         raise RuntimeError("Model returned empty content (stream)")
+    # Сервер оборвал поток ДО штатного finish_reason (обрыв соединения, выгрузка
+    # модели в low-VRAM, таймаут) → ответ НЕПОЛНЫЙ (напр. «В источниках …» на 12
+    # символов). Роняем, чтобы вызывающий откатился на надёжный не-стрим call_llm
+    # и выдал ПОЛНЫЙ ответ. НЕ считаем обрывом пользовательский «Стоп».
+    if not finished and not stopped:
+        raise RuntimeError("stream truncated before finish_reason")
     return full
 
 

@@ -405,6 +405,58 @@ class TestSSEParse(unittest.TestCase):
         self.assertIsNone(processor.parse_sse_delta("data: not-json"))
         self.assertIsNone(processor.parse_sse_delta('data: {"choices":[{"delta":{}}]}'))
 
+    def test_parse_sse_obj_extracts_content_and_finish(self) -> None:
+        # новый парсер отдаёт (content, finish_reason) — для детекции обрыва потока
+        import processor as p
+        self.assertEqual(p._parse_sse_obj('data: {"choices":[{"delta":{"content":"Привет"}}]}'),
+                         ("Привет", None))
+        # финальный чанк со stop — модель закончила сама
+        self.assertEqual(p._parse_sse_obj('data: {"choices":[{"delta":{},"finish_reason":"stop"}]}'),
+                         (None, "stop"))
+        self.assertEqual(p._parse_sse_obj("data: [DONE]"), (None, "[DONE]"))
+        self.assertIsNone(p._parse_sse_obj(": keep-alive"))
+        self.assertIsNone(p._parse_sse_obj("data: not-json"))
+
+
+class TestStreamTruncationDetection(unittest.TestCase):
+    """Обрыв SSE-потока (сервер закрыл соединение до finish_reason) → call_llm_stream
+    роняет исключение, чтобы вызывающий откатился на надёжный call_llm. Это чинит
+    12-символьные «В источниках …» ответы (недопринятый стрим)."""
+
+    def _run(self, lines):
+        import processor as p
+
+        class FakeResp:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            def raise_for_status(self): pass
+            async def aiter_lines(self):
+                for ln in lines:
+                    yield ln
+
+        class FakeClient:
+            def __init__(self, *a, **k): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            def stream(self, *a, **k): return FakeResp()
+
+        with mock.patch("processor.httpx.AsyncClient", FakeClient):
+            return asyncio.run(p.call_llm_stream([], "m", "u", "", on_token=lambda _t: None))
+
+    def test_complete_stream_ok(self) -> None:
+        out = self._run([
+            'data: {"choices":[{"delta":{"content":"Полный "}}]}',
+            'data: {"choices":[{"delta":{"content":"ответ."}}]}',
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+            "data: [DONE]",
+        ])
+        self.assertEqual(out, "Полный ответ.")
+
+    def test_truncated_stream_raises(self) -> None:
+        # соединение оборвано после пары токенов — НЕТ finish_reason/[DONE]
+        with self.assertRaises(RuntimeError):
+            self._run(['data: {"choices":[{"delta":{"content":"В источниках "}}]}'])
+
 
 class TestStreamingChat(unittest.TestCase):
     def test_streams_on_openai_and_calls_on_token(self) -> None:
