@@ -101,8 +101,14 @@ def fuse_to_ids(vec_ranked, bm_ranked, *, k: int = 60, score_weight: float = 1.0
 async def generate(nb, question: str, *, base_url: str, api_key: str, chat_model: str,
                    embedding_model: str, enhanced: bool = False, deep_mode: str = "off",
                    deep_depth: str = "full", top_k: int = 16,
-                   max_answer_tokens: int = 1500) -> dict:
-    """Полный grounded-ответ проекта (ТРЕБУЕТ сервер). Возвращает dict для судьи."""
+                   max_answer_tokens: int = 1500,
+                   recover_on_refusal: bool = True) -> dict:
+    """Полный grounded-ответ проекта (ТРЕБУЕТ сервер). Возвращает dict для судьи.
+
+    ``recover_on_refusal`` — рубильник второго прохода при отказе (refusal-recovery):
+    гоняй набор с True и с False и сравни, чтобы измерить эффект на factoid
+    over-refusal (крупнейший драйвер потерь). Генерация детерминирована → чистый A/B.
+    """
     _ensure_repo_on_path()
     from notebook_chat import answer_question
     res = await answer_question(
@@ -110,6 +116,7 @@ async def generate(nb, question: str, *, base_url: str, api_key: str, chat_model
         embedding_model=embedding_model, api_mode="native", top_k=top_k,
         max_answer_tokens=max_answer_tokens, enhanced=enhanced,
         deep_mode=deep_mode, deep_depth=deep_depth,
+        recover_on_refusal=recover_on_refusal,
     )
     # Сохраняем и САМИ извлечённые контексты: чтобы судья оценивал grounding по
     # ТОМУ, что видел ответ (а не по чужой референс-выжимке) — иначе широкий gather
@@ -126,6 +133,7 @@ async def generate(nb, question: str, *, base_url: str, api_key: str, chat_model
     return {
         "answer": res.answer,
         "refused": bool(res.refused),
+        "recovered": bool(res.extra.get("recovered")),
         "model": res.model,
         "n_citations": len(res.citations),
         "n_contexts": len(res.contexts),

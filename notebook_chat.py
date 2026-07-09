@@ -331,6 +331,66 @@ def build_chat_messages(
     ]
 
 
+# Второй проход при отказе (refusal-recovery). По данным eval (tools/eval/
+# FINDINGS.md) крупнейший драйвер потерь — ЛОЖНЫЙ отказ на factoid-вопросах:
+# модель пишет «нет ответа», хотя нужный факт лежит в её же фрагментах. Этот
+# промпт запускается ТОЛЬКО когда обычный ответ оказался отказом при непустых
+# источниках: он запрещает отказ и заставляет модель извлечь всё релевантное,
+# сохраняя те же требования к заземлению ([N] + дословная проверяемость), чтобы
+# не разменять отказ на выдумку.
+RECOVERY_SYSTEM_PROMPT = (
+    "Ты — ассистент, который ИЗВЛЕКАЕТ из источников блокнота всё, что относится "
+    "к вопросу. Предыдущая попытка ответить закончилась отказом «нет ответа», хотя "
+    "во фрагментах ниже почти наверняка есть релевантные факты — их упустили.\n"
+    "Правила:\n"
+    "1. НЕ отказывай. В этом режиме фраза про «нет ответа» запрещена, если во "
+    "фрагментах есть хоть что-то относящееся к вопросу.\n"
+    "2. Пройди по КАЖДОМУ пронумерованному фрагменту и выпиши всё, что упоминает "
+    "любую сущность/термин/тему из вопроса — даже косвенно, со ссылкой [N].\n"
+    "3. Собери из этих фактов максимально прямой ответ. Если чего-то не хватает — "
+    "сначала дай, что есть (со ссылками [N]), затем ОДНОЙ фразой отметь, какой "
+    "именно детали в источниках нет.\n"
+    "4. Каждое число, название, параметр, порог и дата в ответе ДОЛЖНЫ дословно "
+    "присутствовать в том фрагменте, на который ты ссылаешься. Ничего не выдумывай: "
+    "лучше меньше фактов, но все со ссылкой [N] и 100% проверяемые.\n"
+    "5. Отвечай на языке вопроса, по делу, без описания своих размышлений."
+)
+
+
+def build_recovery_messages(
+    question: str,
+    contexts: list[ContextItem],
+    *,
+    schema: str = "",
+) -> list[dict[str, str]]:
+    """Собрать messages для восстановительного (анти-отказного) прохода: тот же
+    блок [Источники], но с извлекающим system-промптом, запрещающим отказ."""
+    system = RECOVERY_SYSTEM_PROMPT
+    s = schema.strip()[:2000]
+    if s:
+        system += "\n\n[Контекст домена этого блокнота]\n" + s
+    if contexts:
+        ctx_block = "\n\n".join(
+            f"[{c.n}] ({c.display})\n{_strip_headers(c.text)}" for c in contexts
+        )
+    else:
+        ctx_block = "(источники не найдены)"
+    user = "\n\n".join([
+        "[Источники]\n" + ctx_block,
+        "[Вопрос]\n" + question.strip(),
+        ("Извлеки из фрагментов выше ВСЁ, что относится к вопросу хотя бы косвенно, "
+         "и сформулируй ответ со ссылками [N] на использованные фрагменты. НЕ "
+         "отказывай и не пиши «нет ответа»: если прямого ответа нет — приведи "
+         "ближайшие связанные факты со ссылками и отметь одной фразой, чего именно "
+         "не хватает. Не придумывай цифры, названия и детали, которых нет в "
+         "цитируемом фрагменте."),
+    ])
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+
+
 def parse_used_citations(
     answer: str, contexts: list[ContextItem]
 ) -> list[dict[str, Any]]:
@@ -489,6 +549,51 @@ def append_grounding_caveat(
     return answer + note, ungrounded
 
 
+class _RefusalGate:
+    """Придерживает потоковый вывод, пока накопленный ответ короче порога отказа
+    (``is_refusal`` требует краткости) — то есть пока он ещё МОЖЕТ оказаться
+    отказом, который мы собираемся перегенерировать (refusal-recovery). Как только
+    длина превысила порог, отказом ответ уже не будет → сбрасываем придержанный
+    буфер в реальный sink и дальше пропускаем токены напрямую.
+
+    Если стрим закончился, не превысив порог, буфер остаётся у вызывающего: он сам
+    решит показать его (обычный короткий ответ / честный отказ) через ``flush()``
+    или подавить (запуская восстановительный проход начисто).
+    """
+
+    __slots__ = ("_sink", "_threshold", "_buf", "_len", "_open")
+
+    def __init__(self, sink: Callable[[str], None], threshold: int) -> None:
+        self._sink = sink
+        self._threshold = threshold
+        self._buf: list[str] = []
+        self._len = 0
+        self._open = False
+
+    def __call__(self, delta: str) -> None:
+        if self._open:
+            self._sink(delta)
+            return
+        self._buf.append(delta)
+        self._len += len(delta)
+        if self._len > self._threshold:
+            self.flush()
+
+    def flush(self) -> None:
+        """Сбросить придержанный буфер в sink и перейти в режим прямой передачи."""
+        if self._open:
+            return
+        self._open = True
+        if self._buf:
+            self._sink("".join(self._buf))
+            self._buf.clear()
+
+    @property
+    def emitted(self) -> bool:
+        """True, если хоть что-то уже ушло в реальный sink (буфер сброшен)."""
+        return self._open
+
+
 async def answer_question(
     notebook: Any,
     question: str,
@@ -510,6 +615,8 @@ async def answer_question(
     on_token: Callable[[str], None] | None = None,
     deep_mode: str = "off",
     deep_depth: str = "full",
+    recover_on_refusal: bool = True,
+    recovery_min_score: float = 0.0,
 ) -> ChatResult:
     """Полный цикл: retrieval по блокноту → grounded-ответ с цитатами.
 
@@ -684,11 +791,17 @@ async def answer_question(
                                    rich=using_composer)
 
     raw: str | None = None
+    # Гейт отказа: пока стрим короче порога отказа, придерживаем токены, чтобы
+    # ложный отказ, который мы собираемся перегенерировать (refusal-recovery), не
+    # мелькнул в пузыре и не был затем заменён — пользователь видит только финал.
+    gate: _RefusalGate | None = None
     # C4: потоковый вывод. Стрим идёт по openai-совместимому пути (LM Studio его
     # отдаёт и в native-режиме), кроме «точного поиска» (там свой много-вызовный
     # цикл). Любой сбой стрима → тихий откат на обычный call_llm.
     if on_token and not enhanced:
         from processor import call_llm_stream
+        gate = _RefusalGate(on_token, len(REFUSAL_TEXT) + 40) if recover_on_refusal else None
+        sink = gate if gate is not None else on_token
         try:
             # Оборачиваем в _await_with_stop: при «Стоп» задача отменяется и рвёт
             # in-flight стрим даже если модель зависла между токенами (иначе Стоп
@@ -697,7 +810,7 @@ async def answer_question(
                 call_llm_stream(
                     messages, synth_model, base_url, api_key,
                     max_tokens=max_answer_tokens, api_mode=api_mode,
-                    on_token=on_token, stop_flag=_stopped,
+                    on_token=sink, stop_flag=_stopped,
                 ),
                 _stopped,
             )
@@ -706,12 +819,11 @@ async def answer_question(
         except Exception as exc:  # noqa: BLE001
             _log(f"стриминг недоступен, обычный режим: {exc}")
             raw = None
+            gate = None  # откат на не-стрим путь: гейт больше не участвует
         if _stopped():
             return _cancelled_result(contexts)
 
-    if raw is not None:
-        pass  # получили ответ стримингом
-    else:
+    if raw is None:
         try:
             raw = await _await_with_stop(
                 call_llm(
@@ -745,6 +857,8 @@ async def answer_question(
             raise
     answer = (raw or "").strip()
     if looks_like_leaked_reasoning(answer):
+        if gate is not None:
+            gate.flush()  # придержанное показать (финальный рендер всё равно заменит)
         return ChatResult(
             answer=LEAKED_REASONING_TEXT,
             citations=[],
@@ -754,11 +868,56 @@ async def answer_question(
             extra={"leaked_reasoning": True, "raw_answer": answer[:2000]},
         )
     refused = is_refusal(answer)
+
+    # Refusal-recovery (второй проход). Отказ при НЕПУСТЫХ фрагментах — крупнейший
+    # драйвер потерь по данным eval (tools/eval/FINDINGS.md): модель пишет «нет
+    # ответа», хотя факт лежит в её же фрагментах. Делаем ОДИН строгий извлекающий
+    # проход и принимаем его ТОЛЬКО если он не отказ, не протёкший CoT и заземлён
+    # (есть хоть одна цитата [N]); иначе честный отказ остаётся. Легитимный отказ
+    # (источники совсем про другое) переживает: повтор тоже откажет/не заземлится.
+    recovered = False
+    if (refused and recover_on_refusal and contexts and not _stopped()
+            and float(getattr(contexts[0], "score", 0.0) or 0.0) >= recovery_min_score):
+        _log("refusal-recovery: отказ при непустых источниках → извлекающий проход")
+        rec_msgs = build_recovery_messages(question, contexts, schema=schema)
+        rec_answer = ""
+        try:
+            # Первый (отказной) вывод в пузырь не попал (гейт придержал буфер) →
+            # стримим восстановительный ответ начисто. Если гейт уже сбросил буфер
+            # (крайний случай) или это путь без стрима — берём ответ без стрима.
+            if gate is not None and not gate.emitted:
+                rec_answer = (await _synth_stream(rec_msgs, max_answer_tokens) or "").strip()
+            else:
+                rec_answer = (await _synth(rec_msgs, max_answer_tokens) or "").strip()
+        except ChatCancelled:
+            return _cancelled_result(contexts)
+        except Exception as exc:  # noqa: BLE001
+            _log(f"refusal-recovery пропущен: {exc}")
+        if _stopped():
+            # call_llm_stream при «Стоп» ВОЗВРАЩАЕТ частичный текст (не бросает),
+            # поэтому _await_with_stop мог не поднять ChatCancelled — как на
+            # основном стрим-пути, добираем проверку здесь (иначе остановленный
+            # ход отрисовался бы и осел в истории).
+            return _cancelled_result(contexts)
+        if (rec_answer and not is_refusal(rec_answer)
+                and not looks_like_leaked_reasoning(rec_answer)
+                and parse_used_citations(rec_answer, contexts)):
+            answer, refused, recovered = rec_answer, False, True
+        # Повтор не принят → остаётся исходный честный отказ (уже в `answer`). Буфер
+        # гейта НЕ сбрасываем: отклонённый повтор мог уже уйти в поток, а финальный
+        # рендер покажет отказ из ChatResult — так двойного текста не будет.
+    elif gate is not None and not gate.emitted:
+        gate.flush()  # обычный короткий ответ уместился в буфер — показать его
+
     ungrounded: list[str] = []
     if not refused:  # B1: пометить незаземлённые специфичные токены (не переписывая)
         answer, ungrounded = append_grounding_caveat(answer, contexts)
     used = parse_used_citations(answer, contexts)
-    extra = {"ungrounded": ungrounded} if ungrounded else {}
+    extra: dict[str, Any] = {}
+    if ungrounded:
+        extra["ungrounded"] = ungrounded
+    if recovered:
+        extra["recovered"] = True
     return ChatResult(
         answer=answer,
         citations=used,

@@ -141,6 +141,54 @@ class TestPureFunctions(unittest.TestCase):
         self.assertTrue(nc.is_refusal(nc.REFUSAL_TEXT))
         self.assertFalse(nc.is_refusal("Это полноценный ответ [1] с цитатой."))
 
+    def test_build_recovery_messages_forbids_refusal(self) -> None:
+        ctx = nc.select_contexts([_Hit("важный факт про X", "C:/x/a.txt")], max_tokens=1000)
+        msgs = nc.build_recovery_messages("что известно про X?", ctx, schema="домен: X")
+        self.assertEqual(msgs[0]["role"], "system")
+        self.assertIn("НЕ отказывай", msgs[0]["content"])       # анти-отказный промпт
+        self.assertIn("[Источники]", msgs[1]["content"])
+        self.assertIn("[1]", msgs[1]["content"])                # фрагменты пронумерованы
+        self.assertIn("что известно про X?", msgs[1]["content"])
+        self.assertIn("домен: X", msgs[0]["content"])           # схема прокинута
+
+    def test_build_recovery_messages_no_schema_block_when_empty(self) -> None:
+        ctx = nc.select_contexts([_Hit("факт", "C:/x/a.txt")], max_tokens=1000)
+        msgs = nc.build_recovery_messages("q", ctx, schema="   ")
+        self.assertNotIn("Контекст домена", msgs[0]["content"])
+
+
+class TestRefusalGate(unittest.TestCase):
+    """Гейт придерживает стрим, пока он ещё может оказаться отказом."""
+
+    def test_buffers_until_threshold_then_passthrough(self) -> None:
+        out: list[str] = []
+        g = nc._RefusalGate(out.append, threshold=10)
+        g("12345")                       # 5 символов — придержано
+        self.assertEqual(out, [])
+        self.assertFalse(g.emitted)
+        g("678901")                      # всего 11 > 10 → сброс буфера
+        self.assertTrue(g.emitted)
+        self.assertEqual("".join(out), "12345678901")
+        g("+ещё")                        # дальше — напрямую
+        self.assertEqual("".join(out), "12345678901+ещё")
+
+    def test_manual_flush_emits_buffer(self) -> None:
+        out: list[str] = []
+        g = nc._RefusalGate(out.append, threshold=100)
+        g("короткий ответ")
+        self.assertEqual(out, [])         # под порогом — придержано
+        g.flush()
+        self.assertEqual("".join(out), "короткий ответ")
+        self.assertTrue(g.emitted)
+
+    def test_flush_when_empty_is_noop_then_passthrough(self) -> None:
+        out: list[str] = []
+        g = nc._RefusalGate(out.append, threshold=100)
+        g.flush()                        # буфер пуст — ничего не эмитим
+        self.assertEqual(out, [])
+        g("x")
+        self.assertEqual(out, ["x"])     # уже открыт → напрямую
+
     def test_build_chat_messages_rich_adds_thoroughness(self) -> None:
         from notebook_chat import ContextItem
         ctx = [ContextItem(n=1, source_path="a.txt", display="a", text="факт")]
@@ -398,6 +446,144 @@ class TestAnswerQuestion(unittest.TestCase):
         self.assertEqual([c["n"] for c in res.citations], [1])
         self.assertEqual(len(res.contexts), 1)
         self.assertEqual(nb.last_query, "что такое xz?")
+
+
+class TestRefusalRecovery(unittest.TestCase):
+    """Второй проход при ложном отказе (крупнейший драйвер потерь по eval).
+    Отказ при непустых источниках → строгий извлекающий проход; принимаем его
+    только если он заземлён, иначе честный отказ остаётся."""
+
+    def test_recovers_false_refusal(self) -> None:
+        nb = _FakeNotebook([_Hit("multi-account spray с одного IP", "C:/x/a.txt", chunk_id="c1")])
+        calls = {"first": 0, "recovery": 0}
+
+        async def dispatch(messages, model, base_url, api_key, semaphore, **kw):
+            if "ИЗВЛЕКАЕТ" in messages[0]["content"]:
+                calls["recovery"] += 1
+                return "Есть связанные факты: multi-account spray [1]."
+            calls["first"] += 1
+            return nc.REFUSAL_TEXT
+
+        with mock.patch("processor.call_llm", new=dispatch):
+            res = asyncio.run(nc.answer_question(
+                nb, "был ли перебор аккаунтов?", base_url="u", api_key="", chat_model="m"))
+        self.assertEqual(calls, {"first": 1, "recovery": 1})
+        self.assertFalse(res.refused)
+        self.assertTrue(res.extra.get("recovered"))
+        self.assertEqual([c["n"] for c in res.citations], [1])
+
+    def test_keeps_refusal_when_retry_also_refuses(self) -> None:
+        # Легитимный отказ (источники реально не про это): повтор тоже отказывает
+        # → сохраняем честный «нет ответа», не выдумываем.
+        nb = _FakeNotebook([_Hit("рецепт борща", "C:/x/a.txt", chunk_id="c1")])
+
+        async def dispatch(messages, model, base_url, api_key, semaphore, **kw):
+            return nc.REFUSAL_TEXT  # обе попытки отказ
+
+        with mock.patch("processor.call_llm", new=dispatch):
+            res = asyncio.run(nc.answer_question(
+                nb, "какие CVE в проекте?", base_url="u", api_key="", chat_model="m"))
+        self.assertTrue(res.refused)
+        self.assertEqual(res.answer, nc.REFUSAL_TEXT)
+        self.assertFalse(res.extra.get("recovered"))
+
+    def test_keeps_refusal_when_retry_ungrounded(self) -> None:
+        # Повтор что-то написал, но БЕЗ ссылок [N] (не заземлён) → не принимаем.
+        nb = _FakeNotebook([_Hit("какой-то текст", "C:/x/a.txt", chunk_id="c1")])
+
+        async def dispatch(messages, model, base_url, api_key, semaphore, **kw):
+            if "ИЗВЛЕКАЕТ" in messages[0]["content"]:
+                return "Общие рассуждения без единой ссылки на фрагмент."
+            return nc.REFUSAL_TEXT
+
+        with mock.patch("processor.call_llm", new=dispatch):
+            res = asyncio.run(nc.answer_question(
+                nb, "вопрос", base_url="u", api_key="", chat_model="m"))
+        self.assertTrue(res.refused)
+        self.assertFalse(res.extra.get("recovered"))
+
+    def test_no_recovery_when_disabled(self) -> None:
+        # Флаг recover_on_refusal=False (базовая ветка A/B) → второго прохода нет.
+        nb = _FakeNotebook([_Hit("релевантный факт", "C:/x/a.txt", chunk_id="c1")])
+        calls = {"n": 0}
+
+        async def dispatch(messages, model, base_url, api_key, semaphore, **kw):
+            calls["n"] += 1
+            return nc.REFUSAL_TEXT
+
+        with mock.patch("processor.call_llm", new=dispatch):
+            res = asyncio.run(nc.answer_question(
+                nb, "вопрос", base_url="u", api_key="", chat_model="m",
+                recover_on_refusal=False))
+        self.assertTrue(res.refused)
+        self.assertEqual(calls["n"], 1)  # ровно одна попытка
+
+    def test_streaming_refusal_suppressed_recovery_streamed(self) -> None:
+        # Ключевой UX-инвариант: ложный отказ НЕ мелькает в пузыре — гейт
+        # придерживает его, а в поток уходит только восстановительный ответ.
+        nb = _FakeNotebook([_Hit("нужный факт про интеграции", "C:/x/a.txt", chunk_id="c1")])
+        tokens: list[str] = []
+
+        async def fake_stream(messages, model, base_url, api_key, *, on_token, **kw):
+            if "ИЗВЛЕКАЕТ" in messages[0]["content"]:      # восстановительный проход
+                for t in ["Вот ", "что ", "нашлось [1]."]:
+                    on_token(t)
+                return "Вот что нашлось [1]."
+            for ch in nc.REFUSAL_TEXT:                      # первый проход: отказ
+                on_token(ch)
+            return nc.REFUSAL_TEXT
+
+        with mock.patch("processor.call_llm_stream", new=fake_stream):
+            res = asyncio.run(nc.answer_question(
+                nb, "какие интеграции?", base_url="u", api_key="", chat_model="m",
+                api_mode="openai", on_token=tokens.append))
+        # В пузырь ушёл ТОЛЬКО восстановительный ответ, отказ подавлен.
+        self.assertEqual("".join(tokens), "Вот что нашлось [1].")
+        self.assertNotIn("нет ответа", "".join(tokens))
+        self.assertFalse(res.refused)
+        self.assertTrue(res.extra.get("recovered"))
+        self.assertEqual([c["n"] for c in res.citations], [1])
+
+    def test_stop_during_recovery_stream_is_cancelled(self) -> None:
+        # call_llm_stream при «Стоп» ВОЗВРАЩАЕТ частичный текст (не бросает), значит
+        # _await_with_stop мог не поднять ChatCancelled. Остановка во время
+        # восстановительного прохода должна дать cancelled, а не отрисованный ответ.
+        nb = _FakeNotebook([_Hit("релевантный факт", "C:/x/a.txt", chunk_id="c1")])
+        stop = {"v": False}
+
+        async def fake_stream(messages, model, base_url, api_key, *,
+                              on_token, stop_flag=None, **kw):
+            if "ИЗВЛЕКАЕТ" in messages[0]["content"]:
+                stop["v"] = True                 # «Стоп» нажат во время восстановления
+                on_token("частичный ")
+                return "частичный [1]"           # частичный ответ, без исключения
+            for ch in nc.REFUSAL_TEXT:
+                on_token(ch)
+            return nc.REFUSAL_TEXT
+
+        with mock.patch("processor.call_llm_stream", new=fake_stream):
+            res = asyncio.run(nc.answer_question(
+                nb, "вопрос", base_url="u", api_key="", chat_model="m", api_mode="openai",
+                on_token=lambda _t: None, stop_flag=lambda: stop["v"]))
+        self.assertTrue(res.extra.get("cancelled"))
+        self.assertEqual(res.answer, nc.CANCELLED_TEXT)
+
+    def test_recovery_below_score_floor_keeps_refusal(self) -> None:
+        # recovery_min_score выше скора топ-фрагмента → материал считаем слабым,
+        # честный отказ не трогаем.
+        nb = _FakeNotebook([_Hit("слабо релевантно", "C:/x/a.txt", chunk_id="c1", score=0.1)])
+        calls = {"n": 0}
+
+        async def dispatch(messages, model, base_url, api_key, semaphore, **kw):
+            calls["n"] += 1
+            return nc.REFUSAL_TEXT
+
+        with mock.patch("processor.call_llm", new=dispatch):
+            res = asyncio.run(nc.answer_question(
+                nb, "вопрос", base_url="u", api_key="", chat_model="m",
+                recovery_min_score=0.5))
+        self.assertTrue(res.refused)
+        self.assertEqual(calls["n"], 1)  # порог не пройден → без второго прохода
 
 
 class TestSSEParse(unittest.TestCase):
