@@ -56,22 +56,11 @@ hiddenimports += ["app_version"]        # версия для сайдбара (
 hiddenimports += ["md_render"]          # markdown→plain для чат-пузыря (импорт в notebook_gui)
 # веб-стек (W1–W5): импортится в notebook_gui; перечисляем явно на всякий случай
 hiddenimports += ["web_search", "web_fetch", "web_import", "deep_research"]
-# faiss грузит swigfaiss_avx2 условно (try/except) → PyInstaller его пропускает,
-# в exe остаётся только базовый swigfaiss (медленнее + ModuleNotFoundError в лог).
-# hiddenimports НЕ помогли (analysis не резолвит .pyd из try/except). Копируем
-# нативные модули faiss ЯВНО по пути с диска сборки — надёжнее всего.
-hiddenimports += ["faiss.swigfaiss", "faiss._swigfaiss",
-                  "faiss.swigfaiss_avx2", "faiss._swigfaiss_avx2"]
-try:
-    import glob as _glob
-    import os as _os
-    import faiss as _faiss
-    _faiss_dir = _os.path.dirname(_faiss.__file__)
-    for _f in _glob.glob(_os.path.join(_faiss_dir, "*swigfaiss*")):
-        if _f.lower().endswith((".pyd", ".so", ".dylib", ".dll")):
-            binaries += [(_f, "faiss")]  # положить рядом с faiss/ в бандле
-except Exception:
-    pass
+# faiss-cpu на PyPI НЕ содержит swigfaiss_avx2 в CI-колесе → faiss на старте
+# логирует INFO «Could not load ... AVX2» и откатывается на базовый swigfaiss
+# (retrieval работает, просто без AVX2). Бандлить нечего; шум в логе гасим в
+# main.py (logging.getLogger("faiss") → WARNING). collect_all("faiss") выше уже
+# кладёт то, что реально есть в колесе.
 try:
     datas += copy_metadata("tiktoken")
 except Exception:

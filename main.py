@@ -79,6 +79,12 @@ logging.basicConfig(
     stream=sys.stdout,
 )
 
+# faiss на старте пишет INFO «Could not load ... AVX2 ... ModuleNotFoundError»
+# (PyPI-колесо без AVX2 → откат на базовый swigfaiss, retrieval работает). Это не
+# ошибка, но в логе выглядит пугающе — глушим до WARNING (до import faiss).
+logging.getLogger("faiss").setLevel(logging.WARNING)
+logging.getLogger("faiss.loader").setLevel(logging.WARNING)
+
 
 def main() -> None:
     _frozen_bootstrap()
