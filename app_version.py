@@ -12,4 +12,4 @@ pyproject.toml) и Windows-ресурс (scripts/version_info.txt) держим 
 """
 from __future__ import annotations
 
-APP_VERSION = "0.7.0-beta.28"
+APP_VERSION = "0.7.0-beta.29"
