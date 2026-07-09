@@ -53,8 +53,19 @@ hiddenimports += ["retrieval_enhance"]  # лениво импортится в n
 hiddenimports += ["notebook_wiki"]      # лениво импортится в notebook_gui (компиляция вики)
 hiddenimports += ["md3"]                # MD3-тема, импортится в gui.py/notebook_gui.py
 hiddenimports += ["app_version"]        # версия для сайдбара (ленивый импорт в gui.py)
+hiddenimports += ["md_render"]          # markdown→plain для чат-пузыря (импорт в notebook_gui)
 # веб-стек (W1–W5): импортится в notebook_gui; перечисляем явно на всякий случай
 hiddenimports += ["web_search", "web_fetch", "web_import", "deep_research"]
+# faiss грузит swigfaiss_avx2 условно (try/except) → PyInstaller его пропускает,
+# в exe остаётся только базовый swigfaiss (медленнее + ModuleNotFoundError в лог).
+# Форсим SWIG-варианты и их .pyd, чтобы AVX2 работал и лог был чистым.
+hiddenimports += ["faiss.swigfaiss", "faiss._swigfaiss",
+                  "faiss.swigfaiss_avx2", "faiss._swigfaiss_avx2"]
+try:
+    from PyInstaller.utils.hooks import collect_dynamic_libs
+    binaries += collect_dynamic_libs("faiss")
+except Exception:
+    pass
 try:
     datas += copy_metadata("tiktoken")
 except Exception:

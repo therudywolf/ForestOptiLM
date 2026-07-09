@@ -47,6 +47,7 @@ import customtkinter as ctk
 from tkinter import messagebox
 
 import deep_research
+import md_render
 import notebook_store as nbs
 import web_import
 from lmstudio_config import sanitize_for_log
@@ -835,7 +836,8 @@ class NotebookUIMixin:
                 stream_state["pending"] = False
                 try:
                     if thinking.winfo_exists():
-                        thinking._nb_label.configure(text=stream_state["text"])
+                        # чистим markdown на лету, чтобы и стриминг был читаемым
+                        thinking._nb_label.configure(text=md_render.to_plain(stream_state["text"]))
                         self._nb_scroll_chat_to_end()
                 except Exception:
                     pass
@@ -963,7 +965,10 @@ class NotebookUIMixin:
                               corner_radius=12)
         bubble.pack(fill="x", anchor="w")
         text_color = "white" if is_user else _md3.ON_SURFACE
-        lbl = ctk.CTkLabel(bubble, text=content, wraplength=560, justify="left",
+        # Ответ ассистента — чистим markdown (иначе `###`/`**`/`*` видны сырыми и
+        # некрасивы). Вопрос пользователя показываем как есть.
+        shown = content if (is_user or placeholder) else md_render.to_plain(content)
+        lbl = ctk.CTkLabel(bubble, text=shown, wraplength=560, justify="left",
                            text_color=text_color, anchor="w")
         lbl.pack(anchor="w", padx=12, pady=9, fill="x")
         outer._nb_label = lbl  # ссылка для инкрементального обновления при стриминге
