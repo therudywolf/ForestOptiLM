@@ -1,6 +1,6 @@
 [project]
 name = "forestoptilm"
-version = "0.7.0-beta.29"
+version = "0.7.0-beta.30"
 description = "Bulk async file processing through local LLMs (LM Studio)"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
